@@ -46,6 +46,7 @@ proc encodeMessage(message: Message): JsonNode =
 
 proc makeAnthropicProvider*(apiKey, model, endpoint: string,
                             timeoutSeconds = 300): AnthropicProvider =
+  discard model  # request.model is the live value; kept for call-site compat
   AnthropicProvider(name: "anthropic", apiKey: apiKey, endpoint: endpoint,
                     timeoutSeconds: timeoutSeconds)
 
@@ -95,10 +96,7 @@ method generate*(provider: AnthropicProvider,
     raiseProviderError("Anthropic request failed: " & e.msg, retryable = true)
   let raw = response.bodyStream.readAll()
   if response.code.int >= 400:
-    let detail = try:
-      parseJson(raw).getOrDefault("error").getOrDefault("message").getStr
-    except CatchableError:
-      raw
+    let detail = apiErrorMessage(raw)
     let code = response.code.int
     let overflow = code == 400 and isContextOverflow(detail)
     raiseProviderError("Anthropic API error (" & $code & "): " & detail,

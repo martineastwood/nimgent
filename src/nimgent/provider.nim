@@ -355,6 +355,13 @@ proc parseRetryAfter*(value: string): int =
   except ValueError:
     return 0
 
+proc apiErrorMessage*(raw: string): string =
+  ## `error.message` from an OpenAI-family JSON body; otherwise the raw text.
+  try:
+    result = parseJson(raw).getOrDefault("error").getOrDefault("message").getStr
+  except CatchableError:
+    result = raw
+
 proc raiseProviderError*(msg: string, overflow = false, retryable = false,
                          aborted = false, status = 0, retryAfterMs = 0) =
   let e = newException(ProviderError, msg)

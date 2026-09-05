@@ -5,6 +5,18 @@ from nimgent/openai import makeOpenAIProvider, makeHyperProvider, buildOpenAiBod
   buildChatBody, defaultOpenAiEndpoint, defaultOpenAiChatEndpoint,
   defaultHyperEndpoint
 
+proc withFixture(script: string, body: proc (port: int)) =
+  let fixturePath = getCurrentDir() / "tests" / script
+  var fixture = startProcess("python3", args = @[fixturePath],
+    options = {poUsePath, poStdErrToStdOut})
+  defer:
+    if fixture.running:
+      fixture.terminate()
+      discard fixture.waitForExit()
+    fixture.close()
+  body(parseInt(fixture.outputStream.readLine()))
+  check fixture.waitForExit() == 0
+
 suite "thinking options":
   test "maps effort, toggle, and max_tokens by provider":
     check thinkingOptions("openrouter", "high")["reasoning"]["effort"].getStr == "high"
@@ -29,6 +41,10 @@ suite "provider types":
     let req = ProviderRequest(model: "test", messages: @[userMessage("hi")])
     check req.wakeFd == -1
 
+  test "api error body prefers error.message":
+    check apiErrorMessage("""{"error":{"message":"nope"}}""") == "nope"
+    check apiErrorMessage("not-json") == "not-json"
+
   test "cache hit percent does not double-count inclusive prompt tokens":
     let openrouter = Usage(inputTokens: 10000, outputTokens: 1,
       cacheReadTokens: 9680, cacheReported: true)
@@ -46,36 +62,27 @@ suite "OpenRouter provider":
     check buf == "partial"
 
   test "generateStream emits deltas before the response finishes":
-    let fixturePath = getCurrentDir() / "tests" / "openrouter_stream_fixture.py"
-    var fixture = startProcess("python3", args = @[fixturePath],
-      options = {poUsePath, poStdErrToStdOut})
-    defer:
-      if fixture.running:
-        fixture.terminate()
-        discard fixture.waitForExit()
-      fixture.close()
-    let port = parseInt(fixture.outputStream.readLine())
-    let provider = makeOpenRouterProvider("fixture-key",
-      "http://127.0.0.1:" & $port, timeoutSeconds = 5)
-    var stamps: seq[float] = @[]
-    var pieces: seq[string] = @[]
-    let response = provider.generateStream(
-      ProviderRequest(model: "test", messages: @[userMessage("hi")],
-        maxTokens: 20),
-      proc (ev: StreamEvent): bool =
-        if ev.kind == seTextDelta:
-          stamps.add epochTime()
-          pieces.add ev.text
-        true)
-    check pieces == @["Hello", " world"]
-    check response.textContent == "Hello world"
-    check response.content[0].kind == ckThinking
-    check response.content[0].thinking == "planAplanB"
-    check "sig_s" in response.content[0].signature
-    check "planAplanB" in response.content[0].signature
-    check stamps.len == 2
-    check stamps[1] - stamps[0] >= 0.05
-    check fixture.waitForExit() == 0
+    withFixture("openrouter_stream_fixture.py") do (port: int):
+      let provider = makeOpenRouterProvider("fixture-key",
+        "http://127.0.0.1:" & $port, timeoutSeconds = 5)
+      var stamps: seq[float] = @[]
+      var pieces: seq[string] = @[]
+      let response = provider.generateStream(
+        ProviderRequest(model: "test", messages: @[userMessage("hi")],
+          maxTokens: 20),
+        proc (ev: StreamEvent): bool =
+          if ev.kind == seTextDelta:
+            stamps.add epochTime()
+            pieces.add ev.text
+          true)
+      check pieces == @["Hello", " world"]
+      check response.textContent == "Hello world"
+      check response.content[0].kind == ckThinking
+      check response.content[0].thinking == "planAplanB"
+      check "sig_s" in response.content[0].signature
+      check "planAplanB" in response.content[0].signature
+      check stamps.len == 2
+      check stamps[1] - stamps[0] >= 0.05
 
   test "missing API key fails before making a request":
     let provider = makeOpenRouterProvider("", "http://127.0.0.1:1")
@@ -84,79 +91,60 @@ suite "OpenRouter provider":
         messages: @[userMessage("hello")], maxTokens: 10))
 
   test "translates tool calls and reports response metadata":
-    let fixturePath = getCurrentDir() / "tests" / "openrouter_fixture.py"
-    var fixture = startProcess("python3", args = @[fixturePath],
-      options = {poUsePath, poStdErrToStdOut})
-    defer:
-      if fixture.running:
-        fixture.terminate()
-        discard fixture.waitForExit()
-      fixture.close()
+    withFixture("openrouter_fixture.py") do (port: int):
+      let provider = makeOpenRouterProvider("fixture-key",
+        "http://127.0.0.1:" & $port, timeoutSeconds = 5)
+      let readDefinition = ToolDefinition(name: "read",
+        description: "Read a file", inputSchema: %*{
+          "type": "object",
+          "properties": {"path": {"type": "string"}}
+        })
+      let request = ProviderRequest(
+        model: "deepseek/deepseek-v4-flash-0731",
+        sessionId: "fixture-session",
+        system: @["You are a test agent."],
+        messages: @[userMessage("hello")],
+        tools: @[readDefinition],
+        maxTokens: 100)
+      let first = provider.generate(request)
+      check first.model == "deepseek/deepseek-v4-flash-0731"
+      check first.content[0].kind == ckThinking
+      check first.content[0].thinking == "should I read?"
+      check "sig_fixture" in first.content[0].signature
+      check first.toolCalls.len == 1
+      check first.toolCalls[0].name == "read"
+      check first.toolCalls[0].input["path"].getStr == "README.md"
+      check first.usage.cacheWriteTokens == 1000
 
-    let port = parseInt(fixture.outputStream.readLine())
-    let provider = makeOpenRouterProvider("fixture-key",
-      "http://127.0.0.1:" & $port, timeoutSeconds = 5)
-    let readDefinition = ToolDefinition(name: "read",
-      description: "Read a file", inputSchema: %*{
-        "type": "object",
-        "properties": {"path": {"type": "string"}}
-      })
-    let request = ProviderRequest(
-      model: "deepseek/deepseek-v4-flash-0731",
-      sessionId: "fixture-session",
-      system: @["You are a test agent."],
-      messages: @[userMessage("hello")],
-      tools: @[readDefinition],
-      maxTokens: 100)
-    let first = provider.generate(request)
-    check first.model == "deepseek/deepseek-v4-flash-0731"
-    check first.content[0].kind == ckThinking
-    check first.content[0].thinking == "should I read?"
-    check "sig_fixture" in first.content[0].signature
-    check first.toolCalls.len == 1
-    check first.toolCalls[0].name == "read"
-    check first.toolCalls[0].input["path"].getStr == "README.md"
-    check first.usage.cacheWriteTokens == 1000
-
-    var followup = request
-    followup.messages = @[
-      userMessage("hello"),
-      Message(role: roleAssistant, content: first.content),
-      Message(role: roleUser, content: @[
-        toolResult(first.toolCalls[0].id, "README contents")
-      ])
-    ]
-    let second = provider.generate(followup)
-    check second.textContent == "fixture complete"
-    check second.usage.cacheReadTokens == 1000
-    check second.usage.cacheReported
-    check fixture.waitForExit() == 0
+      var followup = request
+      followup.messages = @[
+        userMessage("hello"),
+        Message(role: roleAssistant, content: first.content),
+        Message(role: roleUser, content: @[
+          toolResult(first.toolCalls[0].id, "README contents")
+        ])
+      ]
+      let second = provider.generate(followup)
+      check second.textContent == "fixture complete"
+      check second.usage.cacheReadTokens == 1000
+      check second.usage.cacheReported
 
   test "generateText and streamText facade":
-    let fixturePath = getCurrentDir() / "tests" / "openrouter_stream_fixture.py"
-    var fixture = startProcess("python3", args = @[fixturePath],
-      options = {poUsePath, poStdErrToStdOut})
-    defer:
-      if fixture.running:
-        fixture.terminate()
-        discard fixture.waitForExit()
-      fixture.close()
-    let port = parseInt(fixture.outputStream.readLine())
-    let provider = makeOpenRouterProvider("fixture-key",
-      "http://127.0.0.1:" & $port, timeoutSeconds = 5)
-    var pieces: seq[string] = @[]
-    let streamed = streamText(
-      provider,
-      model = "test",
-      prompt = "hi",
-      maxTokens = 20,
-      onEvent = proc (ev: StreamEvent): bool =
-        if ev.kind == seTextDelta:
-          pieces.add ev.text
-        true)
-    check pieces == @["Hello", " world"]
-    check streamed.textContent == "Hello world"
-    check fixture.waitForExit() == 0
+    withFixture("openrouter_stream_fixture.py") do (port: int):
+      let provider = makeOpenRouterProvider("fixture-key",
+        "http://127.0.0.1:" & $port, timeoutSeconds = 5)
+      var pieces: seq[string] = @[]
+      let streamed = streamText(
+        provider,
+        model = "test",
+        prompt = "hi",
+        maxTokens = 20,
+        onEvent = proc (ev: StreamEvent): bool =
+          if ev.kind == seTextDelta:
+            pieces.add ev.text
+          true)
+      check pieces == @["Hello", " world"]
+      check streamed.textContent == "Hello world"
 
 type
   ScriptProvider = ref object of Provider
@@ -334,25 +322,16 @@ suite "Hyper provider":
         messages: @[userMessage("hello")], maxTokens: 10))
 
   test "generate accepts usage without token-details":
-    let fixturePath = getCurrentDir() / "tests" / "hyper_fixture.py"
-    var fixture = startProcess("python3", args = @[fixturePath],
-      options = {poUsePath, poStdErrToStdOut})
-    defer:
-      if fixture.running:
-        fixture.terminate()
-        discard fixture.waitForExit()
-      fixture.close()
-    let port = parseInt(fixture.outputStream.readLine())
-    let provider = makeHyperProvider("fixture-key",
-      "http://127.0.0.1:" & $port, timeoutSeconds = 5)
-    let response = provider.generate(ProviderRequest(
-      model: "deepseek-v4-flash", messages: @[userMessage("hi")],
-      maxTokens: 16))
-    check response.textContent == "pong"
-    check response.usage.inputTokens == 10
-    check response.usage.outputTokens == 1
-    check not response.usage.cacheReported
-    check fixture.waitForExit() == 0
+    withFixture("hyper_fixture.py") do (port: int):
+      let provider = makeHyperProvider("fixture-key",
+        "http://127.0.0.1:" & $port, timeoutSeconds = 5)
+      let response = provider.generate(ProviderRequest(
+        model: "deepseek-v4-flash", messages: @[userMessage("hi")],
+        maxTokens: 16))
+      check response.textContent == "pong"
+      check response.usage.inputTokens == 10
+      check response.usage.outputTokens == 1
+      check not response.usage.cacheReported
 
 suite "OpenAI provider":
   test "native body uses Responses fields and omits Chat Completions extras":
@@ -416,91 +395,64 @@ suite "OpenAI provider":
         messages: @[userMessage("hello")], maxTokens: 10))
 
   test "generate sends OpenAI fields and reports cache reads":
-    let fixturePath = getCurrentDir() / "tests" / "openai_fixture.py"
-    var fixture = startProcess("python3", args = @[fixturePath],
-      options = {poUsePath, poStdErrToStdOut})
-    defer:
-      if fixture.running:
-        fixture.terminate()
-        discard fixture.waitForExit()
-      fixture.close()
-    let port = parseInt(fixture.outputStream.readLine())
-    let provider = makeOpenAIProvider("fixture-key",
-      "http://127.0.0.1:" & $port, timeoutSeconds = 5)
-    let response = provider.generate(ProviderRequest(
-      model: "gpt-5",
-      sessionId: "must-not-send",
-      system: @["You are a test agent."],
-      messages: @[userMessage("hello")],
-      tools: @[ToolDefinition(name: "read", description: "Read a file",
-        inputSchema: %*{"type": "object"})],
-      maxTokens: 32,
-      options: %*{"reasoning_effort": "low"}))
-    check response.model == "gpt-5"
-    check response.textContent == "hello from openai"
-    check response.content[0].kind == ckThinking
-    check response.content[0].thinking == "cached plan"
-    check "rs_1" in response.content[0].signature
-    check response.usage.inputTokens == 20
-    check response.usage.cacheReadTokens == 8
-    check response.usage.cacheReported
-    check fixture.waitForExit() == 0
+    withFixture("openai_fixture.py") do (port: int):
+      let provider = makeOpenAIProvider("fixture-key",
+        "http://127.0.0.1:" & $port, timeoutSeconds = 5)
+      let response = provider.generate(ProviderRequest(
+        model: "gpt-5",
+        sessionId: "must-not-send",
+        system: @["You are a test agent."],
+        messages: @[userMessage("hello")],
+        tools: @[ToolDefinition(name: "read", description: "Read a file",
+          inputSchema: %*{"type": "object"})],
+        maxTokens: 32,
+        options: %*{"reasoning_effort": "low"}))
+      check response.model == "gpt-5"
+      check response.textContent == "hello from openai"
+      check response.content[0].kind == ckThinking
+      check response.content[0].thinking == "cached plan"
+      check "rs_1" in response.content[0].signature
+      check response.usage.inputTokens == 20
+      check response.usage.cacheReadTokens == 8
+      check response.usage.cacheReported
 
   test "generateStream emits deltas before the response finishes":
-    let fixturePath = getCurrentDir() / "tests" / "openai_responses_stream_fixture.py"
-    var fixture = startProcess("python3", args = @[fixturePath],
-      options = {poUsePath, poStdErrToStdOut})
-    defer:
-      if fixture.running:
-        fixture.terminate()
-        discard fixture.waitForExit()
-      fixture.close()
-    let port = parseInt(fixture.outputStream.readLine())
-    let provider = makeOpenAIProvider("fixture-key",
-      "http://127.0.0.1:" & $port, timeoutSeconds = 5)
-    var stamps: seq[float] = @[]
-    var pieces: seq[string] = @[]
-    let response = provider.generateStream(
-      ProviderRequest(model: "test", messages: @[userMessage("hi")],
-        maxTokens: 20),
-      proc (ev: StreamEvent): bool =
-        if ev.kind == seTextDelta:
-          stamps.add epochTime()
-          pieces.add ev.text
-        true)
-    check pieces == @["Hello", " world"]
-    check response.textContent == "Hello world"
-    check stamps.len == 2
-    check stamps[1] - stamps[0] >= 0.05
-    check fixture.waitForExit() == 0
+    withFixture("openai_responses_stream_fixture.py") do (port: int):
+      let provider = makeOpenAIProvider("fixture-key",
+        "http://127.0.0.1:" & $port, timeoutSeconds = 5)
+      var stamps: seq[float] = @[]
+      var pieces: seq[string] = @[]
+      let response = provider.generateStream(
+        ProviderRequest(model: "test", messages: @[userMessage("hi")],
+          maxTokens: 20),
+        proc (ev: StreamEvent): bool =
+          if ev.kind == seTextDelta:
+            stamps.add epochTime()
+            pieces.add ev.text
+          true)
+      check pieces == @["Hello", " world"]
+      check response.textContent == "Hello world"
+      check stamps.len == 2
+      check stamps[1] - stamps[0] >= 0.05
 
   test "generateStream emits tool call deltas":
-    let fixturePath = getCurrentDir() / "tests" / "openai_responses_stream_fixture.py"
-    var fixture = startProcess("python3", args = @[fixturePath],
-      options = {poUsePath, poStdErrToStdOut})
-    defer:
-      if fixture.running:
-        fixture.terminate()
-        discard fixture.waitForExit()
-      fixture.close()
-    let port = parseInt(fixture.outputStream.readLine())
-    let provider = makeOpenAIProvider("fixture-key",
-      "http://127.0.0.1:" & $port, timeoutSeconds = 5)
-    var evs: seq[string] = @[]
-    let response = provider.generateStream(
-      ProviderRequest(model: "test", messages: @[userMessage("hi")],
-        tools: @[ToolDefinition(name: "read", description: "d",
-          inputSchema: %*{"type": "object"})],
-        maxTokens: 20),
-      proc (ev: StreamEvent): bool =
-        if ev.kind == seToolCallDelta:
-          evs.add ev.toolName & ":" & ev.toolArgs
-        true)
-    check evs == @["read:", "read:{\"path\":\"x\"}"]
-    check response.toolCalls.len == 1
-    check response.toolCalls[0].name == "read"
-    check response.toolCalls[0].input["path"].getStr == "x"
-    check fixture.waitForExit() == 0
+    withFixture("openai_responses_stream_fixture.py") do (port: int):
+      let provider = makeOpenAIProvider("fixture-key",
+        "http://127.0.0.1:" & $port, timeoutSeconds = 5)
+      var evs: seq[string] = @[]
+      let response = provider.generateStream(
+        ProviderRequest(model: "test", messages: @[userMessage("hi")],
+          tools: @[ToolDefinition(name: "read", description: "d",
+            inputSchema: %*{"type": "object"})],
+          maxTokens: 20),
+        proc (ev: StreamEvent): bool =
+          if ev.kind == seToolCallDelta:
+            evs.add ev.toolName & ":" & ev.toolArgs
+          true)
+      check evs == @["read:", "read:{\"path\":\"x\"}"]
+      check response.toolCalls.len == 1
+      check response.toolCalls[0].name == "read"
+      check response.toolCalls[0].input["path"].getStr == "x"
 
 suite "encoding":
   test "providers encode image blocks and cache breakpoints":
