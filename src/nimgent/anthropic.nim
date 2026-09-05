@@ -92,16 +92,18 @@ method generate*(provider: AnthropicProvider,
   try:
     response = client.request(provider.endpoint, HttpPost, $body, headers)
   except CatchableError as e:
-    raiseProviderError("Anthropic request failed: " & e.msg)
+    raiseProviderError("Anthropic request failed: " & e.msg, retryable = true)
   let raw = response.bodyStream.readAll()
   if response.code.int >= 400:
     let detail = try:
       parseJson(raw).getOrDefault("error").getOrDefault("message").getStr
     except CatchableError:
       raw
-    let overflow = response.code.int == 400 and isContextOverflow(detail)
-    raiseProviderError("Anthropic API error (" & $response.code.int & "): " & detail,
-                       overflow)
+    let code = response.code.int
+    let overflow = code == 400 and isContextOverflow(detail)
+    raiseProviderError("Anthropic API error (" & $code & "): " & detail,
+                       overflow = overflow, retryable = isRetryableStatus(code),
+                       status = code)
 
   var data: JsonNode
   try:

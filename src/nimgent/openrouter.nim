@@ -176,7 +176,8 @@ proc raiseApiError(code: int, raw: string) =
   except CatchableError:
     discard
   raiseProviderError("OpenRouter API error (" & $code & "): " & detail,
-    isContextOverflow(detail))
+    overflow = isContextOverflow(detail), retryable = isRetryableStatus(code),
+    status = code)
 
 proc popLine*(buf: var string): tuple[ok: bool, line: string] =
   let nl = buf.find('\n')
@@ -258,7 +259,7 @@ proc postChat(provider: OpenRouterProvider, body: JsonNode,
     result.response = result.client.request(provider.endpoint, HttpPost, $body, headers)
   except CatchableError as e:
     result.client.close()
-    raiseProviderError(failPrefix & e.msg)
+    raiseProviderError(failPrefix & e.msg, retryable = true)
 
 method generate*(provider: OpenRouterProvider,
                  request: ProviderRequest): ProviderResponse =
@@ -327,7 +328,7 @@ method generateStream*(provider: OpenRouterProvider,
       return
     response = waitFor reqFut
   except CatchableError as e:
-    raiseProviderError("OpenRouter stream failed: " & e.msg)
+    raiseProviderError("OpenRouter stream failed: " & e.msg, retryable = true)
   if response.code.int >= 400:
     raiseApiError(response.code.int, drainBodyStream(response.bodyStream))
 

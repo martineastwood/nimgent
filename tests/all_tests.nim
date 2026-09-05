@@ -128,6 +128,99 @@ suite "OpenRouter provider":
     check streamed.textContent == "Hello world"
     check fixture.waitForExit() == 0
 
+type
+  ScriptProvider = ref object of Provider
+    calls*: int
+    failLeft*: int
+    toolFirst*: bool
+    last*: ProviderRequest
+
+  BoomProvider = ref object of Provider
+    calls*: int
+
+method generate(p: ScriptProvider, request: ProviderRequest): ProviderResponse =
+  inc p.calls
+  p.last = request
+  if p.failLeft > 0:
+    dec p.failLeft
+    raiseProviderError("rate limited", retryable = true, status = 429)
+  if p.toolFirst and p.calls == 1:
+    result.content.add toolUse("call_1", "echo", %*{"x": 1})
+    result.finishReason = frToolUse
+    return
+  result.content.add text("ok")
+  result.finishReason = frStop
+
+method generate(p: BoomProvider, request: ProviderRequest): ProviderResponse =
+  inc p.calls
+  raiseProviderError("prompt is too long", overflow = true)
+
+suite "generateText retries, abort, and tools":
+  test "retries retryable errors then succeeds":
+    let p = ScriptProvider(failLeft: 1)
+    let r = generateText(p, model = "m", prompt = "hi", maxRetries = 2)
+    check p.calls == 2
+    check r.textContent == "ok"
+
+  test "does not retry overflow or non-retryable errors":
+    let p = BoomProvider()
+    expect ProviderError:
+      discard generateText(p, model = "m", prompt = "hi", maxRetries = 2)
+    check p.calls == 1
+
+  test "abort before the first attempt raises and does not call the provider":
+    let p = ScriptProvider()
+    var err: ref ProviderError
+    try:
+      discard generateText(p, model = "m", prompt = "hi",
+        abort = proc (): bool = true)
+    except ProviderError as e:
+      err = e
+    check p.calls == 0
+    check not err.isNil
+    check err.aborted
+
+  test "maxSteps runs execute and continues":
+    let p = ScriptProvider(toolFirst: true)
+    var ran = 0
+    let echoTool = tool("echo", "echo", %*{"type": "object"},
+      proc (input: JsonNode): ToolOutput =
+        inc ran
+        check input["x"].getInt == 1
+        ToolOutput(output: "pong"))
+    let r = generateText(p, model = "m", prompt = "hi",
+      tools = @[echoTool], maxSteps = 2, maxRetries = 0)
+    check ran == 1
+    check p.calls == 2
+    check r.textContent == "ok"
+    var sawTool = false
+    for msg in p.last.messages:
+      for part in msg.content:
+        if part.kind == ckToolResult:
+          sawTool = true
+          check part.output == "pong"
+          check part.toolUseId == "call_1"
+    check sawTool
+
+  test "maxSteps 1 does not execute tools":
+    let p = ScriptProvider(toolFirst: true)
+    var ran = 0
+    let echoTool = tool("echo", "echo", %*{"type": "object"},
+      proc (input: JsonNode): ToolOutput =
+        inc ran
+        ToolOutput(output: "pong"))
+    let r = generateText(p, model = "m", prompt = "hi",
+      tools = @[echoTool], maxSteps = 1, maxRetries = 0)
+    check ran == 0
+    check p.calls == 1
+    check r.toolCalls.len == 1
+
+  test "isRetryableStatus matches 429 and 5xx":
+    check isRetryableStatus(429)
+    check isRetryableStatus(503)
+    check not isRetryableStatus(400)
+    check not isRetryableStatus(401)
+
 suite "encoding":
   test "providers encode image blocks and cache breakpoints":
     check anthropicImageBlock("image/png", "QUJD")["source"]["data"].getStr == "QUJD"

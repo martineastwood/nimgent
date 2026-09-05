@@ -95,6 +95,24 @@ type
     ## Raised for transport and API errors. `overflow` marks the specific case
     ## of exceeding the context window, which the agent can recover from.
     overflow*: bool
+    retryable*: bool   ## 429 / 5xx / transport; generateText may retry
+    aborted*: bool     ## caller abort() returned true
+    status*: int       ## HTTP status, or 0 when there was no response
+
+  AbortCheck* = proc (): bool {.closure.}
+    ## Return true to cancel. Checked before each attempt and tool call.
+
+  ToolOutput* = object
+    output*: string
+    isError*: bool
+    images*: seq[ImageContent]
+
+  Tool* = object
+    name*: string
+    description*: string
+    inputSchema*: JsonNode
+    ## When set, generateText/streamText can run the tool and continue (maxSteps).
+    execute*: proc (input: JsonNode): ToolOutput {.closure.}
 
   Provider* = ref object of RootObj
     name*: string
@@ -283,7 +301,24 @@ proc isContextOverflow*(detail: string): bool =
   "exceeds model" in lower or
   "max input tokens" in lower
 
-proc raiseProviderError*(msg: string, overflow = false) =
+proc isRetryableStatus*(code: int): bool =
+  code == 429 or code >= 500
+
+proc raiseProviderError*(msg: string, overflow = false, retryable = false,
+                         aborted = false, status = 0) =
   let e = newException(ProviderError, msg)
   e.overflow = overflow
+  e.retryable = retryable or isRetryableStatus(status)
+  e.aborted = aborted
+  e.status = status
   raise e
+
+proc tool*(name, description: string, inputSchema: JsonNode,
+           execute: proc (input: JsonNode): ToolOutput {.closure.} = nil): Tool =
+  Tool(name: name, description: description, inputSchema: inputSchema,
+       execute: execute)
+
+proc toDefinitions*(tools: openArray[Tool]): seq[ToolDefinition] =
+  for t in tools:
+    result.add ToolDefinition(name: t.name, description: t.description,
+      inputSchema: t.inputSchema)
