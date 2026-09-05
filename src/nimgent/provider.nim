@@ -115,8 +115,9 @@ type
     inputSchema*: JsonNode
     ## When set, generateText/streamText can run the tool and continue (maxSteps).
     execute*: proc (input: JsonNode): ToolOutput {.closure.}
-    ## Reserved: if every call in a batch has this, execute may overlap.
-    ## Sync execute stays serial; niminal leaves this false.
+    ## Overlap execute when every runnable tool in the batch sets this and the
+    ## program is compiled with `--threads:on`. execute must be safe to run
+    ## concurrently (no shared mutation). niminal never sets it.
     parallel*: bool
 
   Provider* = ref object of RootObj
@@ -175,9 +176,6 @@ proc formatUsageLabels*(usage: Usage): seq[string] =
 
 method generate*(p: Provider, request: ProviderRequest): ProviderResponse {.base.} =
   raise newException(CatchableError, "provider does not implement generate")
-
-method close*(p: Provider) {.base.} =
-  discard
 
 const imageOmitted* = "[image omitted: model does not accept images]"
 
@@ -295,11 +293,19 @@ proc toolCalls*(r: ProviderResponse): seq[ContentBlock] =
     if b.kind == ckToolUse:
       result.add b
 
-proc textContent*(r: ProviderResponse): string =
-  for b in r.content:
+proc textContent*(blocks: openArray[ContentBlock]): string =
+  for b in blocks:
     if b.kind == ckText:
       if result.len > 0: result.add "\n"
       result.add b.text
+
+proc textContent*(r: ProviderResponse): string =
+  textContent(r.content)
+
+proc mergeRequestOptions*(body, options: JsonNode) =
+  if options.isNil or options.kind == JNull: return
+  for key, value in options:
+    body[key] = value
 
 method generateStream*(p: Provider, request: ProviderRequest,
                        onEvent: StreamCallback): ProviderResponse {.base.} =

@@ -65,8 +65,7 @@ let hyper = makeHyperProvider(getEnv("HYPER_API_KEY"))
 
 let anthropic = makeAnthropicProvider(
   getEnv("ANTHROPIC_API_KEY"),
-  model = "claude-sonnet-4-20250514",
-  endpoint = "https://api.anthropic.com/v1/messages")
+  "https://api.anthropic.com/v1/messages")
 ```
 
 Provider-specific knobs (thinking, routing, cache TTL) go in

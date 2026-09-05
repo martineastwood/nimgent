@@ -4,6 +4,8 @@ import nimgent/provider
 export provider
 
 import std/[json, os, random]
+when compileOption("threads"):
+  import std/typedthreads
 
 proc buildRequest(
   model: string,
@@ -67,24 +69,83 @@ proc findTool(tools: openArray[Tool], name: string): int =
     if t.name == name: return i
   -1
 
+proc execOne(tools: openArray[Tool], call: ContentBlock): ContentBlock =
+  let bad = invalidToolCall(call)
+  if bad.len > 0:
+    return toolResult(call.id, bad, true)
+  let i = findTool(tools, call.name)
+  if i < 0 or tools[i].execute.isNil:
+    return toolResult(call.id, "Unknown tool: " & call.name, true)
+  try:
+    let outp = tools[i].execute(call.input)
+    toolResult(call.id, outp.output, outp.isError, outp.images)
+  except CatchableError as e:
+    toolResult(call.id, e.msg, true)
+
+proc batchOverlaps(tools: openArray[Tool], calls: openArray[ContentBlock]): bool =
+  ## True when at least two calls will run execute and every one of those is parallel.
+  var n = 0
+  for call in calls:
+    if invalidToolCall(call).len > 0: continue
+    let i = findTool(tools, call.name)
+    if i < 0 or tools[i].execute.isNil: continue
+    if not tools[i].parallel: return false
+    inc n
+  n >= 2
+
+when compileOption("threads"):
+  type
+    ParallelJob = object
+      execute: proc (input: JsonNode): ToolOutput {.closure.}
+      input: JsonNode
+      id: string
+      output: ContentBlock
+
+  proc parallelWorker(job: ptr ParallelJob) {.thread.} =
+    # ponytail: execute stays a closure so sequential tools can capture.
+    # parallel=true is the user's concurrency promise; the type cannot say gcsafe.
+    try:
+      let fn = cast[proc (input: JsonNode): ToolOutput {.closure, gcsafe.}](job.execute)
+      let outp = fn(job.input)
+      job.output = toolResult(job.id, outp.output, outp.isError, outp.images)
+    except CatchableError as e:
+      job.output = toolResult(job.id, e.msg, true)
+
+  proc execToolsParallel(tools: openArray[Tool],
+                         calls: openArray[ContentBlock]): seq[ContentBlock] =
+    result.setLen(calls.len)
+    var jobs = newSeq[ParallelJob](calls.len)
+    var runnable: seq[int]
+    for i, call in calls:
+      let bad = invalidToolCall(call)
+      if bad.len > 0:
+        result[i] = toolResult(call.id, bad, true)
+        continue
+      let t = findTool(tools, call.name)
+      if t < 0 or tools[t].execute.isNil:
+        result[i] = toolResult(call.id, "Unknown tool: " & call.name, true)
+        continue
+      jobs[i].execute = tools[t].execute
+      jobs[i].input = if call.input.isNil: nil else: copy(call.input)
+      jobs[i].id = call.id
+      runnable.add i
+    var threads = newSeq[Thread[ptr ParallelJob]](runnable.len)
+    for j, i in runnable:
+      createThread(threads[j], parallelWorker, addr jobs[i])
+    for th in threads.mitems:
+      joinThread(th)
+    for i in runnable:
+      result[i] = jobs[i].output
+
 proc execTools(tools: openArray[Tool], calls: openArray[ContentBlock],
                abort: AbortCheck): seq[ContentBlock] =
-  ## Sequential. `Tool.parallel` is reserved until execute can overlap.
+  when compileOption("threads"):
+    if batchOverlaps(tools, calls):
+      checkAbort(abort)
+      return execToolsParallel(tools, calls)
   for call in calls:
     checkAbort(abort)
-    let bad = invalidToolCall(call)
-    if bad.len > 0:
-      result.add toolResult(call.id, bad, true)
-      continue
-    let i = findTool(tools, call.name)
-    if i < 0 or tools[i].execute.isNil:
-      result.add toolResult(call.id, "Unknown tool: " & call.name, true)
-      continue
-    try:
-      let outp = tools[i].execute(call.input)
-      result.add toolResult(call.id, outp.output, outp.isError, outp.images)
-    except CatchableError as e:
-      result.add toolResult(call.id, e.msg, true)
+    result.add execOne(tools, call)
 
 proc retryingCall(provider: Provider, request: ProviderRequest,
                   maxRetries: int, abort: AbortCheck,

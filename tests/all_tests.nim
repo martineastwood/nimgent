@@ -1,9 +1,9 @@
 import std/[json, os, osproc, streams, strutils, times, unittest]
 import nimgent
 import nimgent/[anthropic, openrouter]
-from nimgent/openai import makeOpenAIProvider, makeHyperProvider, buildOpenAiBody,
-  buildChatBody, defaultOpenAiEndpoint, defaultOpenAiChatEndpoint,
-  defaultHyperEndpoint
+from nimgent/openai import makeOpenAIProvider, makeHyperProvider,
+  buildResponsesBody, buildChatBody, defaultOpenAiEndpoint,
+  defaultOpenAiChatEndpoint, defaultHyperEndpoint
 
 proc withFixture(script: string, body: proc (port: int)) =
   let fixturePath = getCurrentDir() / "tests" / script
@@ -151,6 +151,7 @@ type
     calls*: int
     failLeft*: int
     toolFirst*: bool
+    twoTools*: bool
     last*: ProviderRequest
 
   BoomProvider = ref object of Provider
@@ -164,9 +165,11 @@ method generate(p: ScriptProvider, request: ProviderRequest): ProviderResponse =
   p.last = request
   if p.failLeft > 0:
     dec p.failLeft
-    raiseProviderError("rate limited", retryable = true, status = 429)
+    raiseProviderError("rate limited", status = 429)
   if p.toolFirst and p.calls == 1:
     result.content.add toolUse("call_1", "echo", %*{"x": 1})
+    if p.twoTools:
+      result.content.add toolUse("call_2", "echo", %*{"x": 2})
     result.finishReason = frToolUse
     return
   result.content.add text("ok")
@@ -280,6 +283,25 @@ suite "generateText retries, abort, and tools":
     check p.calls == 2
     check r.textContent == "recovered"
 
+  test "parallel execute overlaps":
+    let p = ScriptProvider(toolFirst: true, twoTools: true)
+    proc slow(_: JsonNode): ToolOutput {.gcsafe.} =
+      sleep(120)
+      ToolOutput(output: "pong")
+    let echoTool = tool("echo", "echo", %*{"type": "object"}, slow, parallel = true)
+    let t0 = epochTime()
+    let r = generateText(p, model = "m", prompt = "hi",
+      tools = @[echoTool], maxSteps = 2, maxRetries = 0)
+    check epochTime() - t0 < 0.20
+    check r.textContent == "ok"
+    check p.calls == 2
+    var results: seq[string]
+    for msg in p.last.messages:
+      for part in msg.content:
+        if part.kind == ckToolResult:
+          results.add part.toolUseId & ":" & part.output
+    check results == @["call_1:pong", "call_2:pong"]
+
   test "isRetryableStatus matches 429 and 5xx":
     check isRetryableStatus(429)
     check isRetryableStatus(503)
@@ -335,7 +357,7 @@ suite "Hyper provider":
 
 suite "OpenAI provider":
   test "native body uses Responses fields and omits Chat Completions extras":
-    let body = buildOpenAiBody(ProviderRequest(
+    let body = buildResponsesBody(ProviderRequest(
       model: "gpt-5",
       sessionId: "should-omit",
       system: @["stable prefix"],
@@ -364,7 +386,7 @@ suite "OpenAI provider":
 
   test "responses body replays reasoning and function calls":
     let sig = $(%*{"id": "rs_1", "encrypted_content": "enc"})
-    let body = buildOpenAiBody(ProviderRequest(
+    let body = buildResponsesBody(ProviderRequest(
       model: "gpt-5",
       messages: @[
         userMessage("hi"),

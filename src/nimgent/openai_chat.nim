@@ -3,12 +3,6 @@
 import std/json
 import nimgent/[provider, stream]
 
-proc textParts(message: Message): string =
-  for part in message.content:
-    if part.kind == ckText:
-      if result.len > 0: result.add "\n"
-      result.add part.text
-
 proc openAiImagePart*(mimeType, data: string): JsonNode =
   %*{"type": "image_url", "image_url": {
     "url": "data:" & mimeType & ";base64," & data}}
@@ -101,7 +95,7 @@ proc encodeMessage(result: var JsonNode, message: Message) =
     return
 
   var encoded = %*{"role": "assistant"}
-  let content = textParts(message)
+  let content = textContent(message.content)
   if content.len > 0:
     encoded["content"] = %content
   else:
@@ -137,8 +131,7 @@ proc buildChatBody*(request: ProviderRequest, stream: bool,
     result["session_id"] = %request.sessionId
   var messages = newJArray()
   if request.maxTokens > 0:
-    let field = if maxTokensField.len > 0: maxTokensField else: "max_tokens"
-    result[field] = %request.maxTokens
+    result[maxTokensField] = %request.maxTokens
   if request.system.len > 0:
     var parts = newJArray()
     for s in request.system:
@@ -158,9 +151,7 @@ proc buildChatBody*(request: ProviderRequest, stream: bool,
           "parameters": tool.inputSchema
         }
       }
-  if not request.options.isNil and request.options.kind != JNull:
-    for key, value in request.options:
-      result[key] = value
+  mergeRequestOptions(result, request.options)
   if applyCache:
     applyCacheBreakpoints(result)
 

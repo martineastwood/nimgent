@@ -96,9 +96,7 @@ proc buildResponsesBody*(request: ProviderRequest, stream: bool): JsonNode =
         "description": tool.description,
         "parameters": tool.inputSchema
       }
-  if not request.options.isNil and request.options.kind != JNull:
-    for key, value in request.options:
-      result[key] = value
+  mergeRequestOptions(result, request.options)
   if "reasoning_effort" in result:
     if "reasoning" notin result:
       result["reasoning"] = %*{"effort": result["reasoning_effort"]}

@@ -94,11 +94,7 @@ proc raiseApiError(provider: OpenAIProvider, code: int, raw: string,
   let ra = if headers.isNil: 0
            else: parseRetryAfter(headers.getOrDefault("Retry-After"))
   raiseProviderError(provider.label & " API error (" & $code & "): " & detail,
-    overflow = isContextOverflow(detail), retryable = isRetryableStatus(code),
-    status = code, retryAfterMs = ra)
-
-proc buildOpenAiBody*(request: ProviderRequest, stream: bool): JsonNode =
-  buildResponsesBody(request, stream)
+    overflow = isContextOverflow(detail), status = code, retryAfterMs = ra)
 
 proc requestBody(provider: OpenAIProvider, request: ProviderRequest,
                  stream: bool): JsonNode =

@@ -4,7 +4,7 @@ import std/json
 import nimgent/provider
 import nimgent/openai
 export openai except makeOpenAIProvider, makeOpenRouterProvider,
-  buildOpenAiBody, defaultOpenAiEndpoint, defaultOpenAiChatEndpoint
+  defaultOpenAiEndpoint, defaultOpenAiChatEndpoint
 
 proc buildBody*(request: ProviderRequest, stream: bool): JsonNode =
   ## Hyper chat body: `max_tokens`, no session_id or Anthropic cache breakpoints.

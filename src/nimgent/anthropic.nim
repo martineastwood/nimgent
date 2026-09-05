@@ -9,9 +9,6 @@ type
     endpoint: string
     timeoutSeconds: int
 
-proc roleName(role: Role): string =
-  if role == roleUser: "user" else: "assistant"
-
 proc anthropicImageBlock*(mimeType, data: string): JsonNode =
   %*{"type": "image", "source": {
     "type": "base64", "media_type": mimeType, "data": data}}
@@ -40,13 +37,12 @@ proc encodeBlock(part: ContentBlock): JsonNode =
         "content": content, "is_error": part.isError}
 
 proc encodeMessage(message: Message): JsonNode =
-  result = %*{"role": roleName(message.role), "content": newJArray()}
+  result = %*{"role": $message.role, "content": newJArray()}
   for part in message.content:
     result["content"].add encodeBlock(part)
 
-proc makeAnthropicProvider*(apiKey, model, endpoint: string,
+proc makeAnthropicProvider*(apiKey, endpoint: string,
                             timeoutSeconds = 300): AnthropicProvider =
-  discard model  # request.model is the live value; kept for call-site compat
   AnthropicProvider(name: "anthropic", apiKey: apiKey, endpoint: endpoint,
                     timeoutSeconds: timeoutSeconds)
 
@@ -76,9 +72,7 @@ method generate*(provider: AnthropicProvider,
         "input_schema": tool.inputSchema
       }
   applyCacheBreakpoints(body)
-  if not request.options.isNil and request.options.kind != JNull:
-    for key, value in request.options:
-      body[key] = value
+  mergeRequestOptions(body, request.options)
 
   let client = newHttpClient(timeout = provider.timeoutSeconds * 1000,
                               sslContext = newContext(verifyMode = CVerifyPeer))
@@ -100,8 +94,7 @@ method generate*(provider: AnthropicProvider,
     let code = response.code.int
     let overflow = code == 400 and isContextOverflow(detail)
     raiseProviderError("Anthropic API error (" & $code & "): " & detail,
-                       overflow = overflow, retryable = isRetryableStatus(code),
-                       status = code,
+                       overflow = overflow, status = code,
                        retryAfterMs = parseRetryAfter(
                          response.headers.getOrDefault("Retry-After")))
 
