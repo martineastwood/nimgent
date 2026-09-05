@@ -1,0 +1,289 @@
+## Internal representation of messages, tools and provider traffic.
+##
+## Provider adapters translate between this representation and their own wire
+## format. The representation is deliberately close to a superset of what the
+## supported APIs need, so provider-specific features stay reachable through
+## `ProviderRequest.options`.
+
+import std/[json, strutils]
+
+type
+  Role* = enum
+    roleUser = "user"
+    roleAssistant = "assistant"
+
+  ContentKind* = enum
+    ckText
+    ckToolUse
+    ckToolResult
+    ckThinking
+    ckImage
+
+  ImageContent* = object
+    mimeType*: string
+    data*: string  ## base64, no data: prefix; empty when `path` is set until hydrate
+    path*: string  ## workspace-relative file; preferred on disk over inlined bytes
+
+  ContentBlock* = object
+    case kind*: ContentKind
+    of ckText:
+      text*: string
+    of ckThinking:
+      thinking*: string
+      signature*: string
+    of ckToolUse:
+      id*: string
+      name*: string
+      input*: JsonNode
+    of ckToolResult:
+      toolUseId*: string
+      output*: string
+      isError*: bool
+      images*: seq[ImageContent]
+    of ckImage:
+      mimeType*: string
+      data*: string
+      path*: string
+
+  Message* = object
+    role*: Role
+    content*: seq[ContentBlock]
+
+  ToolDefinition* = object
+    name*: string
+    description*: string
+    inputSchema*: JsonNode
+
+  FinishReason* = enum
+    frUnknown
+    frEndTurn
+    frToolUse
+    frMaxTokens
+    frStop
+
+  Usage* = object
+    inputTokens*: int
+    outputTokens*: int
+    cacheReadTokens*: int
+    cacheWriteTokens*: int
+    ## True when the provider reports cache statistics at all; without this we
+    ## cannot distinguish "zero cached" from "not reported".
+    cacheReported*: bool
+
+  ProviderRequest* = object
+    model*: string
+    sessionId*: string
+    system*: seq[string]
+    messages*: seq[Message]
+    tools*: seq[ToolDefinition]
+    maxTokens*: int
+    ## Escape hatch for provider-specific knobs (thinking, routing, TTL, ...).
+    options*: JsonNode
+    ## When >= 0, emit seWake when this fd becomes readable during streaming.
+    ## Default -1 means no side-channel wake (stdin is 0 when used).
+    wakeFd*: cint = -1
+
+  ProviderResponse* = object
+    ## Provider-reported model, which may differ from the requested alias after
+    ## routing or fallback. It is more trustworthy than asking the model.
+    model*: string
+    content*: seq[ContentBlock]
+    usage*: Usage
+    finishReason*: FinishReason
+
+  ProviderError* = object of CatchableError
+    ## Raised for transport and API errors. `overflow` marks the specific case
+    ## of exceeding the context window, which the agent can recover from.
+    overflow*: bool
+
+  Provider* = ref object of RootObj
+    name*: string
+
+  StreamEventKind* = enum
+    seTextDelta
+    seThinkingDelta
+    seFinished
+    seWake          ## wakeFd became readable while waiting on the provider
+
+  StreamEvent* = object
+    case kind*: StreamEventKind
+    of seTextDelta, seThinkingDelta:
+      text*: string
+    of seFinished, seWake:
+      discard
+
+  StreamCallback* = proc (ev: StreamEvent): bool {.closure.}
+    ## Return false to cancel the stream early.
+
+proc contextTokens*(u: Usage): int =
+  ## Tokens occupying the context window on the last request.
+  ## OpenRouter's prompt_tokens already includes cached tokens; Anthropic splits
+  ## them (input + cache_read + cache_write).
+  if u.cacheReported:
+    let cached = u.cacheReadTokens + u.cacheWriteTokens
+    if cached > 0 and u.inputTokens < cached:
+      return u.inputTokens + cached
+  u.inputTokens
+
+proc formatUsageLabels*(usage: Usage): seq[string] =
+  ## Plain usage fragments shared by console, TUI, and status bar.
+  if usage.inputTokens == 0 and usage.outputTokens == 0:
+    return
+  result.add "↑" & $usage.inputTokens
+  result.add "↓" & $usage.outputTokens
+  if usage.cacheReported:
+    result.add "R" & $usage.cacheReadTokens
+    if usage.cacheWriteTokens > 0:
+      result.add "W" & $usage.cacheWriteTokens
+    let denom = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
+    if denom > 0:
+      let pct = usage.cacheReadTokens * 100 / denom
+      result.add "CH" & pct.formatFloat(ffDecimal, 1) & "%"
+
+method generate*(p: Provider, request: ProviderRequest): ProviderResponse {.base.} =
+  raise newException(CatchableError, "provider does not implement generate")
+
+method close*(p: Provider) {.base.} =
+  discard
+
+const imageOmitted* = "[image omitted: model does not accept images]"
+
+proc text*(s: string): ContentBlock =
+  ContentBlock(kind: ckText, text: s)
+
+proc image*(mimeType, data: string, path = ""): ContentBlock =
+  ContentBlock(kind: ckImage, mimeType: mimeType, data: data, path: path)
+
+proc image*(img: ImageContent): ContentBlock =
+  image(img.mimeType, img.data, img.path)
+
+proc toImage*(part: ContentBlock): ImageContent =
+  ImageContent(mimeType: part.mimeType, data: part.data, path: part.path)
+
+proc ephemeralCache(): JsonNode =
+  %*{"type": "ephemeral"}
+
+proc markLastArrayCache(node: JsonNode) =
+  if node.isNil or node.kind != JArray or node.len == 0: return
+  node[node.len - 1]["cache_control"] = ephemeralCache()
+
+proc markContentCache(msg: JsonNode): bool =
+  ## Cache breakpoint on the last content part. True if one was set.
+  if msg.isNil or msg.kind != JObject: return false
+  if msg.getOrDefault("role").getStr == "tool":
+    msg["cache_control"] = ephemeralCache()
+    return true
+  if "content" notin msg:
+    return false
+  let c = msg["content"]
+  if c.kind == JString:
+    var part = %*{"type": "text", "text": c.getStr}
+    part["cache_control"] = ephemeralCache()
+    var arr = newJArray()
+    arr.add part
+    msg["content"] = arr
+    return true
+  if c.kind == JArray and c.len > 0:
+    c[c.len - 1]["cache_control"] = ephemeralCache()
+    return true
+  false
+
+proc applyCacheBreakpoints*(body: JsonNode) =
+  ## Last tool, last system block, last message content — Anthropic's 4-breakpoint budget.
+  if body.isNil or body.kind != JObject: return
+  if "tools" in body:
+    markLastArrayCache(body["tools"])
+  if "system" in body:
+    markLastArrayCache(body["system"])
+  if "messages" notin body or body["messages"].kind != JArray: return
+  let msgs = body["messages"]
+  for i in countdown(msgs.len - 1, 0):
+    if msgs[i].kind == JObject and msgs[i].getOrDefault("role").getStr == "system":
+      discard markContentCache(msgs[i])
+      break
+  for i in countdown(msgs.len - 1, 0):
+    if msgs[i].kind == JObject and markContentCache(msgs[i]):
+      break
+
+proc toolUse*(id, name: string, input: JsonNode): ContentBlock =
+  ContentBlock(kind: ckToolUse, id: id, name: name, input: input)
+
+proc toolResult*(toolUseId, output: string, isError = false,
+                 images: seq[ImageContent] = @[]): ContentBlock =
+  ContentBlock(kind: ckToolResult, toolUseId: toolUseId, output: output,
+               isError: isError, images: images)
+
+proc userMessage*(s: string): Message =
+  Message(role: roleUser, content: @[text(s)])
+
+proc userMessage*(parts: seq[ContentBlock]): Message =
+  Message(role: roleUser, content: parts)
+
+proc dropImages*(messages: seq[Message]): seq[Message] =
+  ## Replace image blocks with a text note. Session storage is unchanged.
+  for msg in messages:
+    var parts: seq[ContentBlock] = @[]
+    for p in msg.content:
+      case p.kind
+      of ckImage:
+        parts.add text(imageOmitted)
+      of ckToolResult:
+        if p.images.len > 0:
+          var q = p
+          q.images = @[]
+          if q.output.len > 0: q.output.add "\n"
+          q.output.add imageOmitted
+          parts.add q
+        else:
+          parts.add p
+      else:
+        parts.add p
+    result.add Message(role: msg.role, content: parts)
+
+proc toolCalls*(r: ProviderResponse): seq[ContentBlock] =
+  for b in r.content:
+    if b.kind == ckToolUse:
+      result.add b
+
+proc textContent*(r: ProviderResponse): string =
+  for b in r.content:
+    if b.kind == ckText:
+      if result.len > 0: result.add "\n"
+      result.add b.text
+
+method generateStream*(p: Provider, request: ProviderRequest,
+                       onEvent: StreamCallback): ProviderResponse {.base.} =
+  ## Default: non-streaming fallback that emits thinking then text once.
+  result = p.generate(request)
+  for b in result.content:
+    case b.kind
+    of ckThinking:
+      if b.thinking.len > 0:
+        if not onEvent(StreamEvent(kind: seThinkingDelta, text: b.thinking)):
+          return
+    of ckText:
+      if b.text.len > 0:
+        if not onEvent(StreamEvent(kind: seTextDelta, text: b.text)):
+          return
+    else:
+      discard
+  discard onEvent(StreamEvent(kind: seFinished))
+
+proc isContextOverflow*(detail: string): bool =
+  ## True for known context-window overflow messages (not generic "token" noise).
+  let lower = detail.toLowerAscii
+  "context_length_exceeded" in lower or
+  "context length" in lower or
+  "context window" in lower or
+  "maximum context" in lower or
+  "prompt is too long" in lower or
+  "too many tokens" in lower or
+  "token limit" in lower or
+  "exceeds the model" in lower or
+  "exceeds model" in lower or
+  "max input tokens" in lower
+
+proc raiseProviderError*(msg: string, overflow = false) =
+  let e = newException(ProviderError, msg)
+  e.overflow = overflow
+  raise e
