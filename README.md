@@ -109,6 +109,48 @@ let response = generateText(
 niminal still owns its own agent loop; this helper is for apps that want the
 AI-SDK-style “run my callbacks until the model is done.”
 
+## Structured output
+
+`generateObject` asks the model for JSON that matches a schema and validates
+it. Truncated JSON is closed locally (`fixJson`). OpenAI (Responses and Chat
+Completions), OpenRouter, Hyper, and Anthropic get native structured-output
+knobs automatically; anything else is prompt + extract (including ``` fences).
+
+```nim
+type Recipe = object
+  name: string
+  servings: int
+  ingredients: seq[string]
+
+let recipe = generateObject[Recipe](
+  provider,
+  model = "…",
+  prompt = "A weeknight lasagna.")
+
+echo recipe.value.name
+echo recipe.usage.inputTokens
+```
+
+Pass `schema = %*{...}` for the `JsonNode` form. `mode = omTool` forces a
+`submit` tool. `maxRepairs` (default 0) is optional extra model turns after
+local repair fails.
+
+`streamObject` streams the first attempt. `onPartial` receives the JSON tree
+whenever it changes (unclosed strings/objects are closed; not schema-valid
+until the stream ends). Schema check and model repairs run after that.
+
+```nim
+let recipe = streamObject[Recipe](
+  provider,
+  model = "…",
+  prompt = "A weeknight lasagna.",
+  onPartial = proc (partial: JsonNode): bool =
+    if "name" in partial:
+      stdout.write "\r" & partial["name"].getStr
+      flushFile(stdout)
+    true)
+```
+
 ## What this is not
 
 nimgent is not a coding agent. Session persistence, compaction, workspace

@@ -101,6 +101,11 @@ type
     status*: int       ## HTTP status, or 0 when there was no response
     retryAfterMs*: int ## from Retry-After; 0 if the server did not send one
 
+  ObjectError* = object of ProviderError
+    ## generateObject could not produce a value that matches the schema.
+    issues*: seq[string]
+    raw*: string
+
   AbortCheck* = proc (): bool {.closure.}
     ## Return true to cancel. Checked before each attempt and tool call.
 
@@ -146,8 +151,21 @@ type
     twToggle     ## reasoning.enabled / reasoning.effort=medium / thinking high
     twMaxTokens  ## reasoning.max_tokens / reasoning.effort / thinking.budget_tokens
 
+  ObjectMode* = enum
+    omAuto    ## native structured output when the provider has it
+    omNative  ## native only; still extracts/validates/repairs
+    omJson    ## prompt + extract JSON from text
+    omTool    ## forced submit tool; arguments are the value
+
   StreamCallback* = proc (ev: StreamEvent): bool {.closure.}
     ## Return false to cancel the stream early.
+
+proc addUsage*(a: var Usage, b: Usage) =
+  a.inputTokens += b.inputTokens
+  a.outputTokens += b.outputTokens
+  a.cacheReadTokens += b.cacheReadTokens
+  a.cacheWriteTokens += b.cacheWriteTokens
+  a.cacheReported = a.cacheReported or b.cacheReported
 
 proc contextTokens*(u: Usage): int =
   ## Tokens occupying the context window on the last request.
@@ -377,6 +395,67 @@ proc raiseProviderError*(msg: string, overflow = false, retryable = false,
   e.status = status
   e.retryAfterMs = retryAfterMs
   raise e
+
+proc raiseObjectError*(msg: string, issues: seq[string], raw = "") =
+  let e = newException(ObjectError, msg)
+  e.issues = issues
+  e.raw = raw
+  raise e
+
+proc chatObjectOptions*(name, description: string, schema: JsonNode): JsonNode =
+  var spec = %*{
+    "name": name,
+    "strict": true,
+    "schema": schema
+  }
+  if description.len > 0:
+    spec["description"] = %description
+  %*{"response_format": {"type": "json_schema", "json_schema": spec}}
+
+proc responsesObjectOptions*(name, description: string, schema: JsonNode): JsonNode =
+  var fmt = %*{
+    "type": "json_schema",
+    "name": name,
+    "strict": true,
+    "schema": schema
+  }
+  if description.len > 0:
+    fmt["description"] = %description
+  %*{"text": {"format": fmt}}
+
+proc anthropicObjectOptions*(schema: JsonNode): JsonNode =
+  %*{"output_config": {"format": {"type": "json_schema", "schema": schema}}}
+
+proc chatForceToolOptions*(toolName: string): JsonNode =
+  %*{"tool_choice": {"type": "function", "function": {"name": toolName}}}
+
+proc responsesForceToolOptions*(toolName: string): JsonNode =
+  %*{"tool_choice": {"type": "function", "name": toolName}}
+
+proc anthropicForceToolOptions*(toolName: string): JsonNode =
+  %*{"tool_choice": {"type": "tool", "name": toolName}}
+
+method nativeObjectOptions*(p: Provider, name, description: string,
+                            schema: JsonNode): JsonNode {.base.} =
+  ## Provider-body knobs for native structured output. nil means none.
+  case p.name
+  of "openrouter", "hyper":
+    chatObjectOptions(name, description, schema)
+  of "openai":
+    responsesObjectOptions(name, description, schema)
+  of "anthropic":
+    anthropicObjectOptions(schema)
+  else:
+    nil
+
+method forceToolOptions*(p: Provider, toolName: string): JsonNode {.base.} =
+  case p.name
+  of "openrouter", "hyper", "openai":
+    chatForceToolOptions(toolName)
+  of "anthropic":
+    anthropicForceToolOptions(toolName)
+  else:
+    nil
 
 proc tool*(name, description: string, inputSchema: JsonNode,
            execute: proc (input: JsonNode): ToolOutput {.closure.} = nil,

@@ -3,7 +3,10 @@
 import nimgent/provider
 export provider
 
-import std/[json, os, random]
+import nimgent/jsonschema
+export jsonschema
+
+import std/[json, os, random, strutils]
 when compileOption("threads"):
   import std/typedthreads
 
@@ -259,3 +262,291 @@ proc streamText*(
   ## Streaming retry wrapper for a ready-made request. No tool loop.
   var req = request
   runLoop(provider, req, @[], maxRetries, 1, abort, onEvent)
+
+type ObjectResult*[T] = object
+  value*: T
+  response*: ProviderResponse
+  usage*: Usage
+  repairs*: int
+
+const objectToolName = "submit"
+
+proc mergeOptions(base, extra: JsonNode): JsonNode =
+  result = if base.isNil or base.kind != JObject: newJObject() else: copy(base)
+  if extra.isNil or extra.kind != JObject: return
+  for k, v in extra:
+    result[k] = copy(v)
+
+proc objectInstruction(schema: JsonNode, mode: ObjectMode): string =
+  result = "Respond with a single JSON value that matches this schema:\n"
+  result.add schema.pretty
+  if mode == omTool:
+    result.add "\nCall the " & objectToolName & " tool with that value."
+  else:
+    result.add "\nNo markdown, no prose."
+
+proc takeObjectValue(resp: ProviderResponse, preferTool: bool): tuple[value: JsonNode, issue: string] =
+  if preferTool and resp.toolCalls.len > 0:
+    let c = resp.toolCalls[0]
+    let bad = invalidToolCall(c)
+    if bad.len > 0:
+      return (nil, bad)
+    return (c.input, "")
+  var parsed = extractJson(resp.textContent)
+  if parsed.isNil:
+    parsed = parsePartialJson(resp.textContent).value
+  if not parsed.isNil:
+    return (parsed, "")
+  if resp.toolCalls.len > 0:
+    let c = resp.toolCalls[0]
+    let bad = invalidToolCall(c)
+    if bad.len > 0:
+      return (nil, bad)
+    return (c.input, "")
+  if resp.finishReason == frMaxTokens:
+    return (nil, "response truncated (max tokens)")
+  (nil, "no JSON object or array in the model response")
+
+proc repairMessage(issues: seq[string], value: JsonNode, useTool: bool): string =
+  result = "Your output did not match the required schema:\n"
+  for issue in issues:
+    result.add "- " & issue & "\n"
+  if not value.isNil:
+    result.add "You returned:\n" & value.pretty & "\n"
+  if useTool:
+    result.add "Call " & objectToolName & " with a corrected value."
+  else:
+    result.add "Return a corrected JSON value that matches the schema. No markdown."
+
+type PartialObjectCallback* = proc (value: JsonNode): bool {.closure.}
+  ## Partial JSON tree. Not schema-valid. Return false to cancel.
+
+type ObjectSession = object
+  msgs: seq[Message]
+  sys: seq[string]
+  tools: seq[Tool]
+  opts: JsonNode
+  useTool: bool
+
+proc startObjectSession(
+  provider: Provider, schema: JsonNode, prompt: string,
+  messages: seq[Message], system: seq[string], name, description: string,
+  options: JsonNode, mode: ObjectMode
+): ObjectSession =
+  if schema.isNil or schema.kind != JObject:
+    raiseObjectError("generateObject requires a JSON Schema object", @[])
+  let wire = prepareWireSchema(schema)
+  result.msgs = messages
+  if result.msgs.len == 0 and prompt.len > 0:
+    result.msgs = @[userMessage(prompt)]
+  result.sys = system
+  result.sys.add objectInstruction(wire, mode)
+  let native = provider.nativeObjectOptions(schemaName(name), description, wire)
+  if mode == omNative and native.isNil:
+    raiseObjectError("provider '" & provider.name &
+      "' has no native structured output", @[])
+  result.opts = options
+  result.useTool = mode == omTool
+  if mode in {omAuto, omNative} and not native.isNil:
+    result.opts = mergeOptions(result.opts, native)
+  elif result.useTool:
+    result.tools = @[tool(objectToolName, "Submit the structured result.", wire)]
+    let forced = provider.forceToolOptions(objectToolName)
+    if not forced.isNil:
+      result.opts = mergeOptions(result.opts, forced)
+
+proc acceptObject(resp: ProviderResponse, schema: JsonNode,
+                  useTool: bool): tuple[value: JsonNode, issues: seq[string], raw: string] =
+  let taken = takeObjectValue(resp, useTool)
+  result.value = taken.value
+  result.raw = if taken.value.isNil: resp.textContent else: $taken.value
+  if taken.value.isNil:
+    result.issues = @[taken.issue]
+  else:
+    result.issues = validateSchema(taken.value, schema)
+
+proc emitPartial(acc: string, last: var JsonNode, onPartial: PartialObjectCallback): bool =
+  if onPartial.isNil: return true
+  let parsed = parsePartialJson(acc)
+  if parsed.value.isNil: return true
+  if not last.isNil and jsonEqual(last, parsed.value): return true
+  last = parsed.value
+  onPartial(parsed.value)
+
+proc runObjectLoop(
+  provider: Provider, model: string, schema: JsonNode,
+  session: var ObjectSession, maxTokens: int, sessionId: string,
+  maxRetries, maxRepairs: int, abort: AbortCheck,
+  streamFirst: bool, onPartial: PartialObjectCallback,
+  onEvent: StreamCallback, wakeFd: cint
+): ObjectResult[JsonNode] =
+  var lastRaw = ""
+  var lastIssues: seq[string] = @[]
+  for repair in 0 .. maxRepairs:
+    var cancelled = false
+    if streamFirst and repair == 0:
+      var lastPartial: JsonNode = nil
+      var accText = ""
+      var accTool = ""
+      result.response = streamText(
+        provider, model, onEvent = proc (ev: StreamEvent): bool =
+          case ev.kind
+          of seTextDelta:
+            accText.add ev.text
+            if not emitPartial(accText, lastPartial, onPartial):
+              cancelled = true
+              return false
+          of seToolCallDelta:
+            accTool.add ev.toolArgs
+            if accTool.len > 0 and not emitPartial(accTool, lastPartial, onPartial):
+              cancelled = true
+              return false
+          else:
+            discard
+          if not onEvent.isNil and not onEvent(ev):
+            cancelled = true
+            return false
+          true,
+        messages = session.msgs, system = session.sys, tools = session.tools,
+        maxTokens = maxTokens, sessionId = sessionId, options = session.opts,
+        wakeFd = wakeFd, maxRetries = maxRetries, maxSteps = 1, abort = abort)
+    else:
+      result.response = generateText(
+        provider, model, messages = session.msgs, system = session.sys,
+        tools = session.tools, maxTokens = maxTokens, sessionId = sessionId,
+        options = session.opts, maxRetries = maxRetries, maxSteps = 1,
+        abort = abort)
+    result.usage.addUsage(result.response.usage)
+    result.repairs = repair
+    if cancelled:
+      raiseProviderError("aborted", aborted = true)
+    let taken = acceptObject(result.response, schema, session.useTool)
+    lastRaw = taken.raw
+    lastIssues = taken.issues
+    if taken.issues.len == 0:
+      result.value = taken.value
+      return
+    session.msgs.add Message(role: roleAssistant, content: result.response.content)
+    session.msgs.add userMessage(repairMessage(lastIssues, taken.value, session.useTool))
+  let prefix =
+    if maxRepairs == 0: "generateObject failed: "
+    else: "generateObject failed after " & $maxRepairs & " repair(s): "
+  raiseObjectError(prefix & lastIssues.join("; "), lastIssues, lastRaw)
+
+proc generateObject*(
+  provider: Provider,
+  model: string,
+  schema: JsonNode,
+  prompt = "",
+  messages: seq[Message] = @[],
+  system: seq[string] = @[],
+  name = "object",
+  description = "",
+  maxTokens = 0,
+  sessionId = "",
+  options: JsonNode = nil,
+  maxRetries = 2,
+  maxRepairs = 0,
+  mode = omAuto,
+  abort: AbortCheck = nil
+): ObjectResult[JsonNode] =
+  ## Schema in, JSON out. Uses native structured output when the provider
+  ## has it (`omAuto`), extracts JSON from text or a tool call, validates.
+  ## Truncated JSON is closed with `fixJson`. `maxRepairs` (default 0) is
+  ## extra model turns after that.
+  var session = startObjectSession(provider, schema, prompt, messages, system,
+    name, description, options, mode)
+  runObjectLoop(provider, model, schema, session, maxTokens, sessionId,
+    maxRetries, maxRepairs, abort, false, nil, nil, -1)
+
+proc streamObject*(
+  provider: Provider,
+  model: string,
+  schema: JsonNode,
+  prompt = "",
+  messages: seq[Message] = @[],
+  system: seq[string] = @[],
+  name = "object",
+  description = "",
+  maxTokens = 0,
+  sessionId = "",
+  options: JsonNode = nil,
+  wakeFd: cint = -1,
+  maxRetries = 2,
+  maxRepairs = 0,
+  mode = omAuto,
+  abort: AbortCheck = nil,
+  onPartial: PartialObjectCallback = nil,
+  onEvent: StreamCallback = nil
+): ObjectResult[JsonNode] =
+  ## Like `generateObject`, but the first attempt streams. `onPartial` gets
+  ## the repaired JSON tree whenever it changes (not schema-valid). Schema
+  ## check and optional model repairs run after the stream ends.
+  var session = startObjectSession(provider, schema, prompt, messages, system,
+    name, description, options, mode)
+  runObjectLoop(provider, model, schema, session, maxTokens, sessionId,
+    maxRetries, maxRepairs, abort, true, onPartial, onEvent, wakeFd)
+
+proc toObject*[T](r: ObjectResult[JsonNode]): ObjectResult[T] =
+  ## Decode `r.value` as `T`. Validation already ran against the schema.
+  when T is JsonNode:
+    {.error: "toObject[JsonNode] is a no-op; use the ObjectResult[JsonNode]".}
+  try:
+    result.value = r.value.to(T)
+  except CatchableError as e:
+    raiseObjectError("decoded JSON does not match " & $T & ": " & e.msg,
+      @["$.: " & e.msg], $r.value)
+  result.response = r.response
+  result.usage = r.usage
+  result.repairs = r.repairs
+
+proc generateObject*[T](
+  provider: Provider,
+  model: string,
+  prompt = "",
+  messages: seq[Message] = @[],
+  system: seq[string] = @[],
+  name = "",
+  description = "",
+  maxTokens = 0,
+  sessionId = "",
+  options: JsonNode = nil,
+  maxRetries = 2,
+  maxRepairs = 0,
+  mode = omAuto,
+  abort: AbortCheck = nil
+): ObjectResult[T] =
+  ## `generateObject` with `jsonSchema(T)`, then `toObject`.
+  when T is JsonNode:
+    {.error: "use generateObject(..., schema=) for JsonNode; not generateObject[JsonNode]".}
+  let nm = if name.len > 0: name else: $T
+  toObject[T](generateObject(
+    provider, model, jsonSchema(T), prompt, messages, system, nm, description,
+    maxTokens, sessionId, options, maxRetries, maxRepairs, mode, abort))
+
+proc streamObject*[T](
+  provider: Provider,
+  model: string,
+  prompt = "",
+  messages: seq[Message] = @[],
+  system: seq[string] = @[],
+  name = "",
+  description = "",
+  maxTokens = 0,
+  sessionId = "",
+  options: JsonNode = nil,
+  wakeFd: cint = -1,
+  maxRetries = 2,
+  maxRepairs = 0,
+  mode = omAuto,
+  abort: AbortCheck = nil,
+  onPartial: PartialObjectCallback = nil,
+  onEvent: StreamCallback = nil
+): ObjectResult[T] =
+  when T is JsonNode:
+    {.error: "use streamObject(..., schema=) for JsonNode; not streamObject[JsonNode]".}
+  let nm = if name.len > 0: name else: $T
+  toObject[T](streamObject(
+    provider, model, jsonSchema(T), prompt, messages, system, nm, description,
+    maxTokens, sessionId, options, wakeFd, maxRetries, maxRepairs, mode, abort,
+    onPartial, onEvent))

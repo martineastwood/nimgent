@@ -116,6 +116,19 @@ proc postRequest(provider: OpenAIProvider, body: JsonNode,
     result.client.close()
     raiseProviderError(failPrefix & e.msg, retryable = true)
 
+method nativeObjectOptions*(provider: OpenAIProvider, name, description: string,
+                            schema: JsonNode): JsonNode =
+  if provider.useResponses:
+    responsesObjectOptions(name, description, schema)
+  else:
+    chatObjectOptions(name, description, schema)
+
+method forceToolOptions*(provider: OpenAIProvider, toolName: string): JsonNode =
+  if provider.useResponses:
+    responsesForceToolOptions(toolName)
+  else:
+    chatForceToolOptions(toolName)
+
 method generate*(provider: OpenAIProvider,
                  request: ProviderRequest): ProviderResponse =
   let body = provider.requestBody(request, stream = false)

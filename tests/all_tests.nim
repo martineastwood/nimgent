@@ -1,4 +1,4 @@
-import std/[json, os, osproc, streams, strutils, times, unittest]
+import std/[json, options, os, osproc, streams, strutils, times, unittest]
 import nimgent
 import nimgent/[anthropic, openrouter]
 from nimgent/openai import makeOpenAIProvider, makeHyperProvider,
@@ -566,3 +566,339 @@ suite "encoding":
       maxTokens: 10), stream = false)
     check "reasoning" notin stripped["messages"][1]
     check "reasoning_details" notin stripped["messages"][1]
+
+type
+  Heat* = enum
+    low
+    high
+
+  Recipe* = object
+    name*: string
+    servings*: int
+    ingredients*: seq[string]
+    vegetarian*: Option[bool]
+    heat*: Heat
+
+  ObjectScript = ref object of Provider
+    calls*: int
+    last*: ProviderRequest
+    replies*: seq[string]
+    toolValue*: JsonNode
+    usageEach*: Usage
+
+method generate(p: ObjectScript, request: ProviderRequest): ProviderResponse =
+  inc p.calls
+  p.last = request
+  result.usage = p.usageEach
+  if not p.toolValue.isNil and p.calls == 1:
+    result.content.add toolUse("call_1", "submit", copy(p.toolValue))
+    result.finishReason = frToolUse
+    return
+  if p.replies.len > 0:
+    result.content.add text(p.replies[min(p.calls - 1, p.replies.high)])
+  result.finishReason = frStop
+
+suite "json schema":
+  test "extracts raw, fenced, and prose-wrapped JSON":
+    check extractJson("""{"a":1}""")["a"].getInt == 1
+    check extractJson("```json\n{\"a\": 2}\n```")["a"].getInt == 2
+    check extractJson("here you go:\n{\"a\": 3}\nthanks")["a"].getInt == 3
+    check extractJson("[1, 2]")[1].getInt == 2
+    check extractJson("nope").isNil
+    check extractJson("").isNil
+
+  test "validateSchema covers required, types, enum, and extras":
+    let schema = %*{
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "n": {"type": "integer", "minimum": 1, "maximum": 10},
+        "tags": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+      },
+      "required": ["name", "n"]
+    }
+    check validateSchema(%*{"name": "x", "n": 2, "tags": ["a"]}, schema).len == 0
+    check validateSchema(%*{"name": "x", "n": 2.0}, schema).len == 0
+    check "required" in validateSchema(%*{"n": 2}, schema).join(" ")
+    check "unexpected" in validateSchema(%*{"name": "x", "n": 2, "nope": 1},
+      schema).join(" ")
+    check "integer" in validateSchema(%*{"name": "x", "n": "two"}, schema).join(" ")
+    check "minLength" in validateSchema(%*{"name": "", "n": 2}, schema).join(" ")
+    let enumerated = %*{"type": "string", "enum": ["low", "high"]}
+    check validateSchema(%"low", enumerated).len == 0
+    check "one of" in validateSchema(%"medium", enumerated).join(" ")
+    check "$ref" in validateSchema(%*{}, %*{"$ref": "#/defs/x"}).join(" ")
+
+  test "parsePartialJson closes incomplete JSON":
+    check parsePartialJson("").state == ppUndefined
+    check parsePartialJson("{").state == ppRepaired
+    check parsePartialJson("{").value.len == 0
+    check parsePartialJson("""{"name":"las""").value["name"].getStr == "las"
+    check parsePartialJson("""{"ok":tru""").value["ok"].getBool
+    check parsePartialJson("[1, 2").value.len == 2
+    check parsePartialJson("""{"a":1}""").state == ppSuccess
+    check parsePartialJson("```json\n{\"a\":").value.len == 0
+    check jsonEqual(%*{"a": 1}, %*{"a": 1})
+    check not jsonEqual(%*{"a": 1}, %*{"a": 2})
+
+  test "jsonSchema derives objects, seq, Option, and enums":
+    let s = jsonSchema(Recipe)
+    check s["type"].getStr == "object"
+    check s["additionalProperties"].getBool == false
+    check s["properties"]["name"]["type"].getStr == "string"
+    check s["properties"]["servings"]["type"].getStr == "integer"
+    check s["properties"]["ingredients"]["type"].getStr == "array"
+    check s["properties"]["ingredients"]["items"]["type"].getStr == "string"
+    check s["properties"]["vegetarian"]["type"].kind == JArray
+    check s["properties"]["heat"]["enum"][0].getStr == "low"
+    var required: seq[string]
+    for x in s["required"]:
+      required.add x.getStr
+    check "name" in required
+    check "vegetarian" in required
+    check schemaName("Recipe Title") == "Recipe_Title"
+    check schemaName("2bad") == "n2bad"
+    let wire = prepareWireSchema(%*{"type": "object", "properties": {
+      "x": {"type": "string"}}})
+    check wire["additionalProperties"].getBool == false
+
+suite "generateObject":
+  test "parses JSON text and returns a typed value":
+    let p = ObjectScript(replies: @[
+      """{"name":"lasagna","servings":4,"ingredients":["pasta"],"vegetarian":true,"heat":"low"}"""
+    ])
+    let r = generateObject[Recipe](p, model = "m", prompt = "cook",
+      mode = omJson, maxRetries = 0)
+    check r.value.name == "lasagna"
+    check r.value.servings == 4
+    check r.value.ingredients == @["pasta"]
+    check r.value.vegetarian == some(true)
+    check r.value.heat == low
+    check r.repairs == 0
+
+  test "extracts fenced JSON and sums usage across repairs":
+    let p = ObjectScript(
+      replies: @["nope", "```json\n{\"ok\":true}\n```"],
+      usageEach: Usage(inputTokens: 5, outputTokens: 2))
+    let schema = %*{
+      "type": "object",
+      "properties": {"ok": {"type": "boolean"}},
+      "required": ["ok"]
+    }
+    let r = generateObject(p, model = "m", schema, prompt = "x",
+      mode = omJson, maxRetries = 0, maxRepairs = 1)
+    check r.value["ok"].getBool
+    check r.repairs == 1
+    check r.usage.inputTokens == 10
+    check r.usage.outputTokens == 4
+    check p.calls == 2
+    check "did not match" in p.last.messages[^1].content[0].text
+
+  test "closes truncated JSON without a model repair":
+    let p = ObjectScript(replies: @["{\"ok\": tru"])
+    let schema = %*{
+      "type": "object",
+      "properties": {"ok": {"type": "boolean"}},
+      "required": ["ok"]
+    }
+    let r = generateObject(p, model = "m", schema, prompt = "x",
+      mode = omJson, maxRetries = 0)
+    check r.value["ok"].getBool
+    check r.repairs == 0
+    check p.calls == 1
+
+  test "reads a forced tool call":
+    let p = ObjectScript(name: "openrouter", toolValue: %*{"ok": true})
+    let schema = %*{
+      "type": "object",
+      "properties": {"ok": {"type": "boolean"}},
+      "required": ["ok"]
+    }
+    let r = generateObject(p, model = "m", schema, prompt = "x",
+      mode = omTool, maxRetries = 0)
+    check r.value["ok"].getBool
+    check p.last.tools.len == 1
+    check p.last.tools[0].name == "submit"
+    check p.last.options["tool_choice"]["function"]["name"].getStr == "submit"
+
+  test "omAuto attaches native OpenRouter response_format":
+    let p = ObjectScript(name: "openrouter", replies: @["{\"ok\":true}"])
+    let schema = %*{
+      "type": "object",
+      "properties": {"ok": {"type": "boolean"}},
+      "required": ["ok"]
+    }
+    discard generateObject(p, model = "m", schema, prompt = "x", maxRetries = 0)
+    check p.last.options["response_format"]["type"].getStr == "json_schema"
+    check p.last.options["response_format"]["json_schema"]["strict"].getBool
+    check p.last.options["response_format"]["json_schema"]["schema"][
+      "additionalProperties"].getBool == false
+
+  test "raises ObjectError after repairs are exhausted":
+    let schema = %*{"type": "object", "properties": {"a": {"type": "string"}},
+      "required": ["a"]}
+    let once = ObjectScript(replies: @["not json"])
+    expect ObjectError:
+      discard generateObject(once, model = "m", schema, prompt = "x",
+        mode = omJson, maxRetries = 0)
+    check once.calls == 1
+    let p = ObjectScript(replies: @["not json"])
+    var err: ref ObjectError
+    try:
+      discard generateObject(p, model = "m", schema, prompt = "x",
+        mode = omJson, maxRepairs = 1, maxRetries = 0)
+    except ObjectError as e:
+      err = e
+    check not err.isNil
+    check p.calls == 2
+    check err.issues.len > 0
+
+  test "omNative fails when the provider has no native format":
+    let p = ObjectScript()
+    expect ObjectError:
+      discard generateObject(p, model = "m",
+        schema = %*{"type": "object"}, prompt = "x", mode = omNative)
+
+  test "native option helpers match each wire format":
+    let schema = %*{"type": "object", "properties": {"a": {"type": "string"}}}
+    check makeOpenAIProvider("k").nativeObjectOptions("o", "", schema)[
+      "text"]["format"]["type"].getStr == "json_schema"
+    check makeOpenAIProvider("k", defaultOpenAiChatEndpoint).nativeObjectOptions(
+      "o", "", schema)["response_format"]["type"].getStr == "json_schema"
+    check makeHyperProvider("k").nativeObjectOptions("o", "", schema)[
+      "response_format"]["json_schema"]["name"].getStr == "o"
+    check makeOpenRouterProvider("k", "http://x").nativeObjectOptions(
+      "o", "d", schema)["response_format"]["json_schema"]["description"].getStr == "d"
+    check makeAnthropicProvider("k", "http://x").nativeObjectOptions(
+      "o", "", schema)["output_config"]["format"]["type"].getStr == "json_schema"
+    check makeOpenAIProvider("k").forceToolOptions("submit")["tool_choice"][
+      "type"].getStr == "function"
+    check makeOpenAIProvider("k").forceToolOptions("submit")["tool_choice"][
+      "name"].getStr == "submit"
+    check makeAnthropicProvider("k", "http://x").forceToolOptions("submit")[
+      "tool_choice"]["type"].getStr == "tool"
+
+  test "addUsage sums cache flags":
+    var u = Usage(inputTokens: 1, cacheReadTokens: 2, cacheReported: true)
+    u.addUsage(Usage(inputTokens: 3, outputTokens: 4, cacheWriteTokens: 5))
+    check u.inputTokens == 4
+    check u.outputTokens == 4
+    check u.cacheReadTokens == 2
+    check u.cacheWriteTokens == 5
+    check u.cacheReported
+
+type
+  ChunkScript = ref object of Provider
+    chunks*: seq[string]
+    last*: ProviderRequest
+    tool*: bool
+
+method generateStream(p: ChunkScript, request: ProviderRequest,
+                      onEvent: StreamCallback): ProviderResponse =
+  p.last = request
+  var acc = ""
+  if p.tool:
+    if not onEvent(StreamEvent(kind: seToolCallDelta, toolCallId: "call_1",
+        toolName: "submit", toolArgs: "")):
+      result.finishReason = frStop
+      return
+  for c in p.chunks:
+    acc.add c
+    let ev =
+      if p.tool:
+        StreamEvent(kind: seToolCallDelta, toolCallId: "call_1",
+          toolName: "submit", toolArgs: c)
+      else:
+        StreamEvent(kind: seTextDelta, text: c)
+    if not onEvent(ev):
+      result.finishReason = frStop
+      if p.tool:
+        result.content.add toolUseFromArgs("call_1", "submit", acc)
+      else:
+        result.content.add text(acc)
+      return
+  if p.tool:
+    result.content.add toolUseFromArgs("call_1", "submit", acc)
+    result.finishReason = frToolUse
+  else:
+    result.content.add text(acc)
+    result.finishReason = frStop
+  discard onEvent(StreamEvent(kind: seFinished))
+
+suite "streamObject":
+  test "emits growing partials then a valid value":
+    let p = ChunkScript(chunks: @["{\"n", "ame\":\"a", "bc\",\"n\":", "1}"])
+    let schema = %*{
+      "type": "object",
+      "properties": {"name": {"type": "string"}, "n": {"type": "integer"}},
+      "required": ["name", "n"]
+    }
+    var partials: seq[string] = @[]
+    var texts: seq[string] = @[]
+    let r = streamObject(p, model = "m", schema, prompt = "x",
+      mode = omJson, maxRetries = 0,
+      onPartial = proc (v: JsonNode): bool =
+        partials.add $v
+        true,
+      onEvent = proc (ev: StreamEvent): bool =
+        if ev.kind == seTextDelta: texts.add ev.text
+        true)
+    check r.value["name"].getStr == "abc"
+    check r.value["n"].getInt == 1
+    check r.repairs == 0
+    check texts == @["{\"n", "ame\":\"a", "bc\",\"n\":", "1}"]
+    check partials.len >= 2
+    check "abc" in partials[^1]
+
+  test "streams tool-call argument fragments":
+    let p = ChunkScript(name: "openrouter", tool: true,
+      chunks: @["{\"ok\":", "true}"])
+    let schema = %*{
+      "type": "object",
+      "properties": {"ok": {"type": "boolean"}},
+      "required": ["ok"]
+    }
+    var saw: seq[bool] = @[]
+    let r = streamObject(p, model = "m", schema, prompt = "x",
+      mode = omTool, maxRetries = 0,
+      onPartial = proc (v: JsonNode): bool =
+        if "ok" in v: saw.add v["ok"].getBool
+        true)
+    check r.value["ok"].getBool
+    check true in saw
+
+  test "typed streamObject and cancel via onPartial":
+    let p = ObjectScript(replies: @[
+      """{"name":"lasagna","servings":4,"ingredients":["pasta"],"vegetarian":null,"heat":"low"}"""
+    ])
+    let r = streamObject[Recipe](p, model = "m", prompt = "cook",
+      mode = omJson, maxRetries = 0)
+    check r.value.name == "lasagna"
+    check r.value.vegetarian.isNone
+    let c = ChunkScript(chunks: @["{\"a\":", "1}"])
+    var err: ref ProviderError
+    try:
+      discard streamObject(c, model = "m",
+        schema = %*{"type": "object", "properties": {"a": {"type": "integer"}},
+          "required": ["a"]},
+        prompt = "x", mode = omJson, maxRetries = 0,
+        onPartial = proc (_: JsonNode): bool = false)
+    except ProviderError as e:
+      err = e
+    check not err.isNil
+    check err.aborted
+
+  test "repairs after a streamed miss":
+    let p = ObjectScript(replies: @["nope", """{"ok":true}"""])
+    let schema = %*{
+      "type": "object",
+      "properties": {"ok": {"type": "boolean"}},
+      "required": ["ok"]
+    }
+    let r = streamObject(p, model = "m", schema, prompt = "x",
+      mode = omJson, maxRetries = 0, maxRepairs = 1)
+    check r.value["ok"].getBool
+    check r.repairs == 1
+    check p.calls == 2
+
