@@ -396,7 +396,7 @@ proc thinkingOptions*(provider, level: string, wire = twEffort): JsonNode =
   case wire
   of twEffort:
     case p
-    of "openrouter", "openai":
+    of "openrouter", "openai", "hyper":
       result["reasoning"] = %*{"effort": lv}
     of "anthropic":
       let budget = thinkingBudgetTokens(lv)
@@ -408,7 +408,7 @@ proc thinkingOptions*(provider, level: string, wire = twEffort): JsonNode =
     case p
     of "openrouter":
       result["reasoning"] = %*{"enabled": true}
-    of "openai":
+    of "openai", "hyper":
       result["reasoning"] = %*{"effort": "medium"}
     of "anthropic":
       result = thinkingOptions(p, "high", twEffort)
@@ -418,7 +418,7 @@ proc thinkingOptions*(provider, level: string, wire = twEffort): JsonNode =
     case p
     of "openrouter":
       result["reasoning"] = %*{"max_tokens": thinkingBudgetTokens(lv)}
-    of "openai":
+    of "openai", "hyper":
       result["reasoning"] = %*{"effort": lv}
     of "anthropic":
       result = thinkingOptions(p, lv, twEffort)

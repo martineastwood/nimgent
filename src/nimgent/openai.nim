@@ -1,8 +1,8 @@
 ## OpenAI adapter.
 ##
 ## Native OpenAI uses the Responses API (`store: false`, reasoning replay).
-## OpenRouter and any `*/chat/completions` URL keep Chat Completions, including
-## `reasoning` / `reasoning_details` replay. Those extras (session_id,
+## OpenRouter, Hyper, and any `*/chat/completions` URL keep Chat Completions,
+## including `reasoning` / `reasoning_details` replay. Those extras (session_id,
 ## cache_control, HTTP-Referer) stay optional on this type.
 
 import std/[asyncdispatch, asyncstreams, httpclient, json, net, streams, strutils]
@@ -11,6 +11,7 @@ import nimgent/provider
 const
   defaultOpenAiEndpoint* = "https://api.openai.com/v1/responses"
   defaultOpenAiChatEndpoint* = "https://api.openai.com/v1/chat/completions"
+  defaultHyperEndpoint* = "https://hyper.charm.land/v1/chat/completions"
 
 type
   OpenAIProvider* = ref object of Provider
@@ -30,6 +31,7 @@ type
     useResponses*: bool
 
   OpenRouterProvider* = OpenAIProvider
+  HyperProvider* = OpenAIProvider
 
 proc textParts(message: Message): string =
   for part in message.content:
@@ -325,6 +327,14 @@ proc makeOpenRouterProvider*(apiKey, endpoint: string,
     timeoutSeconds, siteUrl, siteName, includeSessionId = true,
     applyCache = true, maxTokensField = "max_tokens")
 
+proc makeHyperProvider*(apiKey: string, endpoint = "",
+                        timeoutSeconds = 300): HyperProvider =
+  ## Hyper's documented agent API is Chat Completions. Their /v1/responses
+  ## pass-through 400s OpenAI input items, so this stays on chat.
+  let url = if endpoint.len > 0: endpoint else: defaultHyperEndpoint
+  initChatProvider("hyper", "Hyper", apiKey, url, timeoutSeconds,
+    maxTokensField = "max_tokens")
+
 proc label(provider: OpenAIProvider): string =
   if provider.displayName.len > 0: provider.displayName else: provider.name
 
@@ -339,6 +349,7 @@ proc makeHeaders(provider: OpenAIProvider): HttpHeaders =
     result["X-Title"] = provider.siteName
 
 proc parseUsage(usage: JsonNode, result: var Usage) =
+  if usage.isNil or usage.kind != JObject: return
   result.inputTokens = usage.getOrDefault("prompt_tokens").getInt
   if result.inputTokens == 0:
     result.inputTokens = usage.getOrDefault("input_tokens").getInt
@@ -348,6 +359,8 @@ proc parseUsage(usage: JsonNode, result: var Usage) =
   var details = usage.getOrDefault("prompt_tokens_details")
   if details.isNil or details.kind != JObject:
     details = usage.getOrDefault("input_tokens_details")
+  if details.isNil or details.kind != JObject:
+    return
   result.cacheReadTokens = details.getOrDefault("cached_tokens").getInt
   result.cacheWriteTokens = details.getOrDefault("cache_write_tokens").getInt
   result.cacheReported = ("cached_tokens" in details) or

@@ -55,10 +55,13 @@ echo "finish: ", response.finishReason
 ## Providers
 
 ```nim
-import nimgent/[anthropic, openai, openrouter]
+import nimgent/[anthropic, hyper, openai, openrouter]
 
 let openai = makeOpenAIProvider(getEnv("OPENAI_API_KEY"))
 # /v1/responses; pass a */chat/completions URL for compat servers
+
+let hyper = makeHyperProvider(getEnv("HYPER_API_KEY"))
+# https://hyper.charm.land/v1/chat/completions
 
 let anthropic = makeAnthropicProvider(
   getEnv("ANTHROPIC_API_KEY"),

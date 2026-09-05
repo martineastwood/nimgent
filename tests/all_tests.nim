@@ -1,13 +1,15 @@
 import std/[json, os, osproc, streams, strutils, times, unittest]
 import nimgent
 import nimgent/[anthropic, openrouter]
-from nimgent/openai import makeOpenAIProvider, buildOpenAiBody, buildChatBody,
-  defaultOpenAiEndpoint, defaultOpenAiChatEndpoint
+from nimgent/openai import makeOpenAIProvider, makeHyperProvider, buildOpenAiBody,
+  buildChatBody, defaultOpenAiEndpoint, defaultOpenAiChatEndpoint,
+  defaultHyperEndpoint
 
 suite "thinking options":
   test "maps effort, toggle, and max_tokens by provider":
     check thinkingOptions("openrouter", "high")["reasoning"]["effort"].getStr == "high"
     check thinkingOptions("openai", "low")["reasoning"]["effort"].getStr == "low"
+    check thinkingOptions("hyper", "high")["reasoning"]["effort"].getStr == "high"
     check thinkingOptions("anthropic", "medium")["thinking"]["budget_tokens"].getInt == 8000
     check thinkingOptions("openai", "none").len == 0
     check thinkingOptions("openrouter", "high", twToggle)["reasoning"]["enabled"].getBool
@@ -304,6 +306,53 @@ suite "generateText retries, abort, and tools":
     check retryDelayMs(0, 1_500) == 1_500
     check retryDelayMs(0, 99_000) == retryAfterCapMs
     check retryDelayMs(0) <= 250
+
+suite "Hyper provider":
+  test "defaults to chat completions":
+    check makeHyperProvider("k").name == "hyper"
+    check makeHyperProvider("k").endpoint == defaultHyperEndpoint
+    check not makeHyperProvider("k").useResponses
+    check makeHyperProvider("k").maxTokensField == "max_tokens"
+    check not makeHyperProvider("k",
+      "https://hyper.charm.land/v1/responses").useResponses
+
+  test "chat body uses max_tokens and skips OpenRouter extras":
+    let body = buildChatBody(ProviderRequest(
+      model: "deepseek-v4-flash",
+      sessionId: "must-not-send",
+      messages: @[userMessage("hi")],
+      maxTokens: 32), stream = false, maxTokensField = "max_tokens")
+    check body["max_tokens"].getInt == 32
+    check "max_completion_tokens" notin body
+    check "session_id" notin body
+    check "cache_control" notin $body
+
+  test "missing API key fails before making a request":
+    let provider = makeHyperProvider("", "http://127.0.0.1:1")
+    expect ProviderError:
+      discard provider.generate(ProviderRequest(model: "test",
+        messages: @[userMessage("hello")], maxTokens: 10))
+
+  test "generate accepts usage without token-details":
+    let fixturePath = getCurrentDir() / "tests" / "hyper_fixture.py"
+    var fixture = startProcess("python3", args = @[fixturePath],
+      options = {poUsePath, poStdErrToStdOut})
+    defer:
+      if fixture.running:
+        fixture.terminate()
+        discard fixture.waitForExit()
+      fixture.close()
+    let port = parseInt(fixture.outputStream.readLine())
+    let provider = makeHyperProvider("fixture-key",
+      "http://127.0.0.1:" & $port, timeoutSeconds = 5)
+    let response = provider.generate(ProviderRequest(
+      model: "deepseek-v4-flash", messages: @[userMessage("hi")],
+      maxTokens: 16))
+    check response.textContent == "pong"
+    check response.usage.inputTokens == 10
+    check response.usage.outputTokens == 1
+    check not response.usage.cacheReported
+    check fixture.waitForExit() == 0
 
 suite "OpenAI provider":
   test "native body uses Responses fields and omits Chat Completions extras":
