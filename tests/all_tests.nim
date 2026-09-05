@@ -27,6 +27,14 @@ suite "provider types":
     let req = ProviderRequest(model: "test", messages: @[userMessage("hi")])
     check req.wakeFd == -1
 
+  test "cache hit percent does not double-count inclusive prompt tokens":
+    let openrouter = Usage(inputTokens: 10000, outputTokens: 1,
+      cacheReadTokens: 9680, cacheReported: true)
+    check "CH96.8%" in formatUsageLabels(openrouter)
+    let anthropic = Usage(inputTokens: 100, outputTokens: 1,
+      cacheReadTokens: 900, cacheReported: true)
+    check "CH90.0%" in formatUsageLabels(anthropic)
+
 suite "OpenRouter provider":
   test "stream line buffer splits on newlines":
     var buf = "data: one\ndata: two\npartial"

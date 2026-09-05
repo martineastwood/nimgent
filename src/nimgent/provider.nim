@@ -168,7 +168,7 @@ proc formatUsageLabels*(usage: Usage): seq[string] =
     result.add "R" & $usage.cacheReadTokens
     if usage.cacheWriteTokens > 0:
       result.add "W" & $usage.cacheWriteTokens
-    let denom = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
+    let denom = contextTokens(usage)
     if denom > 0:
       let pct = usage.cacheReadTokens * 100 / denom
       result.add "CH" & pct.formatFloat(ffDecimal, 1) & "%"
