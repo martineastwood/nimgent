@@ -1,8 +1,8 @@
 import std/[json, os, osproc, streams, strutils, times, unittest]
 import nimgent
 import nimgent/[anthropic, openrouter]
-from nimgent/openai import makeOpenAIProvider, buildOpenAiBody, defaultOpenAiEndpoint,
-  defaultOpenAiChatEndpoint
+from nimgent/openai import makeOpenAIProvider, buildOpenAiBody, buildChatBody,
+  defaultOpenAiEndpoint, defaultOpenAiChatEndpoint
 
 suite "thinking options":
   test "maps effort, toggle, and max_tokens by provider":
@@ -59,6 +59,10 @@ suite "OpenRouter provider":
         true)
     check pieces == @["Hello", " world"]
     check response.textContent == "Hello world"
+    check response.content[0].kind == ckThinking
+    check response.content[0].thinking == "planAplanB"
+    check "sig_s" in response.content[0].signature
+    check "planAplanB" in response.content[0].signature
     check stamps.len == 2
     check stamps[1] - stamps[0] >= 0.05
     check fixture.waitForExit() == 0
@@ -96,6 +100,9 @@ suite "OpenRouter provider":
       maxTokens: 100)
     let first = provider.generate(request)
     check first.model == "deepseek/deepseek-v4-flash-0731"
+    check first.content[0].kind == ckThinking
+    check first.content[0].thinking == "should I read?"
+    check "sig_fixture" in first.content[0].signature
     check first.toolCalls.len == 1
     check first.toolCalls[0].name == "read"
     check first.toolCalls[0].input["path"].getStr == "README.md"
@@ -464,3 +471,67 @@ suite "encoding":
     check sysParts.len == 2
     check "cache_control" in sysParts[1]
     check "cache_control" in sysBody["tools"][0]
+
+  test "chat completions replays thinking and signed details":
+    let details = $(%*[{
+      "type": "reasoning.text",
+      "text": "plan",
+      "signature": "sig",
+      "format": "anthropic-claude-v1",
+      "index": 0
+    }])
+    let withDetails = buildChatBody(ProviderRequest(
+      model: "m",
+      messages: @[
+        userMessage("hi"),
+        Message(role: roleAssistant, content: @[
+          ContentBlock(kind: ckThinking, thinking: "plan", signature: details),
+          text("ok"),
+          toolUse("call_1", "read", %*{"path": "x"})
+        ])
+      ],
+      maxTokens: 10), stream = false)
+    let asst = withDetails["messages"][1]
+    check asst["reasoning"].getStr == "plan"
+    check asst["reasoning_details"][0]["signature"].getStr == "sig"
+    let plain = buildChatBody(ProviderRequest(
+      model: "m",
+      messages: @[
+        userMessage("hi"),
+        Message(role: roleAssistant, content: @[
+          ContentBlock(kind: ckThinking, thinking: "scratch"),
+          text("ok")
+        ])
+      ],
+      maxTokens: 10), stream = false)
+    check plain["messages"][1]["reasoning"].getStr == "scratch"
+    check "reasoning_details" notin plain["messages"][1]
+    let toolNoSig = buildChatBody(ProviderRequest(
+      model: "m",
+      messages: @[
+        userMessage("hi"),
+        Message(role: roleAssistant, content: @[
+          ContentBlock(kind: ckThinking, thinking: "scratch"),
+          toolUse("call_1", "read", %*{"path": "x"})
+        ])
+      ],
+      maxTokens: 10), stream = false)
+    check "reasoning" notin toolNoSig["messages"][1]
+    let unsigned = $(%*[{
+      "type": "reasoning.text",
+      "text": "plan",
+      "format": "anthropic-claude-v1",
+      "index": 0
+    }])
+    let stripped = buildChatBody(ProviderRequest(
+      model: "m",
+      messages: @[
+        userMessage("hi"),
+        Message(role: roleAssistant, content: @[
+          ContentBlock(kind: ckThinking, thinking: "plan", signature: unsigned),
+          toolUse("call_1", "read", %*{"path": "x"})
+        ])
+      ],
+      maxTokens: 10), stream = false)
+    check "reasoning" notin stripped["messages"][1]
+    check "reasoning_details" notin stripped["messages"][1]

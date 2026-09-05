@@ -34,6 +34,14 @@ class Handler(BaseHTTPRequestHandler):
                     "message": {
                         "role": "assistant",
                         "content": None,
+                        "reasoning": "should I read?",
+                        "reasoning_details": [{
+                            "type": "reasoning.text",
+                            "text": "should I read?",
+                            "signature": "sig_fixture",
+                            "format": "anthropic-claude-v1",
+                            "index": 0,
+                        }],
                         "tool_calls": [{
                             "id": "call_fixture",
                             "type": "function",
@@ -103,8 +111,14 @@ class Handler(BaseHTTPRequestHandler):
             if last_text(messages[-1]) != "hello":
                 return "bad initial user message"
         else:
-            if not any(m.get("role") == "assistant" for m in messages):
+            assistant = next((m for m in messages if m.get("role") == "assistant"), None)
+            if assistant is None:
                 return "missing assistant tool call"
+            if assistant.get("reasoning") != "should I read?":
+                return "missing reasoning replay"
+            details = assistant.get("reasoning_details") or []
+            if not details or details[0].get("signature") != "sig_fixture":
+                return "missing reasoning_details replay"
             if not any(
                 m.get("role") == "tool"
                 and m.get("tool_call_id") == "call_fixture"

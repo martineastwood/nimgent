@@ -1,8 +1,9 @@
 ## OpenAI adapter.
 ##
 ## Native OpenAI uses the Responses API (`store: false`, reasoning replay).
-## OpenRouter and any `*/chat/completions` URL keep Chat Completions. Those
-## extras (session_id, cache_control, HTTP-Referer) stay optional on this type.
+## OpenRouter and any `*/chat/completions` URL keep Chat Completions, including
+## `reasoning` / `reasoning_details` replay. Those extras (session_id,
+## cache_control, HTTP-Referer) stay optional on this type.
 
 import std/[asyncdispatch, asyncstreams, httpclient, json, net, streams, strutils]
 import nimgent/provider
@@ -83,6 +84,45 @@ proc addUserMessages(result: var JsonNode, message: Message) =
   elif message.content.len == 0:
     result.add %*{"role": "user", "content": ""}
 
+proc keepChatReasoningDetail(item: JsonNode): bool =
+  ## Unsigned Anthropic text details 400 on replay. Other types/formats are fine.
+  if item.isNil or item.kind != JObject: return false
+  if item.getOrDefault("type").getStr != "reasoning.text":
+    return true
+  if item.getOrDefault("format").getStr != "anthropic-claude-v1":
+    return true
+  let sig = item.getOrDefault("signature")
+  not sig.isNil and sig.kind == JString and sig.getStr.len > 0
+
+proc attachChatThinking(encoded: JsonNode, message: Message, hasToolCalls: bool) =
+  ## Replay thinking the Chat Completions hosts expect (OpenRouter / compat).
+  var think = ""
+  var details = newJArray()
+  var hadDetails = false
+  for part in message.content:
+    if part.kind != ckThinking: continue
+    if part.thinking.len > 0:
+      if think.len > 0: think.add "\n"
+      think.add part.thinking
+    if part.signature.len == 0: continue
+    try:
+      let j = parseJson(part.signature)
+      if j.kind != JArray: continue
+      hadDetails = true
+      for item in j:
+        if keepChatReasoningDetail(item):
+          details.add item
+    except CatchableError:
+      discard
+  if details.len > 0:
+    if think.len > 0:
+      encoded["reasoning"] = %think
+    encoded["reasoning_details"] = details
+  elif think.len > 0 and not hadDetails and not hasToolCalls:
+    # ponytail: plaintext-only models. Tool turns without details stay omitted —
+    # Claude-via-OpenRouter 400s unsigned thinking on tool follow-up.
+    encoded["reasoning"] = %think
+
 proc encodeMessage(result: var JsonNode, message: Message) =
   if message.role == roleUser:
     addUserMessages(result, message)
@@ -108,6 +148,7 @@ proc encodeMessage(result: var JsonNode, message: Message) =
       }
   if calls.len > 0:
     encoded["tool_calls"] = calls
+  attachChatThinking(encoded, message, calls.len > 0)
   result.add encoded
 
 proc buildChatBody*(request: ProviderRequest, stream: bool,
@@ -393,6 +434,54 @@ proc reasoningFrom(node: JsonNode): string =
       node["reasoning_content"].kind == JString:
     result = node["reasoning_content"].getStr
 
+proc reasoningTextFromDetails(details: JsonNode): string =
+  if details.isNil or details.kind != JArray: return
+  for item in details:
+    if item.isNil or item.kind != JObject: continue
+    let t = item.getOrDefault("text")
+    if not t.isNil and t.kind == JString and t.getStr.len > 0:
+      result.add t.getStr
+    else:
+      let s = item.getOrDefault("summary")
+      if not s.isNil and s.kind == JString: result.add s.getStr
+
+proc thinkingFromChat(node: JsonNode): ContentBlock =
+  result = ContentBlock(kind: ckThinking, thinking: reasoningFrom(node))
+  if node.isNil: return
+  let d = node.getOrDefault("reasoning_details")
+  if not d.isNil and d.kind == JArray and d.len > 0:
+    result.signature = $d
+    if result.thinking.len == 0:
+      result.thinking = reasoningTextFromDetails(d)
+
+proc mergeChatReasoningDetails(acc: JsonNode, incoming: JsonNode) =
+  ## Stream fragments with the same type+index concatenate; later metadata wins.
+  if acc.isNil or incoming.isNil or incoming.kind != JArray: return
+  for item in incoming:
+    if item.isNil or item.kind != JObject: continue
+    let idxNode = item.getOrDefault("index")
+    let typ = item.getOrDefault("type").getStr
+    var merged = false
+    if not idxNode.isNil and idxNode.kind == JInt:
+      for slot in acc:
+        let slotIdx = slot.getOrDefault("index")
+        if not slotIdx.isNil and slotIdx.kind == JInt and
+            slotIdx.getInt == idxNode.getInt and
+            slot.getOrDefault("type").getStr == typ:
+          for key, val in item:
+            if key in ["text", "summary", "data"] and val.kind == JString:
+              let prev = slot.getOrDefault(key)
+              if not prev.isNil and prev.kind == JString:
+                slot[key] = %(prev.getStr & val.getStr)
+              else:
+                slot[key] = val
+            elif key != "index":
+              slot[key] = val
+          merged = true
+          break
+    if not merged:
+      acc.add copy(item)
+
 proc ensureApiKey(provider: OpenAIProvider) =
   if provider.apiKey.len == 0:
     raiseProviderError(provider.label.toUpperAscii & " API key is not configured")
@@ -526,9 +615,9 @@ method generate*(provider: OpenAIProvider,
     raiseProviderError(provider.label & " response contained no choices")
   result.model = data.getOrDefault("model").getStr
   let message = data["choices"][0]["message"]
-  let think = reasoningFrom(message)
-  if think.len > 0:
-    result.content.add ContentBlock(kind: ckThinking, thinking: think)
+  let think = thinkingFromChat(message)
+  if think.thinking.len > 0 or think.signature.len > 0:
+    result.content.add think
   if "content" in message and message["content"].kind == JString:
     result.content.add text(message["content"].getStr)
   if "tool_calls" in message:
@@ -597,6 +686,7 @@ method generateStream*(provider: OpenAIProvider,
 
   var textAcc = ""
   var thinkAcc = ""
+  var detailsAcc = newJArray()
   var tools: seq[PendingTool] = @[]
   var cancelled = false
   var parsedFinal = false
@@ -711,7 +801,10 @@ method generateStream*(provider: OpenAIProvider,
             if not onEvent(StreamEvent(kind: seTextDelta, text: piece)):
               cancelled = true
               break streamLoop
-        let reason = reasoningFrom(delta)
+        mergeChatReasoningDetails(detailsAcc, delta.getOrDefault("reasoning_details"))
+        var reason = reasoningFrom(delta)
+        if reason.len == 0:
+          reason = reasoningTextFromDetails(delta.getOrDefault("reasoning_details"))
         if reason.len > 0:
           thinkAcc.add reason
           if not onEvent(StreamEvent(kind: seThinkingDelta, text: reason)):
@@ -743,8 +836,9 @@ method generateStream*(provider: OpenAIProvider,
                 break streamLoop
 
   if not parsedFinal:
-    if thinkAcc.len > 0:
-      result.content.add ContentBlock(kind: ckThinking, thinking: thinkAcc)
+    if thinkAcc.len > 0 or detailsAcc.len > 0:
+      result.content.add ContentBlock(kind: ckThinking, thinking: thinkAcc,
+        signature: if detailsAcc.len > 0: $detailsAcc else: "")
     if textAcc.len > 0:
       result.content.add text(textAcc)
     for t in tools:

@@ -6,10 +6,14 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
-def sse_data(delta_text=None, finish=None, tool=None):
+def sse_data(delta_text=None, finish=None, tool=None, reasoning=None, details=None):
     choice = {"index": 0, "delta": {}, "finish_reason": None}
     if delta_text is not None:
         choice["delta"] = {"content": delta_text}
+    if reasoning is not None:
+        choice["delta"]["reasoning"] = reasoning
+    if details is not None:
+        choice["delta"]["reasoning_details"] = details
     if tool is not None:
         tc = {"index": 0, "function": {}}
         if "id" in tool:
@@ -61,9 +65,20 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(0.08)
             send_chunk(sse_data(finish="tool_calls"))
         else:
-            send_chunk(sse_data("Hello"))
+            send_chunk(sse_data("Hello", reasoning="planA", details=[{
+                "type": "reasoning.text",
+                "text": "planA",
+                "index": 0,
+                "format": "openai-responses-v1",
+            }]))
             time.sleep(0.08)
-            send_chunk(sse_data(" world"))
+            send_chunk(sse_data(" world", reasoning="planB", details=[{
+                "type": "reasoning.text",
+                "text": "planB",
+                "signature": "sig_s",
+                "index": 0,
+                "format": "openai-responses-v1",
+            }]))
             time.sleep(0.08)
             send_chunk(sse_data(finish="stop"))
         send_chunk(b"data: [DONE]\n\n")
