@@ -99,6 +99,7 @@ type
     retryable*: bool   ## 429 / 5xx / transport; generateText may retry
     aborted*: bool     ## caller abort() returned true
     status*: int       ## HTTP status, or 0 when there was no response
+    retryAfterMs*: int ## from Retry-After; 0 if the server did not send one
 
   AbortCheck* = proc (): bool {.closure.}
     ## Return true to cancel. Checked before each attempt and tool call.
@@ -340,13 +341,28 @@ proc isContextOverflow*(detail: string): bool =
 proc isRetryableStatus*(code: int): bool =
   code == 429 or code >= 500
 
+const retryAfterCapMs* = 30_000  ## ignore wild Retry-After values
+
+proc parseRetryAfter*(value: string): int =
+  ## Milliseconds from a Retry-After header. Integer seconds only; HTTP-date
+  ## is ignored (caller falls back to jittered backoff). Capped at 30s.
+  let s = value.strip
+  if s.len == 0: return 0
+  try:
+    let secs = parseInt(s)
+    if secs <= 0: return 0
+    result = min(secs * 1000, retryAfterCapMs)
+  except ValueError:
+    return 0
+
 proc raiseProviderError*(msg: string, overflow = false, retryable = false,
-                         aborted = false, status = 0) =
+                         aborted = false, status = 0, retryAfterMs = 0) =
   let e = newException(ProviderError, msg)
   e.overflow = overflow
   e.retryable = retryable or isRetryableStatus(status)
   e.aborted = aborted
   e.status = status
+  e.retryAfterMs = retryAfterMs
   raise e
 
 proc tool*(name, description: string, inputSchema: JsonNode,

@@ -3,7 +3,7 @@
 import nimgent/provider
 export provider
 
-import std/[json, os]
+import std/[json, os, random]
 
 proc buildRequest(
   model: string,
@@ -33,9 +33,30 @@ proc checkAbort(abort: AbortCheck) =
   if not abort.isNil and abort():
     raiseProviderError("aborted", aborted = true)
 
-proc retryDelayMs(attempt: int): int =
-  ## ponytail: 50/100/200ms; enough to back off 429s, not a full jittered policy.
-  50 * (1 shl attempt)
+const
+  retryBaseMs = 250
+  retryCapMs = 8_000
+
+var retryRngSeeded = false
+
+proc retryDelayMs*(attempt: int, retryAfterMs = 0): int =
+  ## Retry-After wins (capped). Otherwise full jitter on 250ms * 2^attempt, max 8s.
+  if retryAfterMs > 0:
+    return min(retryAfterMs, retryAfterCapMs)
+  if not retryRngSeeded:
+    randomize()
+    retryRngSeeded = true
+  var backoff = retryBaseMs * (1 shl min(attempt, 5))
+  if backoff > retryCapMs: backoff = retryCapMs
+  rand(backoff)
+
+proc sleepAbort(ms: int, abort: AbortCheck) =
+  var left = ms
+  while left > 0:
+    checkAbort(abort)
+    let chunk = min(left, 50)
+    sleep(chunk)
+    left -= chunk
 
 proc canExecute(tools: openArray[Tool]): bool =
   for t in tools:
@@ -84,7 +105,7 @@ proc retryingCall(provider: Provider, request: ProviderRequest,
       if started or e.aborted or e.overflow or not e.retryable or
           attempt == maxRetries:
         raise
-      sleep(retryDelayMs(attempt))
+      sleepAbort(retryDelayMs(attempt, e.retryAfterMs), abort)
 
 proc runLoop(provider: Provider, request: var ProviderRequest,
              tools: seq[Tool], maxRetries, maxSteps: int,
@@ -128,11 +149,23 @@ proc generateText*(
   abort: AbortCheck = nil
 ): ProviderResponse =
   ## One-shot completion. `prompt` becomes a user message when `messages` is empty.
-  ## `maxRetries` retries 429/5xx/transport (default 2). `maxSteps` > 1 plus
+  ## `maxRetries` retries 429/5xx/transport (default 2) with jitter and
+  ## Retry-After. `maxSteps` > 1 plus
   ## `tool(..., execute=)` runs tools and continues until text or the step cap.
   var request = buildRequest(model, prompt, messages, system,
     toDefinitions(tools), maxTokens, sessionId, options)
   runLoop(provider, request, tools, maxRetries, maxSteps, abort, nil)
+
+proc generateText*(
+  provider: Provider,
+  request: ProviderRequest,
+  maxRetries = 2,
+  abort: AbortCheck = nil
+): ProviderResponse =
+  ## Retry wrapper for a ready-made request. Does not run the tool loop
+  ## (`maxSteps` 1); the caller owns tools.
+  var req = request
+  runLoop(provider, req, @[], maxRetries, 1, abort, nil)
 
 proc streamText*(
   provider: Provider,
@@ -154,3 +187,14 @@ proc streamText*(
   var request = buildRequest(model, prompt, messages, system,
     toDefinitions(tools), maxTokens, sessionId, options, wakeFd)
   runLoop(provider, request, tools, maxRetries, maxSteps, abort, onEvent)
+
+proc streamText*(
+  provider: Provider,
+  request: ProviderRequest,
+  onEvent: StreamCallback,
+  maxRetries = 2,
+  abort: AbortCheck = nil
+): ProviderResponse =
+  ## Streaming retry wrapper for a ready-made request. No tool loop.
+  var req = request
+  runLoop(provider, req, @[], maxRetries, 1, abort, onEvent)

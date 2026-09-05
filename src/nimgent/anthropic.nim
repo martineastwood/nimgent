@@ -103,7 +103,9 @@ method generate*(provider: AnthropicProvider,
     let overflow = code == 400 and isContextOverflow(detail)
     raiseProviderError("Anthropic API error (" & $code & "): " & detail,
                        overflow = overflow, retryable = isRetryableStatus(code),
-                       status = code)
+                       status = code,
+                       retryAfterMs = parseRetryAfter(
+                         response.headers.getOrDefault("Retry-After")))
 
   var data: JsonNode
   try:

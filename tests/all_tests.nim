@@ -186,6 +186,11 @@ suite "generateText retries, abort, and tools":
     let r = generateText(p, model = "m", prompt = "hi", maxRetries = 2)
     check p.calls == 2
     check r.textContent == "ok"
+    let p2 = ScriptProvider(failLeft: 1)
+    let r2 = generateText(p2, ProviderRequest(model: "m",
+      messages: @[userMessage("hi")]), maxRetries = 2)
+    check p2.calls == 2
+    check r2.textContent == "ok"
 
   test "does not retry overflow or non-retryable errors":
     let p = BoomProvider()
@@ -275,6 +280,15 @@ suite "generateText retries, abort, and tools":
     check isRetryableStatus(503)
     check not isRetryableStatus(400)
     check not isRetryableStatus(401)
+
+  test "retry delay honors Retry-After and caps wild values":
+    check parseRetryAfter("") == 0
+    check parseRetryAfter("Wed, 21 Oct 2015 07:28:00 GMT") == 0
+    check parseRetryAfter("5") == 5_000
+    check parseRetryAfter("999") == retryAfterCapMs
+    check retryDelayMs(0, 1_500) == 1_500
+    check retryDelayMs(0, 99_000) == retryAfterCapMs
+    check retryDelayMs(0) <= 250
 
 suite "OpenAI provider":
   test "native body uses Responses fields and omits Chat Completions extras":

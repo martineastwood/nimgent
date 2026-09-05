@@ -73,7 +73,8 @@ Provider-specific knobs (thinking, routing, cache TTL) go in
 ## Retries, cancel, tools
 
 `generateText` / `streamText` retry 429, 5xx, and transport errors (`maxRetries`
-defaults to 2). Context overflow and 4xx are not retried.
+defaults to 2) with jittered backoff and `Retry-After`. Context overflow and
+4xx are not retried.
 
 Pass `abort` to cancel before the next attempt (or, while streaming, from
 `onEvent` by returning `false`):

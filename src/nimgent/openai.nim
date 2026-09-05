@@ -401,15 +401,18 @@ proc newClient(provider: OpenAIProvider): HttpClient =
   newHttpClient(timeout = provider.timeoutSeconds * 1000,
                 sslContext = newContext(verifyMode = CVerifyPeer))
 
-proc raiseApiError(provider: OpenAIProvider, code: int, raw: string) =
+proc raiseApiError(provider: OpenAIProvider, code: int, raw: string,
+                   headers: HttpHeaders = nil) =
   var detail = raw
   try:
     detail = parseJson(raw).getOrDefault("error").getOrDefault("message").getStr
   except CatchableError:
     discard
+  let ra = if headers.isNil: 0
+           else: parseRetryAfter(headers.getOrDefault("Retry-After"))
   raiseProviderError(provider.label & " API error (" & $code & "): " & detail,
     overflow = isContextOverflow(detail), retryable = isRetryableStatus(code),
-    status = code)
+    status = code, retryAfterMs = ra)
 
 proc popLine*(buf: var string): tuple[ok: bool, line: string] =
   let nl = buf.find('\n')
@@ -509,7 +512,7 @@ method generate*(provider: OpenAIProvider,
   defer: client.close()
   let raw = response.bodyStream.readAll()
   if response.code.int >= 400:
-    provider.raiseApiError(response.code.int, raw)
+    provider.raiseApiError(response.code.int, raw, response.headers)
 
   var data: JsonNode
   try:
@@ -589,7 +592,8 @@ method generateStream*(provider: OpenAIProvider,
   except CatchableError as e:
     raiseProviderError(provider.label & " stream failed: " & e.msg, retryable = true)
   if response.code.int >= 400:
-    provider.raiseApiError(response.code.int, drainBodyStream(response.bodyStream))
+    provider.raiseApiError(response.code.int, drainBodyStream(response.bodyStream),
+      response.headers)
 
   var textAcc = ""
   var thinkAcc = ""
