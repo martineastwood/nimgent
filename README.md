@@ -72,3 +72,10 @@ Provider-specific knobs (thinking, routing, cache TTL) go in
 nimgent is not a coding agent. Session persistence, tools, compaction, and
 terminal UI live in [niminal](https://github.com/martin/niminal) (or your own
 app).
+
+## Release
+
+```sh
+git tag -a v0.1.0 -m "nimgent 0.1.0"
+nimble publish   # needs a GitHub PAT with public_repo scope
+```
