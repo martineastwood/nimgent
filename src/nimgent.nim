@@ -70,7 +70,7 @@ proc retryingCall(provider: Provider, request: ProviderRequest,
       if onEvent.isNil:
         return provider.generate(request)
       return provider.generateStream(request, proc (ev: StreamEvent): bool =
-        if ev.kind in {seTextDelta, seThinkingDelta}:
+        if ev.kind in {seTextDelta, seThinkingDelta, seToolCallDelta}:
           started = true
         if ev.kind == seFinished:
           return true

@@ -120,6 +120,7 @@ type
   StreamEventKind* = enum
     seTextDelta
     seThinkingDelta
+    seToolCallDelta
     seFinished
     seWake          ## wakeFd became readable while waiting on the provider
 
@@ -127,8 +128,17 @@ type
     case kind*: StreamEventKind
     of seTextDelta, seThinkingDelta:
       text*: string
+    of seToolCallDelta:
+      toolCallId*: string
+      toolName*: string
+      toolArgs*: string  ## argument fragment; empty when only the name arrived
     of seFinished, seWake:
       discard
+
+  ThinkingWire* = enum
+    twEffort     ## reasoning.effort / reasoning_effort / thinking.budget_tokens
+    twToggle     ## reasoning.enabled / reasoning_effort=medium / thinking high
+    twMaxTokens  ## reasoning.max_tokens / reasoning_effort / thinking.budget_tokens
 
   StreamCallback* = proc (ev: StreamEvent): bool {.closure.}
     ## Return false to cancel the stream early.
@@ -271,7 +281,7 @@ proc textContent*(r: ProviderResponse): string =
 
 method generateStream*(p: Provider, request: ProviderRequest,
                        onEvent: StreamCallback): ProviderResponse {.base.} =
-  ## Default: non-streaming fallback that emits thinking then text once.
+  ## Default: non-streaming fallback that emits thinking, text, then tool calls.
   result = p.generate(request)
   for b in result.content:
     case b.kind
@@ -283,6 +293,11 @@ method generateStream*(p: Provider, request: ProviderRequest,
       if b.text.len > 0:
         if not onEvent(StreamEvent(kind: seTextDelta, text: b.text)):
           return
+    of ckToolUse:
+      let args = if b.input.isNil: "" else: $b.input
+      if not onEvent(StreamEvent(kind: seToolCallDelta, toolCallId: b.id,
+          toolName: b.name, toolArgs: args)):
+        return
     else:
       discard
   discard onEvent(StreamEvent(kind: seFinished))
@@ -322,3 +337,54 @@ proc toDefinitions*(tools: openArray[Tool]): seq[ToolDefinition] =
   for t in tools:
     result.add ToolDefinition(name: t.name, description: t.description,
       inputSchema: t.inputSchema)
+
+proc thinkingBudgetTokens*(level: string): int =
+  case level.toLowerAscii
+  of "minimal": 1024
+  of "low": 2048
+  of "medium": 8000
+  of "high": 16000
+  of "xhigh", "max": 32000
+  else: 0
+
+proc thinkingOptions*(provider, level: string, wire = twEffort): JsonNode =
+  ## Provider-body knobs for a thinking/reasoning level. Empty or `none` is `{}`.
+  ## Catalog snapping (which rungs exist) stays with the caller.
+  result = newJObject()
+  let p = provider.toLowerAscii
+  let lv = level.toLowerAscii
+  if lv.len == 0 or lv == "none":
+    return
+  case wire
+  of twEffort:
+    case p
+    of "openrouter":
+      result["reasoning"] = %*{"effort": lv}
+    of "openai":
+      result["reasoning_effort"] = %lv
+    of "anthropic":
+      let budget = thinkingBudgetTokens(lv)
+      if budget > 0:
+        result["thinking"] = %*{"type": "enabled", "budget_tokens": budget}
+    else:
+      discard
+  of twToggle:
+    case p
+    of "openrouter":
+      result["reasoning"] = %*{"enabled": true}
+    of "openai":
+      result["reasoning_effort"] = %"medium"
+    of "anthropic":
+      result = thinkingOptions(p, "high", twEffort)
+    else:
+      discard
+  of twMaxTokens:
+    case p
+    of "openrouter":
+      result["reasoning"] = %*{"max_tokens": thinkingBudgetTokens(lv)}
+    of "openai":
+      result["reasoning_effort"] = %lv
+    of "anthropic":
+      result = thinkingOptions(p, lv, twEffort)
+    else:
+      discard

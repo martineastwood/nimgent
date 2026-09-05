@@ -26,7 +26,11 @@ class Handler(BaseHTTPRequestHandler):
             "model": "gpt-5",
             "choices": [{
                 "index": 0,
-                "message": {"role": "assistant", "content": "hello from openai"},
+                "message": {
+                    "role": "assistant",
+                    "content": "hello from openai",
+                    "reasoning": "cached plan",
+                },
                 "finish_reason": "stop",
             }],
             "usage": {

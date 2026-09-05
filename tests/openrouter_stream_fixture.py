@@ -6,13 +6,23 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
-def sse_data(delta_text=None, finish=None):
+def sse_data(delta_text=None, finish=None, tool=None):
     choice = {"index": 0, "delta": {}, "finish_reason": None}
     if delta_text is not None:
         choice["delta"] = {"content": delta_text}
+    if tool is not None:
+        tc = {"index": 0, "function": {}}
+        if "id" in tool:
+            tc["id"] = tool["id"]
+        if "name" in tool:
+            tc["function"]["name"] = tool["name"]
+        if "arguments" in tool:
+            tc["function"]["arguments"] = tool["arguments"]
+        choice["delta"] = {"tool_calls": [tc]}
     if finish is not None:
         choice["finish_reason"] = finish
-        choice["delta"] = {}
+        if delta_text is None and tool is None:
+            choice["delta"] = {}
     payload = {
         "id": "stream-1",
         "model": "deepseek/deepseek-v4-flash-0731",
@@ -27,7 +37,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
-        self.rfile.read(length)
+        raw = self.rfile.read(length)
+        try:
+            body = json.loads(raw) if raw else {}
+        except Exception:
+            body = {}
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Transfer-Encoding", "chunked")
@@ -40,11 +54,18 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"\r\n")
             self.wfile.flush()
 
-        send_chunk(sse_data("Hello"))
-        time.sleep(0.08)
-        send_chunk(sse_data(" world"))
-        time.sleep(0.08)
-        send_chunk(sse_data(finish="stop"))
+        if body.get("tools"):
+            send_chunk(sse_data(tool={"id": "call_1", "name": "read", "arguments": ""}))
+            time.sleep(0.08)
+            send_chunk(sse_data(tool={"arguments": "{\"path\":\"x\"}"}))
+            time.sleep(0.08)
+            send_chunk(sse_data(finish="tool_calls"))
+        else:
+            send_chunk(sse_data("Hello"))
+            time.sleep(0.08)
+            send_chunk(sse_data(" world"))
+            time.sleep(0.08)
+            send_chunk(sse_data(finish="stop"))
         send_chunk(b"data: [DONE]\n\n")
         self.wfile.write(b"0\r\n\r\n")
         self.wfile.flush()

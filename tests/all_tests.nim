@@ -3,6 +3,17 @@ import nimgent
 import nimgent/[anthropic, openrouter]
 from nimgent/openai import makeOpenAIProvider, buildOpenAiBody, defaultOpenAiEndpoint
 
+suite "thinking options":
+  test "maps effort, toggle, and max_tokens by provider":
+    check thinkingOptions("openrouter", "high")["reasoning"]["effort"].getStr == "high"
+    check thinkingOptions("openai", "low")["reasoning_effort"].getStr == "low"
+    check thinkingOptions("anthropic", "medium")["thinking"]["budget_tokens"].getInt == 8000
+    check thinkingOptions("openai", "none").len == 0
+    check thinkingOptions("openrouter", "high", twToggle)["reasoning"]["enabled"].getBool
+    check thinkingOptions("openai", "high", twToggle)["reasoning_effort"].getStr == "medium"
+    check thinkingOptions("openrouter", "low", twMaxTokens)["reasoning"]["max_tokens"].getInt == 2048
+    check thinkingBudgetTokens("high") == 16000
+
 suite "provider types":
   test "overflow heuristic ignores generic token errors":
     check isContextOverflow("This model's maximum context length is 128000 tokens")
@@ -203,6 +214,16 @@ suite "generateText retries, abort, and tools":
           check part.toolUseId == "call_1"
     check sawTool
 
+  test "default stream emits tool call events":
+    let p = ScriptProvider(toolFirst: true)
+    var names: seq[string] = @[]
+    discard streamText(p, model = "m", prompt = "hi",
+      onEvent = proc (ev: StreamEvent): bool =
+        if ev.kind == seToolCallDelta:
+          names.add ev.toolName
+        true)
+    check names == @["echo"]
+
   test "maxSteps 1 does not execute tools":
     let p = ScriptProvider(toolFirst: true)
     var ran = 0
@@ -272,6 +293,8 @@ suite "OpenAI provider":
       options: %*{"reasoning_effort": "low"}))
     check response.model == "gpt-5"
     check response.textContent == "hello from openai"
+    check response.content[0].kind == ckThinking
+    check response.content[0].thinking == "cached plan"
     check response.usage.inputTokens == 20
     check response.usage.cacheReadTokens == 8
     check response.usage.cacheReported
@@ -303,6 +326,34 @@ suite "OpenAI provider":
     check response.textContent == "Hello world"
     check stamps.len == 2
     check stamps[1] - stamps[0] >= 0.05
+    check fixture.waitForExit() == 0
+
+  test "generateStream emits tool call deltas":
+    let fixturePath = getCurrentDir() / "tests" / "openrouter_stream_fixture.py"
+    var fixture = startProcess("python3", args = @[fixturePath],
+      options = {poUsePath, poStdErrToStdOut})
+    defer:
+      if fixture.running:
+        fixture.terminate()
+        discard fixture.waitForExit()
+      fixture.close()
+    let port = parseInt(fixture.outputStream.readLine())
+    let provider = makeOpenAIProvider("fixture-key",
+      "http://127.0.0.1:" & $port, timeoutSeconds = 5)
+    var evs: seq[string] = @[]
+    let response = provider.generateStream(
+      ProviderRequest(model: "test", messages: @[userMessage("hi")],
+        tools: @[ToolDefinition(name: "read", description: "d",
+          inputSchema: %*{"type": "object"})],
+        maxTokens: 20),
+      proc (ev: StreamEvent): bool =
+        if ev.kind == seToolCallDelta:
+          evs.add ev.toolName & ":" & ev.toolArgs
+        true)
+    check evs == @["read:", "read:{\"path\":\"x\"}"]
+    check response.toolCalls.len == 1
+    check response.toolCalls[0].name == "read"
+    check response.toolCalls[0].input["path"].getStr == "x"
     check fixture.waitForExit() == 0
 
 suite "encoding":

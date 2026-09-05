@@ -204,6 +204,16 @@ proc finishFrom(reason: string): FinishReason =
   of "length": frMaxTokens
   else: frUnknown
 
+proc reasoningFrom(node: JsonNode): string =
+  if node.isNil or node.kind != JObject: return
+  if "reasoning" in node:
+    let r = node["reasoning"]
+    if r.kind == JString: result = r.getStr
+    elif r.kind == JObject: result = r.getOrDefault("content").getStr
+  if result.len == 0 and "reasoning_content" in node and
+      node["reasoning_content"].kind == JString:
+    result = node["reasoning_content"].getStr
+
 proc ensureApiKey(provider: OpenAIProvider) =
   if provider.apiKey.len == 0:
     raiseProviderError(provider.label.toUpperAscii & " API key is not configured")
@@ -330,6 +340,9 @@ method generate*(provider: OpenAIProvider,
     raiseProviderError(provider.label & " response contained no choices")
   result.model = data.getOrDefault("model").getStr
   let message = data["choices"][0]["message"]
+  let think = reasoningFrom(message)
+  if think.len > 0:
+    result.content.add ContentBlock(kind: ckThinking, thinking: think)
   if "content" in message and message["content"].kind == JString:
     result.content.add text(message["content"].getStr)
   if "tool_calls" in message:
@@ -430,13 +443,7 @@ method generateStream*(provider: OpenAIProvider,
             if not onEvent(StreamEvent(kind: seTextDelta, text: piece)):
               cancelled = true
               break streamLoop
-        var reason = ""
-        if "reasoning" in delta:
-          let r = delta["reasoning"]
-          if r.kind == JString: reason = r.getStr
-          elif r.kind == JObject: reason = r.getOrDefault("content").getStr
-        if reason.len == 0 and "reasoning_content" in delta:
-          reason = delta["reasoning_content"].getStr
+        let reason = reasoningFrom(delta)
         if reason.len > 0:
           thinkAcc.add reason
           if not onEvent(StreamEvent(kind: seThinkingDelta, text: reason)):
@@ -450,11 +457,22 @@ method generateStream*(provider: OpenAIProvider,
             if "id" in tc and tc["id"].kind == JString:
               tools[idx].id = tc["id"].getStr
             let fn = tc.getOrDefault("function")
+            var nameNew = false
+            var argsPiece = ""
             if fn.kind == JObject:
               if "name" in fn and fn["name"].kind == JString:
+                if tools[idx].name.len == 0:
+                  nameNew = true
                 tools[idx].name = fn["name"].getStr
               if "arguments" in fn and fn["arguments"].kind == JString:
-                tools[idx].args.add fn["arguments"].getStr
+                argsPiece = fn["arguments"].getStr
+                tools[idx].args.add argsPiece
+            if tools[idx].name.len > 0 and (nameNew or argsPiece.len > 0):
+              if not onEvent(StreamEvent(kind: seToolCallDelta,
+                  toolCallId: tools[idx].id, toolName: tools[idx].name,
+                  toolArgs: argsPiece)):
+                cancelled = true
+                break streamLoop
 
   if thinkAcc.len > 0:
     result.content.add ContentBlock(kind: ckThinking, thinking: thinkAcc)
