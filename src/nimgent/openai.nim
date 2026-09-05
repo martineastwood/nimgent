@@ -6,7 +6,9 @@
 
 import std/[asyncdispatch, httpclient, json, net, streams, strutils]
 import nimgent/[provider, stream, openai_chat, openai_responses]
-export popLine, buildChatBody, openAiImagePart, buildResponsesBody
+export popLine, buildChatBody, openAiImagePart, buildResponsesBody,
+  chatObjectOptions, chatForceToolOptions, responsesObjectOptions,
+  responsesForceToolOptions
 
 const
   defaultOpenAiEndpoint* = "https://api.openai.com/v1/responses"

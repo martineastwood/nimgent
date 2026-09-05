@@ -3,7 +3,8 @@ import nimgent
 import nimgent/[anthropic, openrouter]
 from nimgent/openai import makeOpenAIProvider, makeHyperProvider,
   buildResponsesBody, buildChatBody, defaultOpenAiEndpoint,
-  defaultOpenAiChatEndpoint, defaultHyperEndpoint
+  defaultOpenAiChatEndpoint, defaultHyperEndpoint, chatObjectOptions,
+  chatForceToolOptions
 
 proc withFixture(script: string, body: proc (port: int)) =
   let fixturePath = getCurrentDir() / "tests" / script
@@ -586,6 +587,8 @@ type
     toolValue*: JsonNode
     usageEach*: Usage
 
+  ChatObjectScript = ref object of ObjectScript
+
 method generate(p: ObjectScript, request: ProviderRequest): ProviderResponse =
   inc p.calls
   p.last = request
@@ -597,6 +600,13 @@ method generate(p: ObjectScript, request: ProviderRequest): ProviderResponse =
   if p.replies.len > 0:
     result.content.add text(p.replies[min(p.calls - 1, p.replies.high)])
   result.finishReason = frStop
+
+method nativeObjectOptions(p: ChatObjectScript, name, description: string,
+                           schema: JsonNode): JsonNode =
+  chatObjectOptions(name, description, schema)
+
+method forceToolOptions(p: ChatObjectScript, toolName: string): JsonNode =
+  chatForceToolOptions(toolName)
 
 suite "json schema":
   test "extracts raw, fenced, and prose-wrapped JSON":
@@ -709,7 +719,7 @@ suite "generateObject":
     check p.calls == 1
 
   test "reads a forced tool call":
-    let p = ObjectScript(name: "openrouter", toolValue: %*{"ok": true})
+    let p = ChatObjectScript(toolValue: %*{"ok": true})
     let schema = %*{
       "type": "object",
       "properties": {"ok": {"type": "boolean"}},
@@ -723,7 +733,7 @@ suite "generateObject":
     check p.last.options["tool_choice"]["function"]["name"].getStr == "submit"
 
   test "omAuto attaches native OpenRouter response_format":
-    let p = ObjectScript(name: "openrouter", replies: @["{\"ok\":true}"])
+    let p = ChatObjectScript(replies: @["{\"ok\":true}"])
     let schema = %*{
       "type": "object",
       "properties": {"ok": {"type": "boolean"}},
@@ -826,6 +836,9 @@ method generateStream(p: ChunkScript, request: ProviderRequest,
     result.finishReason = frStop
   discard onEvent(StreamEvent(kind: seFinished))
 
+method forceToolOptions(p: ChunkScript, toolName: string): JsonNode =
+  chatForceToolOptions(toolName)
+
 suite "streamObject":
   test "emits growing partials then a valid value":
     let p = ChunkScript(chunks: @["{\"n", "ame\":\"a", "bc\",\"n\":", "1}"])
@@ -852,8 +865,7 @@ suite "streamObject":
     check "abc" in partials[^1]
 
   test "streams tool-call argument fragments":
-    let p = ChunkScript(name: "openrouter", tool: true,
-      chunks: @["{\"ok\":", "true}"])
+    let p = ChunkScript(tool: true, chunks: @["{\"ok\":", "true}"])
     let schema = %*{
       "type": "object",
       "properties": {"ok": {"type": "boolean"}},

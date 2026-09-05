@@ -155,6 +155,19 @@ proc buildChatBody*(request: ProviderRequest, stream: bool,
   if applyCache:
     applyCacheBreakpoints(result)
 
+proc chatObjectOptions*(name, description: string, schema: JsonNode): JsonNode =
+  var spec = %*{
+    "name": name,
+    "strict": true,
+    "schema": schema
+  }
+  if description.len > 0:
+    spec["description"] = %description
+  %*{"response_format": {"type": "json_schema", "json_schema": spec}}
+
+proc chatForceToolOptions*(toolName: string): JsonNode =
+  %*{"tool_choice": {"type": "function", "function": {"name": toolName}}}
+
 proc finishFrom(reason: string): FinishReason =
   case reason
   of "tool_calls": frToolUse

@@ -263,11 +263,18 @@ proc streamText*(
   var req = request
   runLoop(provider, req, @[], maxRetries, 1, abort, onEvent)
 
-type ObjectResult*[T] = object
-  value*: T
-  response*: ProviderResponse
-  usage*: Usage
-  repairs*: int
+type
+  ObjectMode* = enum
+    omAuto    ## native structured output when the provider has it
+    omNative  ## native only; still extracts/validates/repairs
+    omJson    ## prompt + extract JSON from text
+    omTool    ## forced submit tool; arguments are the value
+
+  ObjectResult*[T] = object
+    value*: T
+    response*: ProviderResponse
+    usage*: Usage
+    repairs*: int
 
 const objectToolName = "submit"
 
@@ -285,27 +292,31 @@ proc objectInstruction(schema: JsonNode, mode: ObjectMode): string =
   else:
     result.add "\nNo markdown, no prose."
 
-proc takeObjectValue(resp: ProviderResponse, preferTool: bool): tuple[value: JsonNode, issue: string] =
-  if preferTool and resp.toolCalls.len > 0:
-    let c = resp.toolCalls[0]
-    let bad = invalidToolCall(c)
-    if bad.len > 0:
-      return (nil, bad)
-    return (c.input, "")
+proc toolObjectValue(resp: ProviderResponse): tuple[value: JsonNode, issue: string] =
+  if resp.toolCalls.len == 0:
+    return (nil, "")
+  let bad = invalidToolCall(resp.toolCalls[0])
+  if bad.len > 0:
+    return (nil, bad)
+  (resp.toolCalls[0].input, "")
+
+proc takeObjectValue(resp: ProviderResponse, useTool: bool): tuple[value: JsonNode, issue: string] =
+  if useTool:
+    result = toolObjectValue(resp)
+    if not result.value.isNil or result.issue.len > 0:
+      return
   var parsed = extractJson(resp.textContent)
   if parsed.isNil:
     parsed = parsePartialJson(resp.textContent).value
   if not parsed.isNil:
     return (parsed, "")
-  if resp.toolCalls.len > 0:
-    let c = resp.toolCalls[0]
-    let bad = invalidToolCall(c)
-    if bad.len > 0:
-      return (nil, bad)
-    return (c.input, "")
+  if not useTool:
+    result = toolObjectValue(resp)
+    if not result.value.isNil or result.issue.len > 0:
+      return
   if resp.finishReason == frMaxTokens:
     return (nil, "response truncated (max tokens)")
-  (nil, "no JSON object or array in the model response")
+  return (nil, "no JSON object or array in the model response")
 
 proc repairMessage(issues: seq[string], value: JsonNode, useTool: bool): string =
   result = "Your output did not match the required schema:\n"
@@ -322,38 +333,43 @@ type PartialObjectCallback* = proc (value: JsonNode): bool {.closure.}
   ## Partial JSON tree. Not schema-valid. Return false to cancel.
 
 type ObjectSession = object
-  msgs: seq[Message]
-  sys: seq[string]
-  tools: seq[Tool]
-  opts: JsonNode
+  provider: Provider
+  req: ProviderRequest
+  schema: JsonNode
   useTool: bool
+  maxRetries: int
 
 proc startObjectSession(
-  provider: Provider, schema: JsonNode, prompt: string,
-  messages: seq[Message], system: seq[string], name, description: string,
-  options: JsonNode, mode: ObjectMode
+  provider: Provider, req: ProviderRequest, schema: JsonNode,
+  name, description: string, mode: ObjectMode, maxRetries: int
 ): ObjectSession =
   if schema.isNil or schema.kind != JObject:
     raiseObjectError("generateObject requires a JSON Schema object", @[])
   let wire = prepareWireSchema(schema)
-  result.msgs = messages
-  if result.msgs.len == 0 and prompt.len > 0:
-    result.msgs = @[userMessage(prompt)]
-  result.sys = system
-  result.sys.add objectInstruction(wire, mode)
+  result.provider = provider
+  result.req = req
+  result.schema = schema
+  result.maxRetries = maxRetries
+  result.req.system.add objectInstruction(wire, mode)
   let native = provider.nativeObjectOptions(schemaName(name), description, wire)
-  if mode == omNative and native.isNil:
-    raiseObjectError("provider '" & provider.name &
-      "' has no native structured output", @[])
-  result.opts = options
-  result.useTool = mode == omTool
-  if mode in {omAuto, omNative} and not native.isNil:
-    result.opts = mergeOptions(result.opts, native)
-  elif result.useTool:
-    result.tools = @[tool(objectToolName, "Submit the structured result.", wire)]
+  case mode
+  of omNative:
+    if native.isNil:
+      raiseObjectError("provider '" & provider.name &
+        "' has no native structured output", @[])
+    result.req.options = mergeOptions(result.req.options, native)
+  of omAuto:
+    if not native.isNil:
+      result.req.options = mergeOptions(result.req.options, native)
+  of omTool:
+    result.useTool = true
+    result.req.tools = @[ToolDefinition(name: objectToolName,
+      description: "Submit the structured result.", inputSchema: wire)]
     let forced = provider.forceToolOptions(objectToolName)
     if not forced.isNil:
-      result.opts = mergeOptions(result.opts, forced)
+      result.req.options = mergeOptions(result.req.options, forced)
+  of omJson:
+    discard
 
 proc acceptObject(resp: ProviderResponse, schema: JsonNode,
                   useTool: bool): tuple[value: JsonNode, issues: seq[string], raw: string] =
@@ -373,65 +389,28 @@ proc emitPartial(acc: string, last: var JsonNode, onPartial: PartialObjectCallba
   last = parsed.value
   onPartial(parsed.value)
 
-proc runObjectLoop(
-  provider: Provider, model: string, schema: JsonNode,
-  session: var ObjectSession, maxTokens: int, sessionId: string,
-  maxRetries, maxRepairs: int, abort: AbortCheck,
-  streamFirst: bool, onPartial: PartialObjectCallback,
-  onEvent: StreamCallback, wakeFd: cint
-): ObjectResult[JsonNode] =
-  var lastRaw = ""
-  var lastIssues: seq[string] = @[]
+proc finishObject(session: var ObjectSession, first: ProviderResponse,
+                  maxRepairs: int, abort: AbortCheck): ObjectResult[JsonNode] =
+  result.response = first
+  var taken: tuple[value: JsonNode, issues: seq[string], raw: string]
   for repair in 0 .. maxRepairs:
-    var cancelled = false
-    if streamFirst and repair == 0:
-      var lastPartial: JsonNode = nil
-      var accText = ""
-      var accTool = ""
-      result.response = streamText(
-        provider, model, onEvent = proc (ev: StreamEvent): bool =
-          case ev.kind
-          of seTextDelta:
-            accText.add ev.text
-            if not emitPartial(accText, lastPartial, onPartial):
-              cancelled = true
-              return false
-          of seToolCallDelta:
-            accTool.add ev.toolArgs
-            if accTool.len > 0 and not emitPartial(accTool, lastPartial, onPartial):
-              cancelled = true
-              return false
-          else:
-            discard
-          if not onEvent.isNil and not onEvent(ev):
-            cancelled = true
-            return false
-          true,
-        messages = session.msgs, system = session.sys, tools = session.tools,
-        maxTokens = maxTokens, sessionId = sessionId, options = session.opts,
-        wakeFd = wakeFd, maxRetries = maxRetries, maxSteps = 1, abort = abort)
-    else:
-      result.response = generateText(
-        provider, model, messages = session.msgs, system = session.sys,
-        tools = session.tools, maxTokens = maxTokens, sessionId = sessionId,
-        options = session.opts, maxRetries = maxRetries, maxSteps = 1,
-        abort = abort)
+    if repair > 0:
+      session.req.messages.add Message(role: roleAssistant,
+        content: result.response.content)
+      session.req.messages.add userMessage(
+        repairMessage(taken.issues, taken.value, session.useTool))
+      result.response = generateText(session.provider, session.req,
+        session.maxRetries, abort)
     result.usage.addUsage(result.response.usage)
     result.repairs = repair
-    if cancelled:
-      raiseProviderError("aborted", aborted = true)
-    let taken = acceptObject(result.response, schema, session.useTool)
-    lastRaw = taken.raw
-    lastIssues = taken.issues
+    taken = acceptObject(result.response, session.schema, session.useTool)
     if taken.issues.len == 0:
       result.value = taken.value
       return
-    session.msgs.add Message(role: roleAssistant, content: result.response.content)
-    session.msgs.add userMessage(repairMessage(lastIssues, taken.value, session.useTool))
   let prefix =
     if maxRepairs == 0: "generateObject failed: "
     else: "generateObject failed after " & $maxRepairs & " repair(s): "
-  raiseObjectError(prefix & lastIssues.join("; "), lastIssues, lastRaw)
+  raiseObjectError(prefix & taken.issues.join("; "), taken.issues, taken.raw)
 
 proc generateObject*(
   provider: Provider,
@@ -454,10 +433,12 @@ proc generateObject*(
   ## has it (`omAuto`), extracts JSON from text or a tool call, validates.
   ## Truncated JSON is closed with `fixJson`. `maxRepairs` (default 0) is
   ## extra model turns after that.
-  var session = startObjectSession(provider, schema, prompt, messages, system,
-    name, description, options, mode)
-  runObjectLoop(provider, model, schema, session, maxTokens, sessionId,
-    maxRetries, maxRepairs, abort, false, nil, nil, -1)
+  var session = startObjectSession(
+    provider,
+    buildRequest(model, prompt, messages, system, @[], maxTokens, sessionId, options),
+    schema, name, description, mode, maxRetries)
+  finishObject(session, generateText(session.provider, session.req,
+    session.maxRetries, abort), maxRepairs, abort)
 
 proc streamObject*(
   provider: Provider,
@@ -482,10 +463,39 @@ proc streamObject*(
   ## Like `generateObject`, but the first attempt streams. `onPartial` gets
   ## the repaired JSON tree whenever it changes (not schema-valid). Schema
   ## check and optional model repairs run after the stream ends.
-  var session = startObjectSession(provider, schema, prompt, messages, system,
-    name, description, options, mode)
-  runObjectLoop(provider, model, schema, session, maxTokens, sessionId,
-    maxRetries, maxRepairs, abort, true, onPartial, onEvent, wakeFd)
+  var session = startObjectSession(
+    provider,
+    buildRequest(model, prompt, messages, system, @[], maxTokens, sessionId,
+      options, wakeFd),
+    schema, name, description, mode, maxRetries)
+  var cancelled = false
+  var lastPartial: JsonNode = nil
+  var accText = ""
+  var accTool = ""
+  let first = streamText(
+    session.provider, session.req,
+    onEvent = proc (ev: StreamEvent): bool =
+      case ev.kind
+      of seTextDelta:
+        accText.add ev.text
+        if not emitPartial(accText, lastPartial, onPartial):
+          cancelled = true
+          return false
+      of seToolCallDelta:
+        accTool.add ev.toolArgs
+        if not emitPartial(accTool, lastPartial, onPartial):
+          cancelled = true
+          return false
+      else:
+        discard
+      if not onEvent.isNil and not onEvent(ev):
+        cancelled = true
+        return false
+      true,
+    maxRetries = session.maxRetries, abort = abort)
+  if cancelled:
+    raiseProviderError("aborted", aborted = true)
+  finishObject(session, first, maxRepairs, abort)
 
 proc toObject*[T](r: ObjectResult[JsonNode]): ObjectResult[T] =
   ## Decode `r.value` as `T`. Validation already ran against the schema.

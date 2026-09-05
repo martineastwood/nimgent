@@ -46,6 +46,13 @@ proc makeAnthropicProvider*(apiKey, endpoint: string,
   AnthropicProvider(name: "anthropic", apiKey: apiKey, endpoint: endpoint,
                     timeoutSeconds: timeoutSeconds)
 
+method nativeObjectOptions*(provider: AnthropicProvider, name, description: string,
+                            schema: JsonNode): JsonNode =
+  %*{"output_config": {"format": {"type": "json_schema", "schema": schema}}}
+
+method forceToolOptions*(provider: AnthropicProvider, toolName: string): JsonNode =
+  %*{"tool_choice": {"type": "tool", "name": toolName}}
+
 method generate*(provider: AnthropicProvider,
                  request: ProviderRequest): ProviderResponse =
   if provider.apiKey.len == 0:

@@ -151,12 +151,6 @@ type
     twToggle     ## reasoning.enabled / reasoning.effort=medium / thinking high
     twMaxTokens  ## reasoning.max_tokens / reasoning.effort / thinking.budget_tokens
 
-  ObjectMode* = enum
-    omAuto    ## native structured output when the provider has it
-    omNative  ## native only; still extracts/validates/repairs
-    omJson    ## prompt + extract JSON from text
-    omTool    ## forced submit tool; arguments are the value
-
   StreamCallback* = proc (ev: StreamEvent): bool {.closure.}
     ## Return false to cancel the stream early.
 
@@ -402,60 +396,13 @@ proc raiseObjectError*(msg: string, issues: seq[string], raw = "") =
   e.raw = raw
   raise e
 
-proc chatObjectOptions*(name, description: string, schema: JsonNode): JsonNode =
-  var spec = %*{
-    "name": name,
-    "strict": true,
-    "schema": schema
-  }
-  if description.len > 0:
-    spec["description"] = %description
-  %*{"response_format": {"type": "json_schema", "json_schema": spec}}
-
-proc responsesObjectOptions*(name, description: string, schema: JsonNode): JsonNode =
-  var fmt = %*{
-    "type": "json_schema",
-    "name": name,
-    "strict": true,
-    "schema": schema
-  }
-  if description.len > 0:
-    fmt["description"] = %description
-  %*{"text": {"format": fmt}}
-
-proc anthropicObjectOptions*(schema: JsonNode): JsonNode =
-  %*{"output_config": {"format": {"type": "json_schema", "schema": schema}}}
-
-proc chatForceToolOptions*(toolName: string): JsonNode =
-  %*{"tool_choice": {"type": "function", "function": {"name": toolName}}}
-
-proc responsesForceToolOptions*(toolName: string): JsonNode =
-  %*{"tool_choice": {"type": "function", "name": toolName}}
-
-proc anthropicForceToolOptions*(toolName: string): JsonNode =
-  %*{"tool_choice": {"type": "tool", "name": toolName}}
-
 method nativeObjectOptions*(p: Provider, name, description: string,
                             schema: JsonNode): JsonNode {.base.} =
   ## Provider-body knobs for native structured output. nil means none.
-  case p.name
-  of "openrouter", "hyper":
-    chatObjectOptions(name, description, schema)
-  of "openai":
-    responsesObjectOptions(name, description, schema)
-  of "anthropic":
-    anthropicObjectOptions(schema)
-  else:
-    nil
+  nil
 
 method forceToolOptions*(p: Provider, toolName: string): JsonNode {.base.} =
-  case p.name
-  of "openrouter", "hyper", "openai":
-    chatForceToolOptions(toolName)
-  of "anthropic":
-    anthropicForceToolOptions(toolName)
-  else:
-    nil
+  nil
 
 proc tool*(name, description: string, inputSchema: JsonNode,
            execute: proc (input: JsonNode): ToolOutput {.closure.} = nil,

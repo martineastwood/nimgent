@@ -91,9 +91,6 @@ type
     fsArrayAfterValue
     fsArrayAfterComma
 
-proc isHexDigit(c: char): bool =
-  c in {'0'..'9', 'A'..'F', 'a'..'f'}
-
 proc fixJson*(input: string): string =
   ## Close a prefix of JSON so `parseJson` can read it. Port of AI SDK `fixJson`.
   var stack: seq[FixState] = @[fsRoot]
@@ -220,7 +217,7 @@ proc fixJson*(input: string): string =
       else:
         lastValid = i
     of fsStringUnicode:
-      if isHexDigit(c):
+      if c in HexDigits:
         inc unicodeDigits
         if unicodeDigits == 4:
           discard stack.pop()
@@ -359,8 +356,6 @@ proc jsonEqual*(a, b: JsonNode): bool =
     for k, v in a:
       if k notin b or not jsonEqual(v, b[k]): return false
     true
-
-proc validateSchema*(value, schema: JsonNode, path = "$"): seq[string]
 
 proc validateSchema*(value, schema: JsonNode, path = "$"): seq[string] =
   ## Empty means `value` satisfies `schema`.

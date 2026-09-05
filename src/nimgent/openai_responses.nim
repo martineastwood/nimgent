@@ -104,6 +104,20 @@ proc buildResponsesBody*(request: ProviderRequest, stream: bool): JsonNode =
   if "reasoning" in result:
     result["include"] = %*["reasoning.encrypted_content"]
 
+proc responsesObjectOptions*(name, description: string, schema: JsonNode): JsonNode =
+  var fmt = %*{
+    "type": "json_schema",
+    "name": name,
+    "strict": true,
+    "schema": schema
+  }
+  if description.len > 0:
+    fmt["description"] = %description
+  %*{"text": {"format": fmt}}
+
+proc responsesForceToolOptions*(toolName: string): JsonNode =
+  %*{"tool_choice": {"type": "function", "name": toolName}}
+
 proc outputTextFrom(item: JsonNode): string =
   let c = item.getOrDefault("content")
   if c.kind == JString: return c.getStr
