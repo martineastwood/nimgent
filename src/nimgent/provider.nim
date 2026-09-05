@@ -135,8 +135,8 @@ type
 
 proc contextTokens*(u: Usage): int =
   ## Tokens occupying the context window on the last request.
-  ## OpenRouter's prompt_tokens already includes cached tokens; Anthropic splits
-  ## them (input + cache_read + cache_write).
+  ## OpenAI/OpenRouter prompt_tokens already includes cached tokens; Anthropic
+  ## splits them (input + cache_read + cache_write).
   if u.cacheReported:
     let cached = u.cacheReadTokens + u.cacheWriteTokens
     if cached > 0 and u.inputTokens < cached:

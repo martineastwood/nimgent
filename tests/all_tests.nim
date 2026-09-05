@@ -1,6 +1,7 @@
 import std/[json, os, osproc, streams, strutils, times, unittest]
 import nimgent
 import nimgent/[anthropic, openrouter]
+from nimgent/openai import makeOpenAIProvider, buildOpenAiBody, defaultOpenAiEndpoint
 
 suite "provider types":
   test "overflow heuristic ignores generic token errors":
@@ -220,6 +221,89 @@ suite "generateText retries, abort, and tools":
     check isRetryableStatus(503)
     check not isRetryableStatus(400)
     check not isRetryableStatus(401)
+
+suite "OpenAI provider":
+  test "native body uses max_completion_tokens and omits OpenRouter extras":
+    let body = buildOpenAiBody(ProviderRequest(
+      model: "gpt-5",
+      sessionId: "should-omit",
+      system: @["stable prefix"],
+      messages: @[userMessage("hi")],
+      tools: @[ToolDefinition(name: "read", description: "d",
+        inputSchema: %*{"type": "object"})],
+      maxTokens: 128,
+      options: %*{"reasoning_effort": "medium"}), stream = false)
+    check body["model"].getStr == "gpt-5"
+    check body["max_completion_tokens"].getInt == 128
+    check "max_tokens" notin body
+    check "session_id" notin body
+    check "cache_control" notin body["tools"][0]
+    check "cache_control" notin body["messages"][0]["content"][0]
+    check body["reasoning_effort"].getStr == "medium"
+    check makeOpenAIProvider("k").name == "openai"
+    check makeOpenAIProvider("k").endpoint == defaultOpenAiEndpoint
+
+  test "missing API key fails before making a request":
+    let provider = makeOpenAIProvider("", "http://127.0.0.1:1")
+    expect ProviderError:
+      discard provider.generate(ProviderRequest(model: "test",
+        messages: @[userMessage("hello")], maxTokens: 10))
+
+  test "generate sends OpenAI fields and reports cache reads":
+    let fixturePath = getCurrentDir() / "tests" / "openai_fixture.py"
+    var fixture = startProcess("python3", args = @[fixturePath],
+      options = {poUsePath, poStdErrToStdOut})
+    defer:
+      if fixture.running:
+        fixture.terminate()
+        discard fixture.waitForExit()
+      fixture.close()
+    let port = parseInt(fixture.outputStream.readLine())
+    let provider = makeOpenAIProvider("fixture-key",
+      "http://127.0.0.1:" & $port, timeoutSeconds = 5)
+    let response = provider.generate(ProviderRequest(
+      model: "gpt-5",
+      sessionId: "must-not-send",
+      system: @["You are a test agent."],
+      messages: @[userMessage("hello")],
+      tools: @[ToolDefinition(name: "read", description: "Read a file",
+        inputSchema: %*{"type": "object"})],
+      maxTokens: 32,
+      options: %*{"reasoning_effort": "low"}))
+    check response.model == "gpt-5"
+    check response.textContent == "hello from openai"
+    check response.usage.inputTokens == 20
+    check response.usage.cacheReadTokens == 8
+    check response.usage.cacheReported
+    check fixture.waitForExit() == 0
+
+  test "generateStream emits deltas before the response finishes":
+    let fixturePath = getCurrentDir() / "tests" / "openrouter_stream_fixture.py"
+    var fixture = startProcess("python3", args = @[fixturePath],
+      options = {poUsePath, poStdErrToStdOut})
+    defer:
+      if fixture.running:
+        fixture.terminate()
+        discard fixture.waitForExit()
+      fixture.close()
+    let port = parseInt(fixture.outputStream.readLine())
+    let provider = makeOpenAIProvider("fixture-key",
+      "http://127.0.0.1:" & $port, timeoutSeconds = 5)
+    var stamps: seq[float] = @[]
+    var pieces: seq[string] = @[]
+    let response = provider.generateStream(
+      ProviderRequest(model: "test", messages: @[userMessage("hi")],
+        maxTokens: 20),
+      proc (ev: StreamEvent): bool =
+        if ev.kind == seTextDelta:
+          stamps.add epochTime()
+          pieces.add ev.text
+        true)
+    check pieces == @["Hello", " world"]
+    check response.textContent == "Hello world"
+    check stamps.len == 2
+    check stamps[1] - stamps[0] >= 0.05
+    check fixture.waitForExit() == 0
 
 suite "encoding":
   test "providers encode image blocks and cache breakpoints":

@@ -55,7 +55,9 @@ echo "finish: ", response.finishReason
 ## Providers
 
 ```nim
-import nimgent/[anthropic, openrouter]
+import nimgent/[anthropic, openai, openrouter]
+
+let openai = makeOpenAIProvider(getEnv("OPENAI_API_KEY"))
 
 let anthropic = makeAnthropicProvider(
   getEnv("ANTHROPIC_API_KEY"),
