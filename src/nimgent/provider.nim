@@ -35,6 +35,7 @@ type
       id*: string
       name*: string
       input*: JsonNode
+      parseError*: string  ## set when the provider got invalid tool JSON; do not execute
     of ckToolResult:
       toolUseId*: string
       output*: string
@@ -113,6 +114,9 @@ type
     inputSchema*: JsonNode
     ## When set, generateText/streamText can run the tool and continue (maxSteps).
     execute*: proc (input: JsonNode): ToolOutput {.closure.}
+    ## Reserved: if every call in a batch has this, execute may overlap.
+    ## Sync execute stays serial; niminal leaves this false.
+    parallel*: bool
 
   Provider* = ref object of RootObj
     name*: string
@@ -136,9 +140,9 @@ type
       discard
 
   ThinkingWire* = enum
-    twEffort     ## reasoning.effort / reasoning_effort / thinking.budget_tokens
-    twToggle     ## reasoning.enabled / reasoning_effort=medium / thinking high
-    twMaxTokens  ## reasoning.max_tokens / reasoning_effort / thinking.budget_tokens
+    twEffort     ## reasoning.effort / thinking.budget_tokens
+    twToggle     ## reasoning.enabled / reasoning.effort=medium / thinking high
+    twMaxTokens  ## reasoning.max_tokens / reasoning.effort / thinking.budget_tokens
 
   StreamCallback* = proc (ev: StreamEvent): bool {.closure.}
     ## Return false to cancel the stream early.
@@ -233,8 +237,25 @@ proc applyCacheBreakpoints*(body: JsonNode) =
     if msgs[i].kind == JObject and markContentCache(msgs[i]):
       break
 
-proc toolUse*(id, name: string, input: JsonNode): ContentBlock =
-  ContentBlock(kind: ckToolUse, id: id, name: name, input: input)
+proc parseToolArguments*(raw: string): tuple[input: JsonNode, parseError: string] =
+  ## Empty args → `{}`. Invalid JSON is a tool error, not a provider failure.
+  if raw.len == 0:
+    return (newJObject(), "")
+  try:
+    (parseJson(raw), "")
+  except CatchableError as e:
+    (newJObject(), "invalid tool arguments: " & e.msg)
+
+proc toolUse*(id, name: string, input: JsonNode, parseError = ""): ContentBlock =
+  ContentBlock(kind: ckToolUse, id: id, name: name, input: input,
+    parseError: parseError)
+
+proc toolUseFromArgs*(id, name, raw: string): ContentBlock =
+  let parsed = parseToolArguments(raw)
+  toolUse(id, name, parsed.input, parsed.parseError)
+
+proc invalidToolCall*(call: ContentBlock): string =
+  if call.kind == ckToolUse: call.parseError else: ""
 
 proc toolResult*(toolUseId, output: string, isError = false,
                  images: seq[ImageContent] = @[]): ContentBlock =
@@ -329,9 +350,10 @@ proc raiseProviderError*(msg: string, overflow = false, retryable = false,
   raise e
 
 proc tool*(name, description: string, inputSchema: JsonNode,
-           execute: proc (input: JsonNode): ToolOutput {.closure.} = nil): Tool =
+           execute: proc (input: JsonNode): ToolOutput {.closure.} = nil,
+           parallel = false): Tool =
   Tool(name: name, description: description, inputSchema: inputSchema,
-       execute: execute)
+       execute: execute, parallel: parallel)
 
 proc toDefinitions*(tools: openArray[Tool]): seq[ToolDefinition] =
   for t in tools:
@@ -358,10 +380,8 @@ proc thinkingOptions*(provider, level: string, wire = twEffort): JsonNode =
   case wire
   of twEffort:
     case p
-    of "openrouter":
+    of "openrouter", "openai":
       result["reasoning"] = %*{"effort": lv}
-    of "openai":
-      result["reasoning_effort"] = %lv
     of "anthropic":
       let budget = thinkingBudgetTokens(lv)
       if budget > 0:
@@ -373,7 +393,7 @@ proc thinkingOptions*(provider, level: string, wire = twEffort): JsonNode =
     of "openrouter":
       result["reasoning"] = %*{"enabled": true}
     of "openai":
-      result["reasoning_effort"] = %"medium"
+      result["reasoning"] = %*{"effort": "medium"}
     of "anthropic":
       result = thinkingOptions(p, "high", twEffort)
     else:
@@ -383,7 +403,7 @@ proc thinkingOptions*(provider, level: string, wire = twEffort): JsonNode =
     of "openrouter":
       result["reasoning"] = %*{"max_tokens": thinkingBudgetTokens(lv)}
     of "openai":
-      result["reasoning_effort"] = %lv
+      result["reasoning"] = %*{"effort": lv}
     of "anthropic":
       result = thinkingOptions(p, lv, twEffort)
     else:

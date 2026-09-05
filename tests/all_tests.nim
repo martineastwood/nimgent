@@ -1,16 +1,17 @@
 import std/[json, os, osproc, streams, strutils, times, unittest]
 import nimgent
 import nimgent/[anthropic, openrouter]
-from nimgent/openai import makeOpenAIProvider, buildOpenAiBody, defaultOpenAiEndpoint
+from nimgent/openai import makeOpenAIProvider, buildOpenAiBody, defaultOpenAiEndpoint,
+  defaultOpenAiChatEndpoint
 
 suite "thinking options":
   test "maps effort, toggle, and max_tokens by provider":
     check thinkingOptions("openrouter", "high")["reasoning"]["effort"].getStr == "high"
-    check thinkingOptions("openai", "low")["reasoning_effort"].getStr == "low"
+    check thinkingOptions("openai", "low")["reasoning"]["effort"].getStr == "low"
     check thinkingOptions("anthropic", "medium")["thinking"]["budget_tokens"].getInt == 8000
     check thinkingOptions("openai", "none").len == 0
     check thinkingOptions("openrouter", "high", twToggle)["reasoning"]["enabled"].getBool
-    check thinkingOptions("openai", "high", twToggle)["reasoning_effort"].getStr == "medium"
+    check thinkingOptions("openai", "high", twToggle)["reasoning"]["effort"].getStr == "medium"
     check thinkingOptions("openrouter", "low", twMaxTokens)["reasoning"]["max_tokens"].getInt == 2048
     check thinkingBudgetTokens("high") == 16000
 
@@ -150,6 +151,9 @@ type
   BoomProvider = ref object of Provider
     calls*: int
 
+  BadArgsProvider = ref object of Provider
+    calls*: int
+
 method generate(p: ScriptProvider, request: ProviderRequest): ProviderResponse =
   inc p.calls
   p.last = request
@@ -166,6 +170,15 @@ method generate(p: ScriptProvider, request: ProviderRequest): ProviderResponse =
 method generate(p: BoomProvider, request: ProviderRequest): ProviderResponse =
   inc p.calls
   raiseProviderError("prompt is too long", overflow = true)
+
+method generate(p: BadArgsProvider, request: ProviderRequest): ProviderResponse =
+  inc p.calls
+  if p.calls == 1:
+    result.content.add toolUseFromArgs("call_1", "echo", "{nope")
+    result.finishReason = frToolUse
+    return
+  result.content.add text("recovered")
+  result.finishReason = frStop
 
 suite "generateText retries, abort, and tools":
   test "retries retryable errors then succeeds":
@@ -237,6 +250,26 @@ suite "generateText retries, abort, and tools":
     check p.calls == 1
     check r.toolCalls.len == 1
 
+  test "invalid tool JSON becomes a tool error and does not execute":
+    check parseToolArguments("").parseError.len == 0
+    check parseToolArguments("{\"x\":1}").input["x"].getInt == 1
+    check parseToolArguments("{nope").parseError.startsWith("invalid tool arguments")
+    check invalidToolCall(toolUseFromArgs("call_1", "echo", "{nope")).len > 0
+    check not tool("echo", "echo", %*{"type": "object"}).parallel
+    var ran = 0
+    let echoTool = tool("echo", "echo", %*{"type": "object"},
+      proc (input: JsonNode): ToolOutput =
+        inc ran
+        ToolOutput(output: "should not run"),
+      parallel = true)
+    check echoTool.parallel
+    let p = BadArgsProvider()
+    let r = generateText(p, model = "m", prompt = "hi",
+      tools = @[echoTool], maxSteps = 2, maxRetries = 0)
+    check ran == 0
+    check p.calls == 2
+    check r.textContent == "recovered"
+
   test "isRetryableStatus matches 429 and 5xx":
     check isRetryableStatus(429)
     check isRetryableStatus(503)
@@ -244,7 +277,7 @@ suite "generateText retries, abort, and tools":
     check not isRetryableStatus(401)
 
 suite "OpenAI provider":
-  test "native body uses max_completion_tokens and omits OpenRouter extras":
+  test "native body uses Responses fields and omits Chat Completions extras":
     let body = buildOpenAiBody(ProviderRequest(
       model: "gpt-5",
       sessionId: "should-omit",
@@ -255,14 +288,48 @@ suite "OpenAI provider":
       maxTokens: 128,
       options: %*{"reasoning_effort": "medium"}), stream = false)
     check body["model"].getStr == "gpt-5"
-    check body["max_completion_tokens"].getInt == 128
+    check body["max_output_tokens"].getInt == 128
+    check body["store"].getBool == false
+    check body["instructions"].getStr == "stable prefix"
     check "max_tokens" notin body
+    check "max_completion_tokens" notin body
     check "session_id" notin body
-    check "cache_control" notin body["tools"][0]
-    check "cache_control" notin body["messages"][0]["content"][0]
-    check body["reasoning_effort"].getStr == "medium"
+    check "messages" notin body
+    check "function" notin body["tools"][0]
+    check body["tools"][0]["name"].getStr == "read"
+    check body["reasoning"]["effort"].getStr == "medium"
+    check "reasoning_effort" notin body
+    check body["include"][0].getStr == "reasoning.encrypted_content"
     check makeOpenAIProvider("k").name == "openai"
     check makeOpenAIProvider("k").endpoint == defaultOpenAiEndpoint
+    check makeOpenAIProvider("k").useResponses
+    check not makeOpenAIProvider("k", defaultOpenAiChatEndpoint).useResponses
+
+  test "responses body replays reasoning and function calls":
+    let sig = $(%*{"id": "rs_1", "encrypted_content": "enc"})
+    let body = buildOpenAiBody(ProviderRequest(
+      model: "gpt-5",
+      messages: @[
+        userMessage("hi"),
+        Message(role: roleAssistant, content: @[
+          ContentBlock(kind: ckThinking, thinking: "plan", signature: sig),
+          text("done"),
+          toolUse("call_1", "read", %*{"path": "x"})
+        ]),
+        userMessage(@[toolResult("call_1", "ok")])
+      ],
+      maxTokens: 10), stream = false)
+    let input = body["input"]
+    check input.len == 5
+    check input[0]["role"].getStr == "user"
+    check input[1]["type"].getStr == "reasoning"
+    check input[1]["id"].getStr == "rs_1"
+    check input[1]["encrypted_content"].getStr == "enc"
+    check input[2]["content"][0]["type"].getStr == "output_text"
+    check input[3]["type"].getStr == "function_call"
+    check input[3]["call_id"].getStr == "call_1"
+    check input[4]["type"].getStr == "function_call_output"
+    check input[4]["call_id"].getStr == "call_1"
 
   test "missing API key fails before making a request":
     let provider = makeOpenAIProvider("", "http://127.0.0.1:1")
@@ -295,13 +362,14 @@ suite "OpenAI provider":
     check response.textContent == "hello from openai"
     check response.content[0].kind == ckThinking
     check response.content[0].thinking == "cached plan"
+    check "rs_1" in response.content[0].signature
     check response.usage.inputTokens == 20
     check response.usage.cacheReadTokens == 8
     check response.usage.cacheReported
     check fixture.waitForExit() == 0
 
   test "generateStream emits deltas before the response finishes":
-    let fixturePath = getCurrentDir() / "tests" / "openrouter_stream_fixture.py"
+    let fixturePath = getCurrentDir() / "tests" / "openai_responses_stream_fixture.py"
     var fixture = startProcess("python3", args = @[fixturePath],
       options = {poUsePath, poStdErrToStdOut})
     defer:
@@ -329,7 +397,7 @@ suite "OpenAI provider":
     check fixture.waitForExit() == 0
 
   test "generateStream emits tool call deltas":
-    let fixturePath = getCurrentDir() / "tests" / "openrouter_stream_fixture.py"
+    let fixturePath = getCurrentDir() / "tests" / "openai_responses_stream_fixture.py"
     var fixture = startProcess("python3", args = @[fixturePath],
       options = {poUsePath, poStdErrToStdOut})
     defer:

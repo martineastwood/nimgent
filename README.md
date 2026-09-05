@@ -58,6 +58,7 @@ echo "finish: ", response.finishReason
 import nimgent/[anthropic, openai, openrouter]
 
 let openai = makeOpenAIProvider(getEnv("OPENAI_API_KEY"))
+# /v1/responses; pass a */chat/completions URL for compat servers
 
 let anthropic = makeAnthropicProvider(
   getEnv("ANTHROPIC_API_KEY"),

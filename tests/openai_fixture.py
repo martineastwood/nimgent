@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Chat Completions fixture that accepts native OpenAI request shape."""
+"""Responses API fixture that accepts native OpenAI request shape."""
 
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -22,21 +22,26 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self.send_json(200, {
-            "id": "chatcmpl-fixture",
+            "id": "resp-fixture",
             "model": "gpt-5",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "hello from openai",
-                    "reasoning": "cached plan",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "encrypted_content": "enc",
+                    "summary": [{"type": "summary_text", "text": "cached plan"}],
                 },
-                "finish_reason": "stop",
-            }],
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "hello from openai"}],
+                },
+            ],
             "usage": {
-                "prompt_tokens": 20,
-                "completion_tokens": 4,
-                "prompt_tokens_details": {"cached_tokens": 8},
+                "input_tokens": 20,
+                "output_tokens": 4,
+                "input_tokens_details": {"cached_tokens": 8},
             },
         })
 
@@ -47,23 +52,28 @@ class Handler(BaseHTTPRequestHandler):
             return "bad model"
         if "session_id" in body:
             return "native OpenAI must not send session_id"
-        if "max_tokens" in body:
-            return "native OpenAI must use max_completion_tokens"
-        if body.get("max_completion_tokens") != 32:
-            return "missing max_completion_tokens"
-        if body.get("reasoning_effort") != "low":
-            return "missing reasoning_effort"
-        for msg in body.get("messages", []):
-            content = msg.get("content")
-            if isinstance(content, list):
-                for part in content:
-                    if "cache_control" in part:
-                        return "native OpenAI must not send cache_control"
-            elif isinstance(content, dict) and "cache_control" in content:
-                return "native OpenAI must not send cache_control"
+        if "messages" in body:
+            return "native OpenAI must use input, not messages"
+        if "max_tokens" in body or "max_completion_tokens" in body:
+            return "native OpenAI must use max_output_tokens"
+        if body.get("max_output_tokens") != 32:
+            return "missing max_output_tokens"
+        if body.get("store") is not False:
+            return "store must be false"
+        if "reasoning_effort" in body:
+            return "use reasoning.effort, not reasoning_effort"
+        reasoning = body.get("reasoning") or {}
+        if reasoning.get("effort") != "low":
+            return "missing reasoning.effort"
+        if "You are a test agent." not in (body.get("instructions") or ""):
+            return "missing instructions"
         for tool in body.get("tools", []):
+            if "function" in tool:
+                return "Responses tools must be flat"
             if "cache_control" in tool:
                 return "native OpenAI must not send cache_control"
+            if tool.get("type") != "function" or tool.get("name") != "read":
+                return "bad tool"
         return ""
 
     def send_json(self, status, body):

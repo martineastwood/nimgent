@@ -48,8 +48,13 @@ proc findTool(tools: openArray[Tool], name: string): int =
 
 proc execTools(tools: openArray[Tool], calls: openArray[ContentBlock],
                abort: AbortCheck): seq[ContentBlock] =
+  ## Sequential. `Tool.parallel` is reserved until execute can overlap.
   for call in calls:
     checkAbort(abort)
+    let bad = invalidToolCall(call)
+    if bad.len > 0:
+      result.add toolResult(call.id, bad, true)
+      continue
     let i = findTool(tools, call.name)
     if i < 0 or tools[i].execute.isNil:
       result.add toolResult(call.id, "Unknown tool: " & call.name, true)
