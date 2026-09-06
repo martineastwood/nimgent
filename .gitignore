@@ -2,3 +2,4 @@ nimcache/
 tests/all_tests
 *.dSYM/
 .nimble/
+.DS_Store
