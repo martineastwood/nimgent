@@ -186,11 +186,17 @@ method generateStream*(provider: OpenAIProvider,
     else:
       proc (data: JsonNode): SseAction =
         handleChatEvent(acc, resp, data, onEvent)
-  let cancelled = not forEachSse(response.bodyStream, watch, request.wakeFd,
+  let drive = forEachSse(response.bodyStream, watch, request.wakeFd,
     onEvent, handle)
+  if drive == sdCancelled:
+    assembleStream(acc, resp)
+    result = resp
+    if result.finishReason == frUnknown:
+      result.finishReason = frStop
+    return
+  if drive == sdClosed and resp.finishReason == frUnknown:
+    raiseProviderError(provider.label &
+      " stream failed: connection closed mid-response", retryable = true)
   assembleStream(acc, resp)
   result = resp
-  if not cancelled:
-    discard onEvent(StreamEvent(kind: seFinished))
-  elif result.finishReason == frUnknown:
-    result.finishReason = frStop
+  discard onEvent(StreamEvent(kind: seFinished))

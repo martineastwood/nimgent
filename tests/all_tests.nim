@@ -85,6 +85,20 @@ suite "OpenRouter provider":
       check stamps.len == 2
       check stamps[1] - stamps[0] >= 0.05
 
+  test "truncated stream is a retryable error":
+    withFixture("openrouter_stream_cut_fixture.py") do (port: int):
+      let provider = makeOpenRouterProvider("fixture-key",
+        "http://127.0.0.1:" & $port, timeoutSeconds = 5)
+      try:
+        discard provider.generateStream(
+          ProviderRequest(model: "test", messages: @[userMessage("hi")],
+            maxTokens: 20),
+          proc (ev: StreamEvent): bool = true)
+        fail()
+      except ProviderError as e:
+        check e.retryable
+        check "closed mid-response" in e.msg
+
   test "missing API key fails before making a request":
     let provider = makeOpenRouterProvider("", "http://127.0.0.1:1")
     expect ProviderError:

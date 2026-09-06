@@ -9,6 +9,11 @@ type
     sseStop
     sseCancel
 
+  SseDrive* = enum
+    sdEnded      ## [DONE] or handle sseStop
+    sdCancelled
+    sdClosed     ## body ended without a terminal
+
   WakeWatch* = object
     fd: cint = -1
 
@@ -119,35 +124,38 @@ proc forEachSse*(
   wakeFd: cint,
   onEvent: StreamCallback,
   handle: proc (data: JsonNode): SseAction {.closure.}
-): bool =
-  ## Drive an SSE body. False if wake or `handle` cancelled.
+): SseDrive =
+  ## Drive an SSE body. `sdClosed` if the socket ends without `[DONE]` / sseStop.
   var buf = ""
   while true:
     let readFut = bodyStream.read()
     if not awaitWithWake(readFut, watch, wakeFd, onEvent):
-      return false
+      return sdCancelled
     let (more, chunk) = waitFor readFut
-    if not more:
-      break
-    buf.add chunk
+    if more:
+      buf.add chunk
+    elif buf.len > 0:
+      buf.add '\n'
     while true:
       let (ok, line) = popLine(buf)
-      if not ok: break
+      if not ok:
+        break
       if line.len == 0: continue
       if not line.startsWith("data:"): continue
       let payload = line[5 .. ^1].strip
       if payload == "[DONE]":
-        return true
+        return sdEnded
       var data: JsonNode
       try:
         data = parseJson(payload)
       except CatchableError:
         continue
       case handle(data)
-      of sseStop: return true
-      of sseCancel: return false
+      of sseStop: return sdEnded
+      of sseCancel: return sdCancelled
       of sseContinue: discard
-  true
+    if not more:
+      return sdClosed
 
 proc assembleStream*(acc: StreamAcc, response: var ProviderResponse) =
   if acc.parsedFinal: return
