@@ -6,6 +6,46 @@ import nimgent/[provider, stream]
 proc responsesImagePart(mimeType, data: string): JsonNode =
   %*{"type": "input_image", "image_url": "data:" & mimeType & ";base64," & data}
 
+proc responsesFilePart(f: FileContent): JsonNode =
+  %*{"type": "input_file", "filename": fileLabel(f),
+    "file_data": fileDataUri(f)}
+
+proc encodeResponsesHostedTool(tool: ToolDefinition): JsonNode =
+  result = %*{"type": tool.hosted}
+  mergeRequestOptions(result, tool.hostedOptions)
+
+proc addAnnotationSource(blocks: var seq[ContentBlock], a: JsonNode) =
+  if a.isNil or a.kind != JObject: return
+  case a.getOrDefault("type").getStr
+  of "url_citation":
+    blocks.add source(a.getOrDefault("url").getStr, a.getOrDefault("title").getStr,
+      raw = copy(a))
+  of "file_citation":
+    blocks.add source("", a.getOrDefault("filename").getStr,
+      id = a.getOrDefault("file_id").getStr, raw = copy(a))
+  else:
+    discard
+
+proc textWithSources(textVal: string, anns: JsonNode): seq[ContentBlock] =
+  if textVal.len > 0:
+    result.add text(textVal)
+  if anns.isNil or anns.kind != JArray: return
+  for a in anns:
+    addAnnotationSource(result, a)
+
+proc foldOutputText(textVal: string, sources: seq[ContentBlock]): JsonNode =
+  result = %*{"type": "output_text", "text": textVal}
+  if sources.len == 0: return
+  var anns = newJArray()
+  for s in sources:
+    if not s.source.raw.isNil and s.source.raw.kind == JObject:
+      anns.add s.source.raw
+    elif s.source.url.len > 0:
+      anns.add %*{"type": "url_citation", "url": s.source.url,
+        "title": s.source.title}
+  if anns.len > 0:
+    result["annotations"] = anns
+
 proc reasoningReplay(part: ContentBlock): JsonNode =
   ## Replay a stored Responses reasoning item. Anthropic signatures are ignored.
   if part.signature.len == 0: return nil
@@ -36,7 +76,10 @@ proc addResponsesItems(input: var JsonNode, message: Message) =
         parts.add %*{"type": "input_text", "text": part.text}
       of ckImage:
         parts.add responsesImagePart(part.mimeType, part.data)
+      of ckFile:
+        parts.add responsesFilePart(part.file)
       of ckToolResult:
+        if part.hosted.len > 0: continue
         flushResponsesUser(input, parts)
         input.add %*{"type": "function_call_output", "call_id": part.toolUseId,
           "output": part.output}
@@ -54,21 +97,32 @@ proc addResponsesItems(input: var JsonNode, message: Message) =
       input.add %*{"role": "user", "content": [{"type": "input_text", "text": ""}]}
     return
 
-  for part in message.content:
+  var i = 0
+  while i < message.content.len:
+    let part = message.content[i]
     case part.kind
     of ckThinking:
       let item = reasoningReplay(part)
       if not item.isNil: input.add item
     of ckText:
-      if part.text.len > 0:
+      let sources = takeFollowingSources(message.content, i)
+      if part.text.len > 0 or sources.len > 0:
         input.add %*{"role": "assistant",
-          "content": [{"type": "output_text", "text": part.text}]}
+          "content": [foldOutputText(part.text, sources)]}
     of ckToolUse:
-      let args = if part.input.isNil: "{}" else: part.input.pretty(0)
-      input.add %*{"type": "function_call", "call_id": part.id,
-        "name": part.name, "arguments": args}
+      if part.hosted.len > 0:
+        var item = %*{"type": part.hosted & "_call", "id": part.id,
+          "status": "completed"}
+        if not part.input.isNil:
+          item["action"] = part.input
+        input.add item
+      else:
+        let args = if part.input.isNil: "{}" else: part.input.pretty(0)
+        input.add %*{"type": "function_call", "call_id": part.id,
+          "name": part.name, "arguments": args}
     else:
       discard
+    inc i
 
 proc buildResponsesBody*(request: ProviderRequest, stream: bool): JsonNode =
   ## Native OpenAI Responses body. Stateless: store=false, full input each turn.
@@ -90,12 +144,15 @@ proc buildResponsesBody*(request: ProviderRequest, stream: bool): JsonNode =
   if request.tools.len > 0:
     result["tools"] = newJArray()
     for tool in request.tools:
-      result["tools"].add %*{
-        "type": "function",
-        "name": tool.name,
-        "description": tool.description,
-        "parameters": tool.inputSchema
-      }
+      if tool.hosted.len > 0:
+        result["tools"].add encodeResponsesHostedTool(tool)
+      else:
+        result["tools"].add %*{
+          "type": "function",
+          "name": tool.name,
+          "description": tool.description,
+          "parameters": tool.inputSchema
+        }
   mergeRequestOptions(result, request.options)
   if "reasoning_effort" in result:
     if "reasoning" notin result:
@@ -159,8 +216,15 @@ proc parseResponsesOutput*(data: JsonNode, failPrefix: string): ProviderResponse
       of "reasoning":
         result.content.add thinkingFromReasoningItem(item)
       of "message":
-        let t = outputTextFrom(item)
-        if t.len > 0: result.content.add text(t)
+        let c = item.getOrDefault("content")
+        if c.kind == JArray:
+          for part in c:
+            if part.getOrDefault("type").getStr in ["output_text", "text"]:
+              result.content.add textWithSources(
+                part.getOrDefault("text").getStr, part.getOrDefault("annotations"))
+        else:
+          let t = outputTextFrom(item)
+          if t.len > 0: result.content.add text(t)
       of "function_call":
         hasTool = true
         let args = item.getOrDefault("arguments").getStr
@@ -169,7 +233,14 @@ proc parseResponsesOutput*(data: JsonNode, failPrefix: string): ProviderResponse
         result.content.add toolUseFromArgs(
           if id.len > 0: id else: "call_" & name, name, args)
       else:
-        discard
+        let typ = item.getOrDefault("type").getStr
+        if typ.endsWith("_call") and typ != "function_call":
+          let name = typ[0 ..< typ.len - 5]
+          var action = item.getOrDefault("action")
+          if action.isNil or action.kind == JNull:
+            action = newJObject()
+          result.content.add toolUse(item.getOrDefault("id").getStr, name,
+            action, hosted = name)
   if "usage" in data and data["usage"].kind == JObject:
     parseOpenAiUsage(data["usage"], result.usage)
   if hasTool:

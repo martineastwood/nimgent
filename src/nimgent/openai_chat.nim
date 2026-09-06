@@ -9,15 +9,15 @@ proc openAiImagePart*(mimeType, data: string): JsonNode =
 
 proc flushUserContent(result: var JsonNode, parts: var seq[JsonNode]) =
   if parts.len == 0: return
-  var hasImage = false
+  var multipart = false
   var textOnly = ""
   for p in parts:
-    if p["type"].getStr == "image_url":
-      hasImage = true
-    elif p["type"].getStr == "text":
+    if p["type"].getStr != "text":
+      multipart = true
+    else:
       if textOnly.len > 0: textOnly.add "\n"
       textOnly.add p["text"].getStr
-  if hasImage:
+  if multipart:
     var arr = newJArray()
     for p in parts: arr.add p
     result.add %*{"role": "user", "content": arr}
@@ -33,7 +33,12 @@ proc addUserMessages(result: var JsonNode, message: Message) =
       parts.add %*{"type": "text", "text": part.text}
     of ckImage:
       parts.add openAiImagePart(part.mimeType, part.data)
+    of ckFile:
+      parts.add %*{"type": "file", "file": {
+        "filename": fileLabel(part.file),
+        "file_data": fileDataUri(part.file)}}
     of ckToolResult:
+      if part.hosted.len > 0: continue
       flushUserContent(result, parts)
       result.add %*{"role": "tool", "tool_call_id": part.toolUseId,
         "content": part.output}
@@ -103,7 +108,7 @@ proc encodeMessage(result: var JsonNode, message: Message) =
 
   var calls = newJArray()
   for part in message.content:
-    if part.kind == ckToolUse:
+    if part.kind == ckToolUse and part.hosted.len == 0:
       calls.add %*{
         "id": part.id,
         "type": "function",
@@ -143,6 +148,7 @@ proc buildChatBody*(request: ProviderRequest, stream: bool,
   if request.tools.len > 0:
     result["tools"] = newJArray()
     for tool in request.tools:
+      if tool.hosted.len > 0: continue
       result["tools"].add %*{
         "type": "function",
         "function": {
@@ -151,6 +157,8 @@ proc buildChatBody*(request: ProviderRequest, stream: bool,
           "parameters": tool.inputSchema
         }
       }
+    if result["tools"].len == 0:
+      delete(result, "tools")
   mergeRequestOptions(result, request.options)
   if applyCache:
     applyCacheBreakpoints(result)

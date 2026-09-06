@@ -18,13 +18,32 @@ type
     ckToolResult
     ckThinking
     ckImage
+    ckFile
+    ckSource
 
   ImageContent* = object
     mimeType*: string
     data*: string  ## base64, no data: prefix; empty when `path` is set until hydrate
     path*: string  ## workspace-relative file; preferred on disk over inlined bytes
 
+  FileContent* = object
+    mimeType*: string
+    data*: string  ## base64, no data: prefix; empty when `path` is set until hydrate
+    path*: string
+    filename*: string
+
+  SourceContent* = object
+    url*: string
+    title*: string
+    id*: string
+    citedText*: string
+    raw*: JsonNode  ## provider citation object; required for Anthropic replay
+
   ContentBlock* = object
+    ## Non-empty when the provider already ran this tool use/result
+    ## (`web_search`, …). `toolCalls` skips these; generateText must not
+    ## execute them. Value is the logical tool name, used to replay results.
+    hosted*: string
     case kind*: ContentKind
     of ckText:
       text*: string
@@ -45,6 +64,10 @@ type
       mimeType*: string
       data*: string
       path*: string
+    of ckFile:
+      file*: FileContent
+    of ckSource:
+      source*: SourceContent
 
   Message* = object
     role*: Role
@@ -54,6 +77,9 @@ type
     name*: string
     description*: string
     inputSchema*: JsonNode
+    ## Non-empty: provider-hosted tool (`web_search`, …). No execute.
+    hosted*: string
+    hostedOptions*: JsonNode
 
   FinishReason* = enum
     frUnknown
@@ -124,6 +150,8 @@ type
     ## program is compiled with `--threads:on`. execute must be safe to run
     ## concurrently (no shared mutation). niminal never sets it.
     parallel*: bool
+    hosted*: string
+    hostedOptions*: JsonNode
 
   Provider* = ref object of RootObj
     name*: string
@@ -203,6 +231,35 @@ proc image*(img: ImageContent): ContentBlock =
 proc toImage*(part: ContentBlock): ImageContent =
   ImageContent(mimeType: part.mimeType, data: part.data, path: part.path)
 
+proc file*(mimeType, data: string, path = "", filename = ""): ContentBlock =
+  ContentBlock(kind: ckFile, file: FileContent(mimeType: mimeType, data: data,
+    path: path, filename: filename))
+
+proc file*(f: FileContent): ContentBlock =
+  ContentBlock(kind: ckFile, file: f)
+
+proc source*(url: string; title = ""; id = ""; citedText = "";
+             raw: JsonNode = nil): ContentBlock =
+  ContentBlock(kind: ckSource, source: SourceContent(url: url, title: title,
+    id: id, citedText: citedText, raw: raw))
+
+proc fileLabel*(f: FileContent): string =
+  if f.filename.len > 0: return f.filename
+  if f.path.len > 0:
+    let i = max(f.path.rfind('/'), f.path.rfind('\\'))
+    return if i >= 0: f.path[i + 1 .. ^1] else: f.path
+  "file"
+
+proc fileDataUri*(f: FileContent): string =
+  "data:" & f.mimeType & ";base64," & f.data
+
+proc takeFollowingSources*(content: openArray[ContentBlock],
+                           i: var int): seq[ContentBlock] =
+  ## Consume ckSource blocks after `content[i]`.
+  while i + 1 < content.len and content[i + 1].kind == ckSource:
+    inc i
+    result.add content[i]
+
 proc ephemeralCache(): JsonNode =
   %*{"type": "ephemeral"}
 
@@ -257,9 +314,10 @@ proc parseToolArguments*(raw: string): tuple[input: JsonNode, parseError: string
   except CatchableError as e:
     (newJObject(), "invalid tool arguments: " & e.msg)
 
-proc toolUse*(id, name: string, input: JsonNode, parseError = ""): ContentBlock =
+proc toolUse*(id, name: string, input: JsonNode, parseError = "",
+              hosted = ""): ContentBlock =
   ContentBlock(kind: ckToolUse, id: id, name: name, input: input,
-    parseError: parseError)
+    parseError: parseError, hosted: hosted)
 
 proc toolUseFromArgs*(id, name, raw: string): ContentBlock =
   let parsed = parseToolArguments(raw)
@@ -269,9 +327,9 @@ proc invalidToolCall*(call: ContentBlock): string =
   if call.kind == ckToolUse: call.parseError else: ""
 
 proc toolResult*(toolUseId, output: string, isError = false,
-                 images: seq[ImageContent] = @[]): ContentBlock =
+                 images: seq[ImageContent] = @[], hosted = ""): ContentBlock =
   ContentBlock(kind: ckToolResult, toolUseId: toolUseId, output: output,
-               isError: isError, images: images)
+    isError: isError, images: images, hosted: hosted)
 
 proc userMessage*(s: string): Message =
   Message(role: roleUser, content: @[text(s)])
@@ -302,7 +360,7 @@ proc dropImages*(messages: seq[Message]): seq[Message] =
 
 proc toolCalls*(r: ProviderResponse): seq[ContentBlock] =
   for b in r.content:
-    if b.kind == ckToolUse:
+    if b.kind == ckToolUse and b.hosted.len == 0:
       result.add b
 
 proc textContent*(blocks: openArray[ContentBlock]): string =
@@ -334,10 +392,11 @@ method generateStream*(p: Provider, request: ProviderRequest,
         if not onEvent(StreamEvent(kind: seTextDelta, text: b.text)):
           return
     of ckToolUse:
-      let args = if b.input.isNil: "" else: $b.input
-      if not onEvent(StreamEvent(kind: seToolCallDelta, toolCallId: b.id,
-          toolName: b.name, toolArgs: args)):
-        return
+      if b.hosted.len == 0:
+        let args = if b.input.isNil: "" else: $b.input
+        if not onEvent(StreamEvent(kind: seToolCallDelta, toolCallId: b.id,
+            toolName: b.name, toolArgs: args)):
+          return
     else:
       discard
   discard onEvent(StreamEvent(kind: seFinished))
@@ -406,14 +465,20 @@ method forceToolOptions*(p: Provider, toolName: string): JsonNode {.base.} =
 
 proc tool*(name, description: string, inputSchema: JsonNode,
            execute: proc (input: JsonNode): ToolOutput {.closure.} = nil,
-           parallel = false): Tool =
+           parallel = false, hosted = "", hostedOptions: JsonNode = nil): Tool =
   Tool(name: name, description: description, inputSchema: inputSchema,
-       execute: execute, parallel: parallel)
+       execute: execute, parallel: parallel, hosted: hosted,
+       hostedOptions: hostedOptions)
+
+proc hostedTool*(name: string, options: JsonNode = nil): Tool =
+  ## Provider-executed tool (`web_search`, …). OpenAI Responses and Anthropic.
+  Tool(name: name, hosted: name, hostedOptions: options)
 
 proc toDefinitions*(tools: openArray[Tool]): seq[ToolDefinition] =
   for t in tools:
     result.add ToolDefinition(name: t.name, description: t.description,
-      inputSchema: t.inputSchema)
+      inputSchema: t.inputSchema, hosted: t.hosted,
+      hostedOptions: t.hostedOptions)
 
 proc thinkingBudgetTokens*(level: string): int =
   case level.toLowerAscii

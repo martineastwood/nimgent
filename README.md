@@ -106,6 +106,26 @@ let response = generateText(
   maxSteps = 5)
 ```
 
+`hostedTool("web_search")` runs on the provider (OpenAI Responses, Anthropic).
+Chat Completions skips it. Hosted calls and results stay on the assistant
+message for replay; `toolCalls` / the execute loop ignore them.
+
+```nim
+let response = generateText(
+  provider, model = "…", prompt = "What landed today?",
+  tools = @[hostedTool("web_search")])
+```
+
+Pass a PDF as `file(...)`. Citations come back as `ckSource`.
+
+```nim
+let response = generateText(
+  provider, model = "…",
+  messages = @[userMessage(@[
+    file("application/pdf", pdfBase64, filename = "spec.pdf"),
+    text("Summarize this.")])])
+```
+
 niminal still owns its own agent loop; this helper is for apps that want the
 AI-SDK-style “run my callbacks until the model is done.”
 

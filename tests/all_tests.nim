@@ -2,9 +2,9 @@ import std/[json, options, os, osproc, streams, strutils, times, unittest]
 import nimgent
 import nimgent/[anthropic, openrouter]
 from nimgent/openai import makeOpenAIProvider, makeHyperProvider,
-  buildResponsesBody, buildChatBody, defaultOpenAiEndpoint,
-  defaultOpenAiChatEndpoint, defaultHyperEndpoint, chatObjectOptions,
-  chatForceToolOptions
+  buildResponsesBody, buildChatBody, parseResponsesOutput,
+  defaultOpenAiEndpoint, defaultOpenAiChatEndpoint, defaultHyperEndpoint,
+  chatObjectOptions, chatForceToolOptions
 
 proc withFixture(script: string, body: proc (port: int)) =
   let fixturePath = getCurrentDir() / "tests" / script
@@ -172,6 +172,9 @@ type
   BoomProvider = ref object of Provider
     calls*: int
 
+  HostedScript = ref object of Provider
+    calls*: int
+
   BadArgsProvider = ref object of Provider
     calls*: int
 
@@ -193,6 +196,13 @@ method generate(p: ScriptProvider, request: ProviderRequest): ProviderResponse =
 method generate(p: BoomProvider, request: ProviderRequest): ProviderResponse =
   inc p.calls
   raiseProviderError("prompt is too long", overflow = true)
+
+method generate(p: HostedScript, request: ProviderRequest): ProviderResponse =
+  inc p.calls
+  result.content.add toolUse("s1", "web_search", %*{"query": "x"},
+    hosted = "web_search")
+  result.content.add text("done")
+  result.finishReason = frStop
 
 method generate(p: BadArgsProvider, request: ProviderRequest): ProviderResponse =
   inc p.calls
@@ -581,6 +591,125 @@ suite "encoding":
       maxTokens: 10), stream = false)
     check "reasoning" notin stripped["messages"][1]
     check "reasoning_details" notin stripped["messages"][1]
+
+suite "files, sources, hosted tools":
+  test "file parts encode on Anthropic, Responses, and Chat":
+    let blocks = @[text("see"), file("application/pdf", "QUJD", filename = "spec.pdf")]
+    let req = ProviderRequest(model: "m", messages: @[userMessage(blocks)],
+      maxTokens: 10)
+    let doc = anthropicDocument(blocks[1].file)
+    check doc["type"].getStr == "document"
+    check doc["source"]["data"].getStr == "QUJD"
+    check doc["title"].getStr == "spec.pdf"
+    let resp = buildResponsesBody(req, stream = false)
+    check resp["input"][0]["content"][1]["type"].getStr == "input_file"
+    check resp["input"][0]["content"][1]["filename"].getStr == "spec.pdf"
+    let chat = buildChatBody(req, stream = false)
+    check chat["messages"][0]["content"][1]["type"].getStr == "file"
+    check chat["messages"][0]["content"][1]["file"]["filename"].getStr == "spec.pdf"
+
+  test "hosted web_search encodes and parses on Responses and Anthropic":
+    let tools = toDefinitions(@[hostedTool("web_search")])
+    let respBody = buildResponsesBody(ProviderRequest(model: "m",
+      messages: @[userMessage("hi")], tools: tools, maxTokens: 10), false)
+    check respBody["tools"][0]["type"].getStr == "web_search"
+    check "name" notin respBody["tools"][0]
+    let anthBody = buildAnthropicBody(ProviderRequest(model: "m",
+      messages: @[userMessage("hi")], tools: tools, maxTokens: 10))
+    check anthBody["tools"][0]["type"].getStr == "web_search_20250305"
+    check anthBody["tools"][0]["name"].getStr == "web_search"
+    let parsed = parseAnthropicOutput(%*{
+      "model": "claude",
+      "stop_reason": "end_turn",
+      "content": [
+        {"type": "server_tool_use", "id": "s1", "name": "web_search",
+          "input": {"query": "nim"}},
+        {"type": "web_search_tool_result", "tool_use_id": "s1",
+          "content": [{"type": "web_search_result", "url": "https://nim-lang.org",
+            "title": "Nim", "encrypted_content": "enc"}]},
+        {"type": "text", "text": "Nim is a language",
+          "citations": [{"type": "web_search_result_location",
+            "url": "https://nim-lang.org", "title": "Nim",
+            "cited_text": "Nim is", "encrypted_index": "idx"}]}
+      ],
+      "usage": {"input_tokens": 10, "output_tokens": 4}
+    })
+    check parsed.toolCalls.len == 0
+    check parsed.content[0].hosted == "web_search"
+    check parsed.content[0].name == "web_search"
+    check parsed.content[1].kind == ckToolResult
+    check parsed.content[1].hosted == "web_search"
+    check "encrypted_content" in parsed.content[1].output
+    check parsed.content[2].kind == ckText
+    check parsed.content[3].kind == ckSource
+    check parsed.content[3].source.url == "https://nim-lang.org"
+    check parsed.content[3].source.raw["encrypted_index"].getStr == "idx"
+    let replayed = buildAnthropicBody(ProviderRequest(model: "m",
+      messages: @[userMessage("hi"),
+        Message(role: roleAssistant, content: parsed.content)],
+      maxTokens: 10))
+    let asst = replayed["messages"][1]["content"]
+    check asst[0]["type"].getStr == "server_tool_use"
+    check asst[1]["type"].getStr == "web_search_tool_result"
+    check asst[1]["content"][0]["encrypted_content"].getStr == "enc"
+    check asst[2]["citations"][0]["encrypted_index"].getStr == "idx"
+    let respReplay = buildResponsesBody(ProviderRequest(model: "m", messages: @[
+      userMessage("hi"),
+      Message(role: roleAssistant, content: @[
+        toolUse("ws_1", "web_search", %*{"type": "search", "query": "nim"},
+          hosted = "web_search"),
+        text("Nim is a language"),
+        source("https://nim-lang.org", "Nim", raw = %*{
+          "type": "url_citation", "url": "https://nim-lang.org", "title": "Nim"})
+      ])
+    ], maxTokens: 10), false)
+    check respReplay["input"][1]["type"].getStr == "web_search_call"
+    check respReplay["input"][1]["id"].getStr == "ws_1"
+    check respReplay["input"][2]["content"][0]["annotations"][0]["url"].getStr ==
+      "https://nim-lang.org"
+
+  test "Responses parse web_search_call and url citations":
+    let parsed = parseResponsesOutput(%*{
+      "model": "gpt-5",
+      "status": "completed",
+      "output": [
+        {"type": "web_search_call", "id": "ws_1", "status": "completed",
+          "action": {"type": "search", "query": "nim"}},
+        {"type": "message", "role": "assistant", "content": [
+          {"type": "output_text", "text": "Nim is compiled.",
+            "annotations": [{"type": "url_citation",
+              "url": "https://nim-lang.org", "title": "Nim"}]}
+        ]}
+      ]
+    }, "OpenAI")
+    check parsed.finishReason == frStop
+    check parsed.toolCalls.len == 0
+    check parsed.content[0].hosted == "web_search"
+    check parsed.content[0].input["query"].getStr == "nim"
+    check parsed.content[1].text == "Nim is compiled."
+    check parsed.content[2].source.url == "https://nim-lang.org"
+
+  test "Chat Completions omits hosted tools":
+    let chat = buildChatBody(ProviderRequest(model: "m",
+      messages: @[userMessage("hi")],
+      tools: toDefinitions(@[hostedTool("web_search"),
+        tool("read", "d", %*{"type": "object"})]),
+      maxTokens: 10), false)
+    check chat["tools"].len == 1
+    check chat["tools"][0]["function"]["name"].getStr == "read"
+
+  test "generateText does not execute hosted tool calls":
+    var ran = false
+    let local = tool("web_search", "should not run", %*{"type": "object"},
+      proc (input: JsonNode): ToolOutput =
+        ran = true
+        ToolOutput(output: "nope"))
+    let p = HostedScript()
+    let r = generateText(p, model = "m", prompt = "hi",
+      tools = @[local, hostedTool("web_search")], maxSteps = 5)
+    check p.calls == 1
+    check not ran
+    check r.textContent == "done"
 
 type
   Heat* = enum
