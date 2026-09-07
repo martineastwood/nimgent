@@ -3,6 +3,7 @@ import std/[asyncdispatch, json, options, os, osproc, streams, strutils, times,
 import nimgent
 import nimgent/[anthropic, openrouter]
 import nimgent/testing
+import nimgent/stream
 from nimgent/openai import openAI, hyper,
   buildResponsesBody, buildChatBody, parseResponsesOutput,
   defaultOpenAiEndpoint, defaultOpenAiChatEndpoint, defaultHyperEndpoint,
@@ -19,6 +20,59 @@ proc withFixture(script: string, body: proc (port: int)) =
     fixture.close()
   body(parseInt(fixture.outputStream.readLine()))
   check fixture.waitForExit() == 0
+
+suite "Anthropic streaming":
+  test "reassembles text, signed thinking, tools, citations and cumulative usage":
+    var message = newJObject()
+    var args: seq[string]
+    var events: seq[StreamEvent]
+    let cb: StreamCallback = proc (event: StreamEvent): bool =
+      events.add event
+      true
+    let frames = @[
+      %*{"type": "message_start", "message": {"model": "claude-sonnet-4-6", "content": [], "usage": {"input_tokens": 10, "output_tokens": 1, "cache_read_input_tokens": 20}}},
+      %*{"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}},
+      %*{"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "Consider"}},
+      %*{"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "signed"}},
+      %*{"type": "content_block_stop", "index": 0},
+      %*{"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}},
+      %*{"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "Hello"}},
+      %*{"type": "content_block_delta", "index": 1, "delta": {"type": "citations_delta", "citation": {"url": "https://example.com", "title": "Example"}}},
+      %*{"type": "content_block_stop", "index": 1},
+      %*{"type": "content_block_start", "index": 2, "content_block": {"type": "tool_use", "id": "call1", "name": "lookup", "input": {}}},
+      %*{"type": "content_block_delta", "index": 2, "delta": {"type": "input_json_delta", "partial_json": "{\"q\":"}},
+      %*{"type": "content_block_delta", "index": 2, "delta": {"type": "input_json_delta", "partial_json": "\"Nim\"}"}},
+      %*{"type": "content_block_stop", "index": 2},
+      %*{"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 30}}]
+    for frame in frames:
+      check handleAnthropicEvent(message, args, frame, cb) == sseContinue
+    check handleAnthropicEvent(message, args, %*{"type": "message_stop"}, cb) == sseStop
+    let response = parseAnthropicOutput(message)
+    check response.content[0].signature == "signed"
+    check response.content[1].text == "Hello"
+    check response.content[2].kind == ckSource
+    check response.content[3].input["q"].getStr == "Nim"
+    check response.usage.inputTokens == 10
+    check response.usage.outputTokens == 30
+    check response.usage.cacheReadTokens == 20
+    check response.finishReason == frToolUse
+    check events.len == 4
+    check anthropic("key").supports(pcStreaming)
+
+  test "stream errors propagate and callbacks cancel":
+    var message = %*{"content": [{"type": "text", "text": ""}]}
+    var args = @[""]
+    let stop: StreamCallback = proc (event: StreamEvent): bool = false
+    check handleAnthropicEvent(message, args, %*{"type": "content_block_delta", "index": 0,
+      "delta": {"type": "text_delta", "text": "hi"}}, stop) == sseCancel
+    expect ProviderError:
+      discard handleAnthropicEvent(message, args,
+        %*{"type": "error", "error": {"type": "overloaded_error", "message": "Busy"}}, stop)
+
+  test "thinking budget leaves room for the requested answer":
+    let body = buildAnthropicBody(ProviderRequest(model: "claude-sonnet-4-6",
+      maxTokens: 4096, options: thinkingOptions("anthropic", "high")))
+    check body["max_tokens"].getInt == 20096
 
 suite "thinking options":
   test "maps effort, toggle, and max_tokens by provider":

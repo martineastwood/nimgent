@@ -63,6 +63,10 @@ let hyperProvider = hyper(getEnv("HYPER_API_KEY"))
 let anthropicProvider = anthropic(getEnv("ANTHROPIC_API_KEY"))
 ```
 
+Anthropic supports native streaming with tool arguments, thinking signatures,
+citations, cache usage, and cancellation. Run `nim c -r examples/anthropic_smoke.nim`
+with `ANTHROPIC_API_KEY` exported to check live streaming and structured output.
+
 Provider-specific knobs (thinking, routing, cache TTL) go in
 `ProviderRequest.options` / the `options` argument on `generateText` /
 `streamText`. Options must be a JSON object.

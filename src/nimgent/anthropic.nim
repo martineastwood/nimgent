@@ -1,7 +1,7 @@
 ## Anthropic Messages API adapter.
 
 import std/[asyncdispatch, base64, httpclient, json, net, strutils]
-import nimgent/provider
+import nimgent/[provider, stream]
 
 const defaultAnthropicEndpoint* = "https://api.anthropic.com/v1/messages"
 
@@ -103,7 +103,7 @@ proc parseAnthropicOutput*(data: JsonNode): ProviderResponse =
   if data.isNil or data.kind != JObject:
     raiseProviderError("Anthropic returned an empty response")
   let content = data.getOrDefault("content")
-  if content.kind == JArray:
+  if not content.isNil and content.kind == JArray:
     for part in content:
       let typ = part.getOrDefault("type").getStr
       case typ
@@ -154,7 +154,7 @@ proc anthropic*(apiKey: string, endpoint = "",
   let url = if endpoint.len > 0: endpoint else: defaultAnthropicEndpoint
   AnthropicProvider(name: "anthropic",
                     capabilities: {pcTools, pcStructuredOutput, pcImages,
-                      pcFiles, pcHostedTools},
+                      pcFiles, pcHostedTools, pcStreaming},
                     apiKey: apiKey, endpoint: url,
                     timeoutSeconds: timeoutSeconds)
 
@@ -191,6 +191,10 @@ proc buildAnthropicBody*(request: ProviderRequest): JsonNode =
         }
   applyCacheBreakpoints(result)
   mergeRequestOptions(result, request.options)
+  let thinking = result.getOrDefault("thinking")
+  if not thinking.isNil and thinking.getOrDefault("type").getStr == "enabled":
+    result["max_tokens"] = %max(result["max_tokens"].getInt,
+      thinking.getOrDefault("budget_tokens").getInt + request.maxTokens)
 
 method generateAsync*(provider: AnthropicProvider,
                       request: ProviderRequest): Future[ProviderResponse] {.async.} =
@@ -230,3 +234,100 @@ method generateAsync*(provider: AnthropicProvider,
   except CatchableError as e:
     raiseProviderError("Anthropic returned invalid JSON: " & e.msg)
   parseAnthropicOutput(data)
+
+proc handleAnthropicEvent*(message: var JsonNode, args: var seq[string],
+                          data: JsonNode, onEvent: StreamCallback): SseAction =
+  case data.getOrDefault("type").getStr
+  of "message_start":
+    message = copy(data["message"])
+  of "content_block_start":
+    message["content"].add copy(data["content_block"])
+    args.add ""
+  of "content_block_delta":
+    let i = data["index"].getInt
+    let delta = data["delta"]
+    let part = message["content"][i]
+    case delta["type"].getStr
+    of "text_delta", "thinking_delta", "signature_delta":
+      let field = case delta["type"].getStr
+        of "text_delta": "text"
+        of "thinking_delta": "thinking"
+        else: "signature"
+      let chunk = delta[field].getStr
+      part[field] = %(part.getOrDefault(field).getStr & chunk)
+      if field != "signature":
+        let ev = if field == "text": StreamEvent(kind: seTextDelta, text: chunk)
+                 else: StreamEvent(kind: seThinkingDelta, text: chunk)
+        if not onEvent(ev): return sseCancel
+    of "input_json_delta":
+      let chunk = delta["partial_json"].getStr
+      args[i].add chunk
+      if not onEvent(StreamEvent(kind: seToolCallDelta,
+          toolCallId: part["id"].getStr, toolName: part["name"].getStr,
+          toolArgs: chunk)): return sseCancel
+    of "citations_delta":
+      if not part.hasKey("citations"): part["citations"] = newJArray()
+      part["citations"].add copy(delta["citation"])
+    else: discard
+  of "content_block_stop":
+    let i = data["index"].getInt
+    if args[i].len > 0:
+      try: message["content"][i]["input"] = parseJson(args[i])
+      except CatchableError:
+        raiseProviderError("Anthropic returned invalid tool JSON")
+  of "message_delta":
+    for key, value in data["delta"]: message[key] = copy(value)
+    let usage = data.getOrDefault("usage")
+    if not usage.isNil:
+      for key, value in usage: message["usage"][key] = copy(value)
+  of "message_stop": return sseStop
+  of "error":
+    raiseProviderError("Anthropic stream error: " & apiErrorMessage($data),
+      retryable = data{"error", "type"}.getStr in ["overloaded_error", "api_error"])
+  else: discard
+  sseContinue
+
+method generateStreamAsync*(provider: AnthropicProvider,
+                            request: ProviderRequest,
+                            onEvent: StreamCallback): Future[ProviderResponse] {.async.} =
+  if provider.apiKey.len == 0:
+    raiseProviderError("ANTHROPIC API key is not configured")
+  let client = newAsyncHttpClient(
+    sslContext = newContext(verifyMode = CVerifyPeer),
+    headers = newHttpHeaders({"x-api-key": provider.apiKey,
+      "anthropic-version": "2023-06-01", "content-type": "application/json"}))
+  client.timeout = provider.timeoutSeconds * 1000
+  var watch = WakeWatch()
+  defer:
+    client.close()
+    watch.unregister()
+  let body = buildAnthropicBody(request)
+  body["stream"] = %true
+  var response: AsyncResponse
+  try:
+    let pending = client.request(provider.endpoint, HttpPost, $body)
+    if not await awaitWithWakeAsync(pending, addr watch, request.wakeFd, onEvent):
+      result.finishReason = frStop
+      return
+    response = await pending
+  except CatchableError as e:
+    raiseProviderError("Anthropic stream failed: " & e.msg, retryable = true)
+  if response.code.int >= 400:
+    let detail = apiErrorMessage(await drainBodyStreamAsync(response.bodyStream))
+    raiseProviderError("Anthropic API error (" & $response.code.int & "): " & detail,
+      overflow = response.code.int == 400 and isContextOverflow(detail),
+      status = response.code.int,
+      retryAfterMs = parseRetryAfter(response.headers.getOrDefault("Retry-After")))
+  var message = %*{"content": [], "usage": {}}
+  var args: seq[string]
+  let drive = await forEachSseAsync(response.bodyStream, addr watch,
+    request.wakeFd, onEvent, proc (data: JsonNode): SseAction =
+      handleAnthropicEvent(message, args, data, onEvent))
+  if drive == sdClosed:
+    raiseProviderError("Anthropic stream failed: connection closed mid-response",
+      retryable = true)
+  result = parseAnthropicOutput(message)
+  if drive == sdCancelled:
+    result.finishReason = frStop
+  else:
+    discard onEvent(StreamEvent(kind: seFinished))
