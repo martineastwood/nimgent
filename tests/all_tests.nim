@@ -1125,3 +1125,70 @@ suite "streamObject":
     check r.value["ok"].getBool
     check r.repairs == 1
     check p.calls == 2
+
+suite "wrapProvider":
+  test "forwards capabilities and structured-output methods":
+    let inner = openAI("k")
+    let w = wrapProvider(inner)
+    check w.name == "openai"
+    check w.supports(pcStreaming)
+    check w.supports(pcHostedTools)
+    check w.nativeObjectOptions("o", "", %*{"type": "object"})["text"]["format"][
+      "type"].getStr == "json_schema"
+    check w.forceToolOptions("submit")["tool_choice"]["name"].getStr == "submit"
+    check wrapProvider(inner, name = "gate").name == "gate"
+    expect ProviderError:
+      discard wrapProvider(nil)
+
+  test "mapRequest and mapResponse apply to generate":
+    let fake = scriptedModel(@[textResponse("hello")])
+    let w = wrapProvider(fake.provider,
+      mapRequest = proc (req: ProviderRequest): ProviderRequest =
+        var r = req
+        r.system.add "wrapped"
+        r,
+      mapResponse = proc (req: ProviderRequest, resp: var ProviderResponse) =
+        resp.content.add text("[seen]"))
+    let r = generateText(w, ProviderRequest(model: "m",
+      messages: @[userMessage("hi")]))
+    check r.text == "hello\n[seen]"
+    check FakeProvider(fake.provider).requests[0].system == @["wrapped"]
+
+  test "mapRequest does not mutate the caller's request":
+    let fake = scriptedModel(@[textResponse("hello")])
+    let w = wrapProvider(fake.provider,
+      mapRequest = proc (req: ProviderRequest): ProviderRequest =
+        var r = req
+        r.system.add "wrapped"
+        r)
+    var req = ProviderRequest(model: "m", messages: @[userMessage("hi")])
+    discard generateText(w, req)
+    check req.system.len == 0
+
+  test "streaming passes through live deltas and both hooks":
+    let c = ChunkScript(chunks: @["he", "llo"])
+    let w = wrapProvider(c,
+      mapRequest = proc (req: ProviderRequest): ProviderRequest =
+        var r = req
+        r.system.add "wrapped"
+        r,
+      mapResponse = proc (req: ProviderRequest, resp: var ProviderResponse) =
+        resp.content.add text("[seen]"))
+    var pieces: seq[string] = @[]
+    let resp = streamText(w.model("m"), prompt = "hi",
+      onEvent = proc (ev: StreamEvent): bool =
+        if ev.kind == seTextDelta: pieces.add ev.text
+        true)
+    check pieces == @["he", "llo"]
+    check resp.text == "hello\n[seen]"
+    check c.last.system == @["wrapped"]
+
+  test "generateObject keeps native structured output through the wrapper":
+    let p = ChatObjectScript(replies: @["{\"ok\":true}"])
+    let w = wrapProvider(p)
+    let r = generateObject(w.model("m"),
+      schema = %*{"type": "object", "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"]},
+      prompt = "x", maxRetries = 0)
+    check r.value["ok"].getBool
+    check p.last.options["response_format"]["type"].getStr == "json_schema"

@@ -96,6 +96,23 @@ if model.provider.supports(pcStreaming):
 For deterministic application tests, `import nimgent/testing` and use
 `scriptedModel(@[textResponse("hello")])`.
 
+## Wrapping providers
+
+`wrapProvider` runs every call through optional request and response hooks —
+inject defaults, drop images, redact, log usage — without touching the
+adapters. Capabilities and structured-output support forward.
+
+```nim
+let wrapped = wrapProvider(model.provider,
+  mapRequest = proc (req: ProviderRequest): ProviderRequest =
+    var r = req  # return a copy; the tool loop reuses one request across turns
+    r.system.add "Be concise."
+    r)
+```
+
+`mapResponse(req, resp)` edits the response in place. Streaming calls pass
+through the same hooks.
+
 ## Retries, cancel, tools
 
 `generateText` / `streamText` retry 429, 5xx, and transport errors (`maxRetries`

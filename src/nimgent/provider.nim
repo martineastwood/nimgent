@@ -611,3 +611,47 @@ proc thinkingOptions*(provider, level: string, wire = twEffort): JsonNode =
       result = thinkingOptions(p, lv, twEffort)
     else:
       discard
+
+type
+  RequestMapper* = proc (req: ProviderRequest): ProviderRequest {.closure.}
+    ## Return a new request. Do not mutate `req` in place: the tool loop and
+    ## generateObject repairs reuse one request across turns.
+  ResponseMapper* = proc (req: ProviderRequest, resp: var ProviderResponse) {.closure.}
+
+  WrapProvider* = ref object of Provider
+    ## Provider middleware: forwards every call to `inner` through optional
+    ## request and response hooks (inject defaults, drop images, redact, log).
+    inner*: Provider
+    mapRequest*: RequestMapper
+    mapResponse*: ResponseMapper
+
+proc wrapProvider*(inner: Provider, name = "",
+                   mapRequest: RequestMapper = nil,
+                   mapResponse: ResponseMapper = nil): WrapProvider =
+  ## Wrap `inner` so generate, stream, and generateObject all pass through the
+  ## hooks. Capabilities and the structured-output methods forward, so
+  ## `supports` stays truthful through the wrapper.
+  if inner.isNil:
+    raise newException(ProviderError, "provider must not be nil")
+  WrapProvider(name: if name.len > 0: name else: inner.name,
+    capabilities: inner.capabilities, inner: inner,
+    mapRequest: mapRequest, mapResponse: mapResponse)
+
+method generateAsync*(p: WrapProvider,
+                      request: ProviderRequest): Future[ProviderResponse] {.async.} =
+  let mapped = if p.mapRequest.isNil: request else: p.mapRequest(request)
+  result = await p.inner.generateAsync(mapped)
+  if not p.mapResponse.isNil: p.mapResponse(mapped, result)
+
+method generateStreamAsync*(p: WrapProvider, request: ProviderRequest,
+                            onEvent: StreamCallback): Future[ProviderResponse] {.async.} =
+  let mapped = if p.mapRequest.isNil: request else: p.mapRequest(request)
+  result = await p.inner.generateStreamAsync(mapped, onEvent)
+  if not p.mapResponse.isNil: p.mapResponse(mapped, result)
+
+method nativeObjectOptions*(p: WrapProvider, name, description: string,
+                            schema: JsonNode): JsonNode =
+  p.inner.nativeObjectOptions(name, description, schema)
+
+method forceToolOptions*(p: WrapProvider, toolName: string): JsonNode =
+  p.inner.forceToolOptions(toolName)

@@ -6,10 +6,10 @@ import std/os
 import nimgent
 import nimgent/openai
 
-let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
+let model: LanguageModel = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
 
 echo "calling the LLM..."
-let response = generateText(
+let response: ProviderResponse = generateText(
   model,
   system = "You are a helpful assistant. Answer concisely and without using markdown.",
   prompt = "Explain why the sky is blue in 10 or fewer words.")

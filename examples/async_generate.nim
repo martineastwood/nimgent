@@ -17,7 +17,7 @@ proc main() {.async.} =
   let model: LanguageModel = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
 
   echo "calling the models..."
-  let answers: seq[string] = await all(answer(model, "Why is the sky blue?"),
+  let answers = await all(answer(model, "Why is the sky blue?"),
                           answer(model, "Why is grass green?"),
                           answer(model, "Why are sunsets orange?"))
   let labels = ["sky", "grass", "sunset"]
