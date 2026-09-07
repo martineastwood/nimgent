@@ -23,24 +23,21 @@ import std/os
 import nimgent
 import nimgent/openrouter
 
-let provider = makeOpenRouterProvider(
-  getEnv("OPENROUTER_API_KEY"),
-  "https://openrouter.ai/api/v1/chat/completions")
+let model = openRouter(getEnv("OPENROUTER_API_KEY")).model(
+  "deepseek/deepseek-v4-flash-0731")
 
 let response = generateText(
-  provider,
-  model = "deepseek/deepseek-v4-flash-0731",
+  model,
   prompt = "Say hello in one sentence.")
 
-echo response.textContent
+echo response.text
 ```
 
 Stream tokens as they arrive:
 
 ```nim
 let response = streamText(
-  provider,
-  model = "deepseek/deepseek-v4-flash-0731",
+  model,
   prompt = "Count to three.",
   onEvent = proc (ev: StreamEvent): bool =
     if ev.kind == seTextDelta:
@@ -57,26 +54,54 @@ echo "finish: ", response.finishReason
 ```nim
 import nimgent/[anthropic, hyper, openai, openrouter]
 
-let openai = makeOpenAIProvider(getEnv("OPENAI_API_KEY"))
+let openaiProvider = openAI(getEnv("OPENAI_API_KEY"))
 # /v1/responses; pass a */chat/completions URL for compat servers
 
-let hyper = makeHyperProvider(getEnv("HYPER_API_KEY"))
+let hyperProvider = hyper(getEnv("HYPER_API_KEY"))
 # https://hyper.charm.land/v1/chat/completions
 
-let anthropic = makeAnthropicProvider(
-  getEnv("ANTHROPIC_API_KEY"),
-  "https://api.anthropic.com/v1/messages")
+let anthropicProvider = anthropic(getEnv("ANTHROPIC_API_KEY"))
 ```
 
 Provider-specific knobs (thinking, routing, cache TTL) go in
 `ProviderRequest.options` / the `options` argument on `generateText` /
-`streamText`.
+`streamText`. Options must be a JSON object.
+
+## Async
+
+Async is the primitive API. Use it in servers and existing event loops:
+
+```nim
+import std/asyncdispatch
+
+proc main() {.async.} =
+  let response = await generateTextAsync(model, prompt = "Hello")
+  echo response.text
+
+waitFor main()
+```
+
+`generateText`, `streamText`, `generateObject`, and `streamObject` are blocking
+wrappers for scripts and CLI programs. Do not call the blocking wrappers from
+inside an async event loop.
+
+Providers expose a small capability set for applications that switch providers
+at runtime:
+
+```nim
+if model.provider.supports(pcStreaming):
+  discard
+```
+
+For deterministic application tests, `import nimgent/testing` and use
+`scriptedModel(@[textResponse("hello")])`.
 
 ## Retries, cancel, tools
 
 `generateText` / `streamText` retry 429, 5xx, and transport errors (`maxRetries`
 defaults to 2) with jittered backoff and `Retry-After`. Context overflow and
-4xx are not retried.
+4xx are not retried. Cancellation raises `CancelledError`, including when a
+streaming callback returns `false`.
 
 Pass `abort` to cancel before the next attempt (or, while streaming, from
 `onEvent` by returning `false`):
@@ -84,27 +109,40 @@ Pass `abort` to cancel before the next attempt (or, while streaming, from
 ```nim
 var stop = false
 let response = generateText(
-  provider, model = "…", prompt = "…",
+  model, prompt = "…",
   abort = proc (): bool = stop)
 ```
 
 Tools with an `execute` callback plus `maxSteps` > 1 run a small loop: model →
 tools → model, until there are no tool calls or the step cap is hit. `maxSteps`
-defaults to 1 (one model call, no loop).
+defaults to 1 (one model call, no loop), matching AI SDK's explicit opt-in to
+multi-step generation.
 
 ```nim
+type WeatherInput = object
+  city: string
+
 let weather = tool("weather", "Look up weather",
-  %*{"type": "object", "properties": {"city": {"type": "string"}}},
-  proc (input: JsonNode): ToolOutput =
-    ToolOutput(output: "16C and cloudy"))
+  proc (input: WeatherInput): string = input.city & ": 16C and cloudy")
 
 let response = generateText(
-  provider,
-  model = "…",
+  model,
   prompt = "Weather in Paris?",
   tools = @[weather],
   maxSteps = 5)
+
+echo response.steps.len
+echo response.totalUsage.inputTokens
+if response.finishReason == frStepLimit:
+  echo "stopped at the step limit"
 ```
+
+Tool callbacks may return a value directly or return `Future[T]`; async tool
+calls marked `parallel = true` overlap without blocking the event loop.
+
+`response.content`, `response.usage`, and `response.finishReason` describe the
+final model call. `response.steps` records every call and its local tool
+results; `response.totalUsage` is accumulated across them.
 
 `hostedTool("web_search")` runs on the provider (OpenAI Responses, Anthropic).
 Chat Completions skips it. Hosted calls and results stay on the assistant
@@ -112,19 +150,23 @@ message for replay; `toolCalls` / the execute loop ignore them.
 
 ```nim
 let response = generateText(
-  provider, model = "…", prompt = "What landed today?",
+  model, prompt = "What landed today?",
   tools = @[hostedTool("web_search")])
 ```
 
-Pass a PDF as `file(...)`. Citations come back as `ckSource`.
+Pass already encoded data with `file(...)`, or load a local PDF with
+`fileFromPath(...)`. Citations come back as `ckSource`.
 
 ```nim
 let response = generateText(
-  provider, model = "…",
+  model,
   messages = @[userMessage(@[
-    file("application/pdf", pdfBase64, filename = "spec.pdf"),
+    fileFromPath("spec.pdf", "application/pdf"),
     text("Summarize this.")])])
 ```
+
+For multi-turn conversations, use `userMessage(...)` and
+`assistantMessage(...)` to construct history.
 
 niminal still owns its own agent loop; this helper is for apps that want the
 AI-SDK-style “run my callbacks until the model is done.”
@@ -143,8 +185,7 @@ type Recipe = object
   ingredients: seq[string]
 
 let recipe = generateObject[Recipe](
-  provider,
-  model = "…",
+  model,
   prompt = "A weeknight lasagna.")
 
 echo recipe.value.name
@@ -161,8 +202,7 @@ until the stream ends). Schema check and model repairs run after that.
 
 ```nim
 let recipe = streamObject[Recipe](
-  provider,
-  model = "…",
+  model,
   prompt = "A weeknight lasagna.",
   onPartial = proc (partial: JsonNode): bool =
     if "name" in partial:

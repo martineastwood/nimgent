@@ -3,7 +3,7 @@
 import std/json
 import nimgent/provider
 import nimgent/openai
-export openai except makeOpenAIProvider, makeOpenRouterProvider,
+export openai except openAI, openRouter,
   defaultOpenAiEndpoint, defaultOpenAiChatEndpoint
 
 proc buildBody*(request: ProviderRequest, stream: bool): JsonNode =

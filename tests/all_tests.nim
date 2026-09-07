@@ -1,7 +1,9 @@
-import std/[json, options, os, osproc, streams, strutils, times, unittest]
+import std/[asyncdispatch, json, options, os, osproc, streams, strutils, times,
+  unittest]
 import nimgent
 import nimgent/[anthropic, openrouter]
-from nimgent/openai import makeOpenAIProvider, makeHyperProvider,
+import nimgent/testing
+from nimgent/openai import openAI, hyper,
   buildResponsesBody, buildChatBody, parseResponsesOutput,
   defaultOpenAiEndpoint, defaultOpenAiChatEndpoint, defaultHyperEndpoint,
   chatObjectOptions, chatForceToolOptions
@@ -64,11 +66,11 @@ suite "OpenRouter provider":
 
   test "generateStream emits deltas before the response finishes":
     withFixture("openrouter_stream_fixture.py") do (port: int):
-      let provider = makeOpenRouterProvider("fixture-key",
+      let provider = openRouter("fixture-key",
         "http://127.0.0.1:" & $port, timeoutSeconds = 5)
       var stamps: seq[float] = @[]
       var pieces: seq[string] = @[]
-      let response = provider.generateStream(
+      let response = waitFor provider.generateStreamAsync(
         ProviderRequest(model: "test", messages: @[userMessage("hi")],
           maxTokens: 20),
         proc (ev: StreamEvent): bool =
@@ -77,7 +79,7 @@ suite "OpenRouter provider":
             pieces.add ev.text
           true)
       check pieces == @["Hello", " world"]
-      check response.textContent == "Hello world"
+      check response.text == "Hello world"
       check response.content[0].kind == ckThinking
       check response.content[0].thinking == "planAplanB"
       check "sig_s" in response.content[0].signature
@@ -87,7 +89,7 @@ suite "OpenRouter provider":
 
   test "truncated stream is a retryable error":
     withFixture("openrouter_stream_cut_fixture.py") do (port: int):
-      let provider = makeOpenRouterProvider("fixture-key",
+      let provider = openRouter("fixture-key",
         "http://127.0.0.1:" & $port, timeoutSeconds = 5)
       try:
         discard provider.generateStream(
@@ -100,14 +102,14 @@ suite "OpenRouter provider":
         check "closed mid-response" in e.msg
 
   test "missing API key fails before making a request":
-    let provider = makeOpenRouterProvider("", "http://127.0.0.1:1")
+    let provider = openRouter("", "http://127.0.0.1:1")
     expect ProviderError:
       discard provider.generate(ProviderRequest(model: "test",
         messages: @[userMessage("hello")], maxTokens: 10))
 
   test "translates tool calls and reports response metadata":
     withFixture("openrouter_fixture.py") do (port: int):
-      let provider = makeOpenRouterProvider("fixture-key",
+      let provider = openRouter("fixture-key",
         "http://127.0.0.1:" & $port, timeoutSeconds = 5)
       let readDefinition = ToolDefinition(name: "read",
         description: "Read a file", inputSchema: %*{
@@ -140,18 +142,17 @@ suite "OpenRouter provider":
         ])
       ]
       let second = provider.generate(followup)
-      check second.textContent == "fixture complete"
+      check second.text == "fixture complete"
       check second.usage.cacheReadTokens == 1000
       check second.usage.cacheReported
 
   test "generateText and streamText facade":
     withFixture("openrouter_stream_fixture.py") do (port: int):
-      let provider = makeOpenRouterProvider("fixture-key",
+      let provider = openRouter("fixture-key",
         "http://127.0.0.1:" & $port, timeoutSeconds = 5)
       var pieces: seq[string] = @[]
       let streamed = streamText(
-        provider,
-        model = "test",
+        provider.model("test"),
         prompt = "hi",
         maxTokens = 20,
         onEvent = proc (ev: StreamEvent): bool =
@@ -159,7 +160,7 @@ suite "OpenRouter provider":
             pieces.add ev.text
           true)
       check pieces == @["Hello", " world"]
-      check streamed.textContent == "Hello world"
+      check streamed.text == "Hello world"
 
 type
   ScriptProvider = ref object of Provider
@@ -178,9 +179,17 @@ type
   BadArgsProvider = ref object of Provider
     calls*: int
 
-method generate(p: ScriptProvider, request: ProviderRequest): ProviderResponse =
+  EchoInput = object
+    x: int
+
+  EchoOutput = object
+    doubled: int
+
+method generateAsync(p: ScriptProvider,
+                     request: ProviderRequest): Future[ProviderResponse] {.async.} =
   inc p.calls
   p.last = request
+  result.usage = Usage(inputTokens: p.calls, outputTokens: p.calls * 2)
   if p.failLeft > 0:
     dec p.failLeft
     raiseProviderError("rate limited", status = 429)
@@ -193,18 +202,21 @@ method generate(p: ScriptProvider, request: ProviderRequest): ProviderResponse =
   result.content.add text("ok")
   result.finishReason = frStop
 
-method generate(p: BoomProvider, request: ProviderRequest): ProviderResponse =
+method generateAsync(p: BoomProvider,
+                     request: ProviderRequest): Future[ProviderResponse] {.async.} =
   inc p.calls
   raiseProviderError("prompt is too long", overflow = true)
 
-method generate(p: HostedScript, request: ProviderRequest): ProviderResponse =
+method generateAsync(p: HostedScript,
+                     request: ProviderRequest): Future[ProviderResponse] {.async.} =
   inc p.calls
   result.content.add toolUse("s1", "web_search", %*{"query": "x"},
     hosted = "web_search")
   result.content.add text("done")
   result.finishReason = frStop
 
-method generate(p: BadArgsProvider, request: ProviderRequest): ProviderResponse =
+method generateAsync(p: BadArgsProvider,
+                     request: ProviderRequest): Future[ProviderResponse] {.async.} =
   inc p.calls
   if p.calls == 1:
     result.content.add toolUseFromArgs("call_1", "echo", "{nope")
@@ -216,46 +228,59 @@ method generate(p: BadArgsProvider, request: ProviderRequest): ProviderResponse 
 suite "generateText retries, abort, and tools":
   test "retries retryable errors then succeeds":
     let p = ScriptProvider(failLeft: 1)
-    let r = generateText(p, model = "m", prompt = "hi", maxRetries = 2)
+    let r = generateText(p.model("m"), prompt = "hi", maxRetries = 2)
     check p.calls == 2
-    check r.textContent == "ok"
+    check r.text == "ok"
+    check r.steps.len == 1
+    check r.usage.inputTokens == 2
+    check r.totalUsage.inputTokens == 2
+    check r.totalUsage.outputTokens == 4
+    check r.finishReason != frStepLimit
     let p2 = ScriptProvider(failLeft: 1)
     let r2 = generateText(p2, ProviderRequest(model: "m",
       messages: @[userMessage("hi")]), maxRetries = 2)
     check p2.calls == 2
-    check r2.textContent == "ok"
+    check r2.text == "ok"
 
   test "does not retry overflow or non-retryable errors":
     let p = BoomProvider()
     expect ProviderError:
-      discard generateText(p, model = "m", prompt = "hi", maxRetries = 2)
+      discard generateText(p.model("m"), prompt = "hi", maxRetries = 2)
     check p.calls == 1
 
   test "abort before the first attempt raises and does not call the provider":
     let p = ScriptProvider()
     var err: ref ProviderError
     try:
-      discard generateText(p, model = "m", prompt = "hi",
+      discard generateText(p.model("m"), prompt = "hi",
         abort = proc (): bool = true)
     except ProviderError as e:
       err = e
     check p.calls == 0
     check not err.isNil
     check err.aborted
+    check err of CancelledError
 
   test "maxSteps runs execute and continues":
     let p = ScriptProvider(toolFirst: true)
     var ran = 0
-    let echoTool = tool("echo", "echo", %*{"type": "object"},
+    let echoTool = rawTool("echo", "echo", %*{"type": "object"},
       proc (input: JsonNode): ToolOutput =
         inc ran
         check input["x"].getInt == 1
         ToolOutput(output: "pong"))
-    let r = generateText(p, model = "m", prompt = "hi",
+    let r = generateText(p.model("m"), prompt = "hi",
       tools = @[echoTool], maxSteps = 2, maxRetries = 0)
     check ran == 1
     check p.calls == 2
-    check r.textContent == "ok"
+    check r.text == "ok"
+    check r.steps.len == 2
+    check r.steps[0].toolResults.len == 1
+    check r.steps[0].toolResults[0].output == "pong"
+    check r.usage.inputTokens == 2
+    check r.totalUsage.inputTokens == 3
+    check r.totalUsage.outputTokens == 6
+    check r.finishReason != frStepLimit
     var sawTool = false
     for msg in p.last.messages:
       for part in msg.content:
@@ -268,7 +293,7 @@ suite "generateText retries, abort, and tools":
   test "default stream emits tool call events":
     let p = ScriptProvider(toolFirst: true)
     var names: seq[string] = @[]
-    discard streamText(p, model = "m", prompt = "hi",
+    discard streamText(p.model("m"), prompt = "hi",
       onEvent = proc (ev: StreamEvent): bool =
         if ev.kind == seToolCallDelta:
           names.add ev.toolName
@@ -278,47 +303,90 @@ suite "generateText retries, abort, and tools":
   test "maxSteps 1 does not execute tools":
     let p = ScriptProvider(toolFirst: true)
     var ran = 0
-    let echoTool = tool("echo", "echo", %*{"type": "object"},
+    let echoTool = rawTool("echo", "echo", %*{"type": "object"},
       proc (input: JsonNode): ToolOutput =
         inc ran
         ToolOutput(output: "pong"))
-    let r = generateText(p, model = "m", prompt = "hi",
+    let r = generateText(p.model("m"), prompt = "hi",
       tools = @[echoTool], maxSteps = 1, maxRetries = 0)
     check ran == 0
     check p.calls == 1
     check r.toolCalls.len == 1
+    check r.steps.len == 1
+    check r.finishReason == frStepLimit
+
+  test "stream callback cancellation raises an aborted error":
+    let p = ScriptProvider()
+    var err: ref ProviderError
+    try:
+      discard streamText(p.model("m"), prompt = "hi",
+        onEvent = proc (_: StreamEvent): bool = false)
+    except ProviderError as e:
+      err = e
+    check not err.isNil
+    check err.aborted
+
+  test "message helpers are symmetric and options reject non-objects":
+    check assistantMessage("hi").role == roleAssistant
+    check assistantMessage(@[text("hi")]).content[0].text == "hi"
+    expect ProviderError:
+      discard generateText(ScriptProvider().model("m"), prompt = "hi",
+        options = %*[1, 2])
+
+  test "bound models, typed tools, and async primitive":
+    let p = ScriptProvider()
+    let bound = p.model("m")
+    let typed = tool("double", "Double a number",
+      proc (input: EchoInput): EchoOutput = EchoOutput(doubled: input.x * 2))
+    check typed.inputSchema["properties"]["x"]["type"].getStr == "integer"
+    check parseJson(typed.execute(%*{"x": 3}).output)["doubled"].getInt == 6
+    let asyncTyped = tool("double_async", "Double asynchronously",
+      proc (input: EchoInput): Future[EchoOutput] {.async.} =
+        await sleepAsync(1)
+        return EchoOutput(doubled: input.x * 2))
+    check (waitFor asyncTyped.executeAsync(%*{"x": 4})).output.parseJson[
+      "doubled"].getInt == 8
+    let response = waitFor generateTextAsync(bound, prompt = "hi",
+      system = "Be concise")
+    check response.text == "ok"
+    check p.last.system == @["Be concise"]
+
+  test "scripted model records deterministic requests":
+    let fake = scriptedModel(@[textResponse("hello")])
+    check generateText(fake, prompt = "hi").text == "hello"
+    check FakeProvider(fake.provider).requests[0].messages[0].content[0].text == "hi"
 
   test "invalid tool JSON becomes a tool error and does not execute":
     check parseToolArguments("").parseError.len == 0
     check parseToolArguments("{\"x\":1}").input["x"].getInt == 1
     check parseToolArguments("{nope").parseError.startsWith("invalid tool arguments")
     check invalidToolCall(toolUseFromArgs("call_1", "echo", "{nope")).len > 0
-    check not tool("echo", "echo", %*{"type": "object"}).parallel
+    check not rawTool("echo", "echo", %*{"type": "object"}).parallel
     var ran = 0
-    let echoTool = tool("echo", "echo", %*{"type": "object"},
+    let echoTool = rawTool("echo", "echo", %*{"type": "object"},
       proc (input: JsonNode): ToolOutput =
         inc ran
         ToolOutput(output: "should not run"),
       parallel = true)
     check echoTool.parallel
     let p = BadArgsProvider()
-    let r = generateText(p, model = "m", prompt = "hi",
+    let r = generateText(p.model("m"), prompt = "hi",
       tools = @[echoTool], maxSteps = 2, maxRetries = 0)
     check ran == 0
     check p.calls == 2
-    check r.textContent == "recovered"
+    check r.text == "recovered"
 
   test "parallel execute overlaps":
     let p = ScriptProvider(toolFirst: true, twoTools: true)
     proc slow(_: JsonNode): ToolOutput {.gcsafe.} =
       sleep(120)
       ToolOutput(output: "pong")
-    let echoTool = tool("echo", "echo", %*{"type": "object"}, slow, parallel = true)
+    let echoTool = rawTool("echo", "echo", %*{"type": "object"}, slow, parallel = true)
     let t0 = epochTime()
-    let r = generateText(p, model = "m", prompt = "hi",
+    let r = generateText(p.model("m"), prompt = "hi",
       tools = @[echoTool], maxSteps = 2, maxRetries = 0)
     check epochTime() - t0 < 0.20
-    check r.textContent == "ok"
+    check r.text == "ok"
     check p.calls == 2
     var results: seq[string]
     for msg in p.last.messages:
@@ -344,11 +412,11 @@ suite "generateText retries, abort, and tools":
 
 suite "Hyper provider":
   test "defaults to chat completions":
-    check makeHyperProvider("k").name == "hyper"
-    check makeHyperProvider("k").endpoint == defaultHyperEndpoint
-    check not makeHyperProvider("k").useResponses
-    check makeHyperProvider("k").maxTokensField == "max_tokens"
-    check not makeHyperProvider("k",
+    check hyper("k").name == "hyper"
+    check hyper("k").endpoint == defaultHyperEndpoint
+    check not hyper("k").useResponses
+    check hyper("k").maxTokensField == "max_tokens"
+    check not hyper("k",
       "https://hyper.charm.land/v1/responses").useResponses
 
   test "chat body uses max_tokens and skips OpenRouter extras":
@@ -363,19 +431,19 @@ suite "Hyper provider":
     check "cache_control" notin $body
 
   test "missing API key fails before making a request":
-    let provider = makeHyperProvider("", "http://127.0.0.1:1")
+    let provider = hyper("", "http://127.0.0.1:1")
     expect ProviderError:
       discard provider.generate(ProviderRequest(model: "test",
         messages: @[userMessage("hello")], maxTokens: 10))
 
   test "generate accepts usage without token-details":
     withFixture("hyper_fixture.py") do (port: int):
-      let provider = makeHyperProvider("fixture-key",
+      let provider = hyper("fixture-key",
         "http://127.0.0.1:" & $port, timeoutSeconds = 5)
       let response = provider.generate(ProviderRequest(
         model: "deepseek-v4-flash", messages: @[userMessage("hi")],
         maxTokens: 16))
-      check response.textContent == "pong"
+      check response.text == "pong"
       check response.usage.inputTokens == 10
       check response.usage.outputTokens == 1
       check not response.usage.cacheReported
@@ -404,10 +472,10 @@ suite "OpenAI provider":
     check body["reasoning"]["effort"].getStr == "medium"
     check "reasoning_effort" notin body
     check body["include"][0].getStr == "reasoning.encrypted_content"
-    check makeOpenAIProvider("k").name == "openai"
-    check makeOpenAIProvider("k").endpoint == defaultOpenAiEndpoint
-    check makeOpenAIProvider("k").useResponses
-    check not makeOpenAIProvider("k", defaultOpenAiChatEndpoint).useResponses
+    check openAI("k").name == "openai"
+    check openAI("k").endpoint == defaultOpenAiEndpoint
+    check openAI("k").useResponses
+    check not openAI("k", defaultOpenAiChatEndpoint).useResponses
 
   test "responses body replays reasoning and function calls":
     let sig = $(%*{"id": "rs_1", "encrypted_content": "enc"})
@@ -436,14 +504,14 @@ suite "OpenAI provider":
     check input[4]["call_id"].getStr == "call_1"
 
   test "missing API key fails before making a request":
-    let provider = makeOpenAIProvider("", "http://127.0.0.1:1")
+    let provider = openAI("", "http://127.0.0.1:1")
     expect ProviderError:
       discard provider.generate(ProviderRequest(model: "test",
         messages: @[userMessage("hello")], maxTokens: 10))
 
   test "generate sends OpenAI fields and reports cache reads":
     withFixture("openai_fixture.py") do (port: int):
-      let provider = makeOpenAIProvider("fixture-key",
+      let provider = openAI("fixture-key",
         "http://127.0.0.1:" & $port, timeoutSeconds = 5)
       let response = provider.generate(ProviderRequest(
         model: "gpt-5",
@@ -455,7 +523,7 @@ suite "OpenAI provider":
         maxTokens: 32,
         options: %*{"reasoning_effort": "low"}))
       check response.model == "gpt-5"
-      check response.textContent == "hello from openai"
+      check response.text == "hello from openai"
       check response.content[0].kind == ckThinking
       check response.content[0].thinking == "cached plan"
       check "rs_1" in response.content[0].signature
@@ -465,7 +533,7 @@ suite "OpenAI provider":
 
   test "generateStream emits deltas before the response finishes":
     withFixture("openai_responses_stream_fixture.py") do (port: int):
-      let provider = makeOpenAIProvider("fixture-key",
+      let provider = openAI("fixture-key",
         "http://127.0.0.1:" & $port, timeoutSeconds = 5)
       var stamps: seq[float] = @[]
       var pieces: seq[string] = @[]
@@ -478,13 +546,13 @@ suite "OpenAI provider":
             pieces.add ev.text
           true)
       check pieces == @["Hello", " world"]
-      check response.textContent == "Hello world"
+      check response.text == "Hello world"
       check stamps.len == 2
       check stamps[1] - stamps[0] >= 0.05
 
   test "generateStream emits tool call deltas":
     withFixture("openai_responses_stream_fixture.py") do (port: int):
-      let provider = makeOpenAIProvider("fixture-key",
+      let provider = openAI("fixture-key",
         "http://127.0.0.1:" & $port, timeoutSeconds = 5)
       var evs: seq[string] = @[]
       let response = provider.generateStream(
@@ -693,23 +761,23 @@ suite "files, sources, hosted tools":
     let chat = buildChatBody(ProviderRequest(model: "m",
       messages: @[userMessage("hi")],
       tools: toDefinitions(@[hostedTool("web_search"),
-        tool("read", "d", %*{"type": "object"})]),
+        rawTool("read", "d", %*{"type": "object"})]),
       maxTokens: 10), false)
     check chat["tools"].len == 1
     check chat["tools"][0]["function"]["name"].getStr == "read"
 
   test "generateText does not execute hosted tool calls":
     var ran = false
-    let local = tool("web_search", "should not run", %*{"type": "object"},
+    let local = rawTool("web_search", "should not run", %*{"type": "object"},
       proc (input: JsonNode): ToolOutput =
         ran = true
         ToolOutput(output: "nope"))
     let p = HostedScript()
-    let r = generateText(p, model = "m", prompt = "hi",
-      tools = @[local, hostedTool("web_search")], maxSteps = 5)
+    let r = generateText(p.model("m"), prompt = "hi",
+      tools = @[local, hostedTool("server_search")], maxSteps = 5)
     check p.calls == 1
     check not ran
-    check r.textContent == "done"
+    check r.text == "done"
 
 type
   Heat* = enum
@@ -732,7 +800,8 @@ type
 
   ChatObjectScript = ref object of ObjectScript
 
-method generate(p: ObjectScript, request: ProviderRequest): ProviderResponse =
+method generateAsync(p: ObjectScript,
+                     request: ProviderRequest): Future[ProviderResponse] {.async.} =
   inc p.calls
   p.last = request
   result.usage = p.usageEach
@@ -821,7 +890,7 @@ suite "generateObject":
     let p = ObjectScript(replies: @[
       """{"name":"lasagna","servings":4,"ingredients":["pasta"],"vegetarian":true,"heat":"low"}"""
     ])
-    let r = generateObject[Recipe](p, model = "m", prompt = "cook",
+    let r = generateObject[Recipe](p.model("m"), prompt = "cook",
       mode = omJson, maxRetries = 0)
     check r.value.name == "lasagna"
     check r.value.servings == 4
@@ -839,7 +908,7 @@ suite "generateObject":
       "properties": {"ok": {"type": "boolean"}},
       "required": ["ok"]
     }
-    let r = generateObject(p, model = "m", schema, prompt = "x",
+    let r = generateObject(p.model("m"), schema, prompt = "x",
       mode = omJson, maxRetries = 0, maxRepairs = 1)
     check r.value["ok"].getBool
     check r.repairs == 1
@@ -855,7 +924,7 @@ suite "generateObject":
       "properties": {"ok": {"type": "boolean"}},
       "required": ["ok"]
     }
-    let r = generateObject(p, model = "m", schema, prompt = "x",
+    let r = generateObject(p.model("m"), schema, prompt = "x",
       mode = omJson, maxRetries = 0)
     check r.value["ok"].getBool
     check r.repairs == 0
@@ -868,7 +937,7 @@ suite "generateObject":
       "properties": {"ok": {"type": "boolean"}},
       "required": ["ok"]
     }
-    let r = generateObject(p, model = "m", schema, prompt = "x",
+    let r = generateObject(p.model("m"), schema, prompt = "x",
       mode = omTool, maxRetries = 0)
     check r.value["ok"].getBool
     check p.last.tools.len == 1
@@ -882,7 +951,7 @@ suite "generateObject":
       "properties": {"ok": {"type": "boolean"}},
       "required": ["ok"]
     }
-    discard generateObject(p, model = "m", schema, prompt = "x", maxRetries = 0)
+    discard generateObject(p.model("m"), schema, prompt = "x", maxRetries = 0)
     check p.last.options["response_format"]["type"].getStr == "json_schema"
     check p.last.options["response_format"]["json_schema"]["strict"].getBool
     check p.last.options["response_format"]["json_schema"]["schema"][
@@ -893,13 +962,13 @@ suite "generateObject":
       "required": ["a"]}
     let once = ObjectScript(replies: @["not json"])
     expect ObjectError:
-      discard generateObject(once, model = "m", schema, prompt = "x",
+      discard generateObject(once.model("m"), schema, prompt = "x",
         mode = omJson, maxRetries = 0)
     check once.calls == 1
     let p = ObjectScript(replies: @["not json"])
     var err: ref ObjectError
     try:
-      discard generateObject(p, model = "m", schema, prompt = "x",
+      discard generateObject(p.model("m"), schema, prompt = "x",
         mode = omJson, maxRepairs = 1, maxRetries = 0)
     except ObjectError as e:
       err = e
@@ -910,26 +979,26 @@ suite "generateObject":
   test "omNative fails when the provider has no native format":
     let p = ObjectScript()
     expect ObjectError:
-      discard generateObject(p, model = "m",
+      discard generateObject(p.model("m"),
         schema = %*{"type": "object"}, prompt = "x", mode = omNative)
 
   test "native option helpers match each wire format":
     let schema = %*{"type": "object", "properties": {"a": {"type": "string"}}}
-    check makeOpenAIProvider("k").nativeObjectOptions("o", "", schema)[
+    check openAI("k").nativeObjectOptions("o", "", schema)[
       "text"]["format"]["type"].getStr == "json_schema"
-    check makeOpenAIProvider("k", defaultOpenAiChatEndpoint).nativeObjectOptions(
+    check openAI("k", defaultOpenAiChatEndpoint).nativeObjectOptions(
       "o", "", schema)["response_format"]["type"].getStr == "json_schema"
-    check makeHyperProvider("k").nativeObjectOptions("o", "", schema)[
+    check hyper("k").nativeObjectOptions("o", "", schema)[
       "response_format"]["json_schema"]["name"].getStr == "o"
-    check makeOpenRouterProvider("k", "http://x").nativeObjectOptions(
+    check openRouter("k", "http://x").nativeObjectOptions(
       "o", "d", schema)["response_format"]["json_schema"]["description"].getStr == "d"
-    check makeAnthropicProvider("k", "http://x").nativeObjectOptions(
+    check anthropic("k", "http://x").nativeObjectOptions(
       "o", "", schema)["output_config"]["format"]["type"].getStr == "json_schema"
-    check makeOpenAIProvider("k").forceToolOptions("submit")["tool_choice"][
+    check openAI("k").forceToolOptions("submit")["tool_choice"][
       "type"].getStr == "function"
-    check makeOpenAIProvider("k").forceToolOptions("submit")["tool_choice"][
+    check openAI("k").forceToolOptions("submit")["tool_choice"][
       "name"].getStr == "submit"
-    check makeAnthropicProvider("k", "http://x").forceToolOptions("submit")[
+    check anthropic("k", "http://x").forceToolOptions("submit")[
       "tool_choice"]["type"].getStr == "tool"
 
   test "addUsage sums cache flags":
@@ -947,8 +1016,8 @@ type
     last*: ProviderRequest
     tool*: bool
 
-method generateStream(p: ChunkScript, request: ProviderRequest,
-                      onEvent: StreamCallback): ProviderResponse =
+method generateStreamAsync(p: ChunkScript, request: ProviderRequest,
+                           onEvent: StreamCallback): Future[ProviderResponse] {.async.} =
   p.last = request
   var acc = ""
   if p.tool:
@@ -992,7 +1061,7 @@ suite "streamObject":
     }
     var partials: seq[string] = @[]
     var texts: seq[string] = @[]
-    let r = streamObject(p, model = "m", schema, prompt = "x",
+    let r = streamObject(p.model("m"), schema, prompt = "x",
       mode = omJson, maxRetries = 0,
       onPartial = proc (v: JsonNode): bool =
         partials.add $v
@@ -1015,7 +1084,7 @@ suite "streamObject":
       "required": ["ok"]
     }
     var saw: seq[bool] = @[]
-    let r = streamObject(p, model = "m", schema, prompt = "x",
+    let r = streamObject(p.model("m"), schema, prompt = "x",
       mode = omTool, maxRetries = 0,
       onPartial = proc (v: JsonNode): bool =
         if "ok" in v: saw.add v["ok"].getBool
@@ -1027,14 +1096,14 @@ suite "streamObject":
     let p = ObjectScript(replies: @[
       """{"name":"lasagna","servings":4,"ingredients":["pasta"],"vegetarian":null,"heat":"low"}"""
     ])
-    let r = streamObject[Recipe](p, model = "m", prompt = "cook",
+    let r = streamObject[Recipe](p.model("m"), prompt = "cook",
       mode = omJson, maxRetries = 0)
     check r.value.name == "lasagna"
     check r.value.vegetarian.isNone
     let c = ChunkScript(chunks: @["{\"a\":", "1}"])
     var err: ref ProviderError
     try:
-      discard streamObject(c, model = "m",
+      discard streamObject(c.model("m"),
         schema = %*{"type": "object", "properties": {"a": {"type": "integer"}},
           "required": ["a"]},
         prompt = "x", mode = omJson, maxRetries = 0,
@@ -1051,9 +1120,8 @@ suite "streamObject":
       "properties": {"ok": {"type": "boolean"}},
       "required": ["ok"]
     }
-    let r = streamObject(p, model = "m", schema, prompt = "x",
+    let r = streamObject(p.model("m"), schema, prompt = "x",
       mode = omJson, maxRetries = 0, maxRepairs = 1)
     check r.value["ok"].getBool
     check r.repairs == 1
     check p.calls == 2
-

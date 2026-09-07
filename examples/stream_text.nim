@@ -6,13 +6,12 @@ import std/os
 import nimgent
 import nimgent/openai
 
-let provider = makeOpenAIProvider(getEnv("OPENAI_API_KEY"))
+let model: LanguageModel = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
 
 echo "calling the model..."
-let response = streamText(
-  provider,
-  model = "gpt-4o-mini",
-  system = @["You are a helpful assistant. Answer without using markdown."],
+let _: ProviderResponse = streamText(
+  model,
+  system = "You are a helpful assistant. Answer without using markdown.",
   prompt = "Explain why the sky is blue.",
   onEvent = proc (ev: StreamEvent): bool =
     if ev.kind == seTextDelta:

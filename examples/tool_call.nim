@@ -6,21 +6,19 @@ import std/[json, os]
 import nimgent
 import nimgent/openai
 
-let provider = makeOpenAIProvider(getEnv("OPENAI_API_KEY"))
+type WeatherInput = object
+  city: string
+
+let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
 
 let weather = tool("get_weather", "Get the current weather for a city",
-  %*{"type": "object",
-     "properties": {"city": {"type": "string"}},
-     "required": ["city"]},
-  proc (input: JsonNode): ToolOutput =
-    ToolOutput(output: "16C and cloudy"))
+  proc (input: WeatherInput): string = input.city & ": 16C and cloudy")
 
 echo "calling the model..."
 let response = generateText(
-  provider,
-  model = "gpt-4o-mini",
+  model,
   prompt = "What's the weather like in Paris?",
   tools = @[weather],
   maxSteps = 5)
 
-echo response.textContent
+echo response.text

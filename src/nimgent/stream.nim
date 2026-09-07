@@ -93,69 +93,58 @@ proc waitWakeOnce(watch: var WakeWatch, wakeFd: cint): Future[void] =
       fut.complete()
     false)
 
-proc awaitWithWake*[T](fut: Future[T], watch: var WakeWatch, wakeFd: cint,
-                       onEvent: StreamCallback): bool =
-  ## Block until `fut` completes. False if wakeFd cancel won.
+proc awaitWithWakeAsync*[T](fut: Future[T], watch: ptr WakeWatch, wakeFd: cint,
+                            onEvent: StreamCallback): Future[bool] {.async.} =
+  ## Await `fut` without nesting an event loop. False if wakeFd cancellation wins.
   while not fut.finished:
     if wakeFd < 0:
-      discard waitFor fut
+      discard await fut
       break
-    let wake = waitWakeOnce(watch, wakeFd)
-    waitFor fut or wake
+    let wake = waitWakeOnce(watch[], wakeFd)
+    await fut or wake
     if fut.finished:
-      if not wake.finished:
-        watch.unregister()
+      if not wake.finished: watch[].unregister()
       break
     if not onEvent(StreamEvent(kind: seWake)):
-      watch.unregister()
+      watch[].unregister()
       return false
   true
 
-proc drainBodyStream*(bodyStream: FutureStream[string]): string =
+proc drainBodyStreamAsync*(bodyStream: FutureStream[string]): Future[string] {.async.} =
   while true:
-    let (more, chunk) = waitFor bodyStream.read()
-    if not more:
-      break
+    let (more, chunk) = await bodyStream.read()
+    if not more: break
     result.add chunk
 
-proc forEachSse*(
+proc forEachSseAsync*(
   bodyStream: FutureStream[string],
-  watch: var WakeWatch,
+  watch: ptr WakeWatch,
   wakeFd: cint,
   onEvent: StreamCallback,
   handle: proc (data: JsonNode): SseAction {.closure.}
-): SseDrive =
-  ## Drive an SSE body. `sdClosed` if the socket ends without `[DONE]` / sseStop.
+): Future[SseDrive] {.async.} =
   var buf = ""
   while true:
     let readFut = bodyStream.read()
-    if not awaitWithWake(readFut, watch, wakeFd, onEvent):
+    if not await awaitWithWakeAsync(readFut, watch, wakeFd, onEvent):
       return sdCancelled
-    let (more, chunk) = waitFor readFut
-    if more:
-      buf.add chunk
-    elif buf.len > 0:
-      buf.add '\n'
+    let (more, chunk) = await readFut
+    if more: buf.add chunk
+    elif buf.len > 0: buf.add '\n'
     while true:
       let (ok, line) = popLine(buf)
-      if not ok:
-        break
-      if line.len == 0: continue
-      if not line.startsWith("data:"): continue
+      if not ok: break
+      if line.len == 0 or not line.startsWith("data:"): continue
       let payload = line[5 .. ^1].strip
-      if payload == "[DONE]":
-        return sdEnded
+      if payload == "[DONE]": return sdEnded
       var data: JsonNode
-      try:
-        data = parseJson(payload)
-      except CatchableError:
-        continue
+      try: data = parseJson(payload)
+      except CatchableError: continue
       case handle(data)
       of sseStop: return sdEnded
       of sseCancel: return sdCancelled
       of sseContinue: discard
-    if not more:
-      return sdClosed
+    if not more: return sdClosed
 
 proc assembleStream*(acc: StreamAcc, response: var ProviderResponse) =
   if acc.parsedFinal: return

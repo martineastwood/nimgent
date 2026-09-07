@@ -2,22 +2,19 @@
 ##
 ##   OPENAI_API_KEY=... nim c -r examples/chat_with_pdf.nim examples/example.pdf
 
-import std/[base64, os]
+import std/os
 import nimgent
 import nimgent/openai
 
-let provider = makeOpenAIProvider(getEnv("OPENAI_API_KEY"))
+let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4.1-mini")
 
 let pdfPath = paramStr(1)
-let pdfBase64 = encode(readFile(pdfPath))
-
 echo "calling the model..."
 let response = generateText(
-  provider,
-  model = "gpt-4.1-mini",
+  model,
   messages = @[userMessage(@[
-    file("application/pdf", pdfBase64, filename = extractFilename(pdfPath)),
+    fileFromPath(pdfPath, "application/pdf"),
     text("What is the mascot's name?")
   ])])
 
-echo response.textContent
+echo response.text

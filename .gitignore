@@ -3,3 +3,7 @@ tests/all_tests
 *.dSYM/
 .nimble/
 .DS_Store
+
+# Compiled example binaries (e.g. nim c examples/stream_text.nim)
+examples/*
+!examples/*.nim

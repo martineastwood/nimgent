@@ -4,7 +4,7 @@
 ## OpenRouter, Hyper, and any `*/chat/completions` URL keep Chat Completions.
 ## Session_id, cache_control, and HTTP-Referer stay optional on this type.
 
-import std/[asyncdispatch, httpclient, json, net, streams, strutils]
+import std/[asyncdispatch, httpclient, json, net, strutils]
 import nimgent/[provider, stream, openai_chat, openai_responses]
 export popLine, buildChatBody, openAiImagePart, buildResponsesBody,
   parseResponsesOutput, chatObjectOptions, chatForceToolOptions,
@@ -13,6 +13,7 @@ export popLine, buildChatBody, openAiImagePart, buildResponsesBody,
 const
   defaultOpenAiEndpoint* = "https://api.openai.com/v1/responses"
   defaultOpenAiChatEndpoint* = "https://api.openai.com/v1/chat/completions"
+  defaultOpenRouterEndpoint* = "https://openrouter.ai/api/v1/chat/completions"
   defaultHyperEndpoint* = "https://hyper.charm.land/v1/chat/completions"
 
 type
@@ -40,29 +41,33 @@ proc initOpenAIProvider(name, displayName, apiKey, endpoint: string,
                       includeSessionId = false, applyCache = false,
                       maxTokensField = "max_completion_tokens",
                       useResponses = false): OpenAIProvider =
-  OpenAIProvider(name: name, displayName: displayName, apiKey: apiKey,
+  let capabilities = {pcStreaming, pcTools, pcStructuredOutput, pcImages, pcFiles}
+  OpenAIProvider(name: name, capabilities:
+                   if useResponses: capabilities + {pcHostedTools}
+                   else: capabilities,
+                 displayName: displayName, apiKey: apiKey,
                  endpoint: endpoint, timeoutSeconds: timeoutSeconds,
                  siteUrl: siteUrl, siteName: siteName,
                  includeSessionId: includeSessionId, applyCache: applyCache,
                  maxTokensField: maxTokensField, useResponses: useResponses)
 
-proc makeOpenAIProvider*(apiKey: string, endpoint = "",
-                         timeoutSeconds = 300): OpenAIProvider =
+proc openAI*(apiKey: string, endpoint = "",
+             timeoutSeconds = 300): OpenAIProvider =
   ## Responses API by default. A `*/chat/completions` URL stays on that wire format.
   let url = if endpoint.len > 0: endpoint else: defaultOpenAiEndpoint
   let responses = "/chat/completions" notin url
   initOpenAIProvider("openai", "OpenAI", apiKey, url, timeoutSeconds,
     maxTokensField = "max_completion_tokens", useResponses = responses)
 
-proc makeOpenRouterProvider*(apiKey, endpoint: string,
-                             timeoutSeconds = 300, siteUrl = "",
-                             siteName = ""): OpenRouterProvider =
-  initOpenAIProvider("openrouter", "OpenRouter", apiKey, endpoint,
+proc openRouter*(apiKey: string, endpoint = "", timeoutSeconds = 300,
+                 siteUrl = "", siteName = ""): OpenRouterProvider =
+  let url = if endpoint.len > 0: endpoint else: defaultOpenRouterEndpoint
+  initOpenAIProvider("openrouter", "OpenRouter", apiKey, url,
     timeoutSeconds, siteUrl, siteName, includeSessionId = true,
     applyCache = true, maxTokensField = "max_tokens")
 
-proc makeHyperProvider*(apiKey: string, endpoint = "",
-                        timeoutSeconds = 300): HyperProvider =
+proc hyper*(apiKey: string, endpoint = "",
+            timeoutSeconds = 300): HyperProvider =
   ## Hyper's documented agent API is Chat Completions. Their /v1/responses
   ## pass-through 400s OpenAI input items, so this stays on chat.
   let url = if endpoint.len > 0: endpoint else: defaultHyperEndpoint
@@ -86,10 +91,6 @@ proc ensureApiKey(provider: OpenAIProvider) =
   if provider.apiKey.len == 0:
     raiseProviderError(provider.label.toUpperAscii & " API key is not configured")
 
-proc newClient(provider: OpenAIProvider): HttpClient =
-  newHttpClient(timeout = provider.timeoutSeconds * 1000,
-                sslContext = newContext(verifyMode = CVerifyPeer))
-
 proc raiseApiError(provider: OpenAIProvider, code: int, raw: string,
                    headers: HttpHeaders = nil) =
   let detail = apiErrorMessage(raw)
@@ -107,17 +108,6 @@ proc requestBody(provider: OpenAIProvider, request: ProviderRequest,
     applyCache = provider.applyCache,
     maxTokensField = provider.maxTokensField)
 
-proc postRequest(provider: OpenAIProvider, body: JsonNode,
-                 failPrefix: string): tuple[client: HttpClient, response: Response] =
-  provider.ensureApiKey()
-  result.client = provider.newClient()
-  let headers = provider.makeHeaders()
-  try:
-    result.response = result.client.request(provider.endpoint, HttpPost, $body, headers)
-  except CatchableError as e:
-    result.client.close()
-    raiseProviderError(failPrefix & e.msg, retryable = true)
-
 method nativeObjectOptions*(provider: OpenAIProvider, name, description: string,
                             schema: JsonNode): JsonNode =
   if provider.useResponses:
@@ -131,12 +121,22 @@ method forceToolOptions*(provider: OpenAIProvider, toolName: string): JsonNode =
   else:
     chatForceToolOptions(toolName)
 
-method generate*(provider: OpenAIProvider,
-                 request: ProviderRequest): ProviderResponse =
+method generateAsync*(provider: OpenAIProvider,
+                      request: ProviderRequest): Future[ProviderResponse] {.async.} =
+  provider.ensureApiKey()
   let body = provider.requestBody(request, stream = false)
-  let (client, response) = provider.postRequest(body, provider.label & " request failed: ")
+  let client = newAsyncHttpClient(
+    sslContext = newContext(verifyMode = CVerifyPeer),
+    headers = provider.makeHeaders())
+  client.timeout = provider.timeoutSeconds * 1000
   defer: client.close()
-  let raw = response.bodyStream.readAll()
+  var response: AsyncResponse
+  try:
+    response = await client.request(provider.endpoint, HttpPost, $body)
+  except CatchableError as e:
+    raiseProviderError(provider.label & " request failed: " & e.msg,
+      retryable = true)
+  let raw = await drainBodyStreamAsync(response.bodyStream)
   if response.code.int >= 400:
     provider.raiseApiError(response.code.int, raw, response.headers)
   var data: JsonNode
@@ -148,9 +148,9 @@ method generate*(provider: OpenAIProvider,
     return parseResponsesOutput(data, provider.label)
   result = parseChatOutput(data, provider.label)
 
-method generateStream*(provider: OpenAIProvider,
-                       request: ProviderRequest,
-                       onEvent: StreamCallback): ProviderResponse =
+method generateStreamAsync*(provider: OpenAIProvider,
+                            request: ProviderRequest,
+                            onEvent: StreamCallback): Future[ProviderResponse] {.async.} =
   # Sync HttpClient.request() buffers the whole SSE body before returning.
   # AsyncHttpClient starts parseBody without awaiting, so bodyStream.read()
   # yields chunks as they arrive.
@@ -167,14 +167,15 @@ method generateStream*(provider: OpenAIProvider,
   var response: AsyncResponse
   try:
     let reqFut = client.request(provider.endpoint, HttpPost, $body)
-    if not awaitWithWake(reqFut, watch, request.wakeFd, onEvent):
+    if not await awaitWithWakeAsync(reqFut, addr watch, request.wakeFd, onEvent):
       result.finishReason = frStop
       return
-    response = waitFor reqFut
+    response = await reqFut
   except CatchableError as e:
     raiseProviderError(provider.label & " stream failed: " & e.msg, retryable = true)
   if response.code.int >= 400:
-    provider.raiseApiError(response.code.int, drainBodyStream(response.bodyStream),
+    provider.raiseApiError(response.code.int,
+      await drainBodyStreamAsync(response.bodyStream),
       response.headers)
 
   var acc = initStreamAcc()
@@ -186,8 +187,8 @@ method generateStream*(provider: OpenAIProvider,
     else:
       proc (data: JsonNode): SseAction =
         handleChatEvent(acc, resp, data, onEvent)
-  let drive = forEachSse(response.bodyStream, watch, request.wakeFd,
-    onEvent, handle)
+  let drive = await forEachSseAsync(response.bodyStream, addr watch,
+    request.wakeFd, onEvent, handle)
   if drive == sdCancelled:
     assembleStream(acc, resp)
     result = resp

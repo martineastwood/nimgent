@@ -11,12 +11,11 @@ type Recipe = object
   servings: int
   ingredients: seq[string]
 
-let provider = makeOpenAIProvider(getEnv("OPENAI_API_KEY"))
+let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
 
 echo "calling the model..."
 let recipe = generateObject[Recipe](
-  provider,
-  model = "gpt-4o-mini",
+  model,
   prompt = "A weeknight lasagna.")
 
 echo "name: ", recipe.value.name

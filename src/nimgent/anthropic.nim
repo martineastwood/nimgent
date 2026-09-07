@@ -1,7 +1,9 @@
 ## Anthropic Messages API adapter.
 
-import std/[base64, httpclient, json, net, streams, strutils]
+import std/[asyncdispatch, base64, httpclient, json, net, strutils]
 import nimgent/provider
+
+const defaultAnthropicEndpoint* = "https://api.anthropic.com/v1/messages"
 
 type
   AnthropicProvider* = ref object of Provider
@@ -147,9 +149,13 @@ proc parseAnthropicOutput*(data: JsonNode): ProviderResponse =
     of "end_turn": frEndTurn
     else: frUnknown
 
-proc makeAnthropicProvider*(apiKey, endpoint: string,
-                            timeoutSeconds = 300): AnthropicProvider =
-  AnthropicProvider(name: "anthropic", apiKey: apiKey, endpoint: endpoint,
+proc anthropic*(apiKey: string, endpoint = "",
+                timeoutSeconds = 300): AnthropicProvider =
+  let url = if endpoint.len > 0: endpoint else: defaultAnthropicEndpoint
+  AnthropicProvider(name: "anthropic",
+                    capabilities: {pcTools, pcStructuredOutput, pcImages,
+                      pcFiles, pcHostedTools},
+                    apiKey: apiKey, endpoint: url,
                     timeoutSeconds: timeoutSeconds)
 
 method nativeObjectOptions*(provider: AnthropicProvider, name, description: string,
@@ -186,15 +192,16 @@ proc buildAnthropicBody*(request: ProviderRequest): JsonNode =
   applyCacheBreakpoints(result)
   mergeRequestOptions(result, request.options)
 
-method generate*(provider: AnthropicProvider,
-                 request: ProviderRequest): ProviderResponse =
+method generateAsync*(provider: AnthropicProvider,
+                      request: ProviderRequest): Future[ProviderResponse] {.async.} =
   if provider.apiKey.len == 0:
     raiseProviderError("ANTHROPIC API key is not configured")
 
   let body = buildAnthropicBody(request)
 
-  let client = newHttpClient(timeout = provider.timeoutSeconds * 1000,
-                              sslContext = newContext(verifyMode = CVerifyPeer))
+  let client = newAsyncHttpClient(
+    sslContext = newContext(verifyMode = CVerifyPeer))
+  client.timeout = provider.timeoutSeconds * 1000
   defer: client.close()
   let headers = newHttpHeaders({
     "x-api-key": provider.apiKey,
@@ -202,12 +209,12 @@ method generate*(provider: AnthropicProvider,
     "content-type": "application/json"
   })
 
-  var response: Response
+  var response: AsyncResponse
   try:
-    response = client.request(provider.endpoint, HttpPost, $body, headers)
+    response = await client.request(provider.endpoint, HttpPost, $body, headers)
   except CatchableError as e:
     raiseProviderError("Anthropic request failed: " & e.msg, retryable = true)
-  let raw = response.bodyStream.readAll()
+  let raw = await response.body
   if response.code.int >= 400:
     let detail = apiErrorMessage(raw)
     let code = response.code.int

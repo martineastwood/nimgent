@@ -5,7 +5,7 @@
 ## supported APIs need, so provider-specific features stay reachable through
 ## `ProviderRequest.options`.
 
-import std/[json, strutils]
+import std/[asyncdispatch, base64, json, os, strutils]
 
 type
   Role* = enum
@@ -23,12 +23,12 @@ type
 
   ImageContent* = object
     mimeType*: string
-    data*: string  ## base64, no data: prefix; empty when `path` is set until hydrate
-    path*: string  ## workspace-relative file; preferred on disk over inlined bytes
+    data*: string  ## base64, no data: prefix
+    path*: string  ## optional caller-owned source/reference path
 
   FileContent* = object
     mimeType*: string
-    data*: string  ## base64, no data: prefix; empty when `path` is set until hydrate
+    data*: string  ## base64, no data: prefix
     path*: string
     filename*: string
 
@@ -87,6 +87,15 @@ type
     frToolUse
     frMaxTokens
     frStop
+    frStepLimit
+
+  ProviderCapability* = enum
+    pcStreaming
+    pcTools
+    pcStructuredOutput
+    pcImages
+    pcFiles
+    pcHostedTools
 
   Usage* = object
     inputTokens*: int
@@ -110,14 +119,25 @@ type
     ## Default -1 means no side-channel wake (stdin is 0 when used).
     wakeFd*: cint = -1
 
+  StepResult* = object
+    model*: string
+    content*: seq[ContentBlock]
+    usage*: Usage
+    finishReason*: FinishReason
+    ## Results produced locally for this step, in tool-call order.
+    toolResults*: seq[ContentBlock]
+
   ProviderResponse* = object
     ## Provider-reported model, which may differ from the requested alias after
     ## routing or fallback. It is more trustworthy than asking the model.
     model*: string
     content*: seq[ContentBlock]
     usage*: Usage
+    ## Usage across every model call in `steps`. For a single call this equals usage.
+    totalUsage*: Usage
     finishReason*: FinishReason
-
+    ## Every model call made by the high-level tool loop.
+    steps*: seq[StepResult]
   ProviderError* = object of CatchableError
     ## Raised for transport and API errors. `overflow` marks the specific case
     ## of exceeding the context window, which the agent can recover from.
@@ -131,6 +151,8 @@ type
     ## generateObject could not produce a value that matches the schema.
     issues*: seq[string]
     raw*: string
+
+  CancelledError* = object of ProviderError
 
   AbortCheck* = proc (): bool {.closure.}
     ## Return true to cancel. Checked before each attempt and tool call.
@@ -146,6 +168,7 @@ type
     inputSchema*: JsonNode
     ## When set, generateText/streamText can run the tool and continue (maxSteps).
     execute*: proc (input: JsonNode): ToolOutput {.closure.}
+    executeAsync*: proc (input: JsonNode): Future[ToolOutput] {.closure.}
     ## Overlap execute when every runnable tool in the batch sets this and the
     ## program is compiled with `--threads:on`. execute must be safe to run
     ## concurrently (no shared mutation). niminal never sets it.
@@ -155,6 +178,11 @@ type
 
   Provider* = ref object of RootObj
     name*: string
+    capabilities*: set[ProviderCapability]
+
+  LanguageModel* = object
+    provider*: Provider
+    id*: string
 
   StreamEventKind* = enum
     seTextDelta
@@ -189,6 +217,14 @@ proc addUsage*(a: var Usage, b: Usage) =
   a.cacheWriteTokens += b.cacheWriteTokens
   a.cacheReported = a.cacheReported or b.cacheReported
 
+proc model*(provider: Provider, id: string): LanguageModel =
+  if provider.isNil: raise newException(ProviderError, "provider must not be nil")
+  if id.len == 0: raise newException(ProviderError, "model id must not be empty")
+  LanguageModel(provider: provider, id: id)
+
+proc supports*(provider: Provider, capability: ProviderCapability): bool =
+  not provider.isNil and capability in provider.capabilities
+
 proc contextTokens*(u: Usage): int =
   ## Tokens occupying the context window on the last request.
   ## OpenAI/OpenRouter prompt_tokens already includes cached tokens; Anthropic
@@ -214,8 +250,12 @@ proc formatUsageLabels*(usage: Usage): seq[string] =
       let pct = usage.cacheReadTokens * 100 / denom
       result.add "CH" & pct.formatFloat(ffDecimal, 1) & "%"
 
-method generate*(p: Provider, request: ProviderRequest): ProviderResponse {.base.} =
+method generateAsync*(p: Provider, request: ProviderRequest): Future[ProviderResponse]
+    {.base, async.} =
   raise newException(CatchableError, "provider does not implement generate")
+
+proc generate*(p: Provider, request: ProviderRequest): ProviderResponse =
+  waitFor p.generateAsync(request)
 
 const imageOmitted* = "[image omitted: model does not accept images]"
 
@@ -228,6 +268,10 @@ proc image*(mimeType, data: string, path = ""): ContentBlock =
 proc image*(img: ImageContent): ContentBlock =
   image(img.mimeType, img.data, img.path)
 
+proc imageFromPath*(path, mimeType: string): ContentBlock =
+  ## Read and base64-encode an image. `path` is retained as source metadata.
+  image(mimeType, encode(readFile(path)), path)
+
 proc toImage*(part: ContentBlock): ImageContent =
   ImageContent(mimeType: part.mimeType, data: part.data, path: part.path)
 
@@ -237,6 +281,11 @@ proc file*(mimeType, data: string, path = "", filename = ""): ContentBlock =
 
 proc file*(f: FileContent): ContentBlock =
   ContentBlock(kind: ckFile, file: f)
+
+proc fileFromPath*(path, mimeType: string, filename = ""): ContentBlock =
+  ## Read and base64-encode a file. Defaults filename to the path's basename.
+  file(mimeType, encode(readFile(path)), path,
+    if filename.len > 0: filename else: extractFilename(path))
 
 proc source*(url: string; title = ""; id = ""; citedText = "";
              raw: JsonNode = nil): ContentBlock =
@@ -337,6 +386,12 @@ proc userMessage*(s: string): Message =
 proc userMessage*(parts: seq[ContentBlock]): Message =
   Message(role: roleUser, content: parts)
 
+proc assistantMessage*(s: string): Message =
+  Message(role: roleAssistant, content: @[text(s)])
+
+proc assistantMessage*(parts: seq[ContentBlock]): Message =
+  Message(role: roleAssistant, content: parts)
+
 proc dropImages*(messages: seq[Message]): seq[Message] =
   ## Replace image blocks with a text note. Session storage is unchanged.
   for msg in messages:
@@ -363,24 +418,35 @@ proc toolCalls*(r: ProviderResponse): seq[ContentBlock] =
     if b.kind == ckToolUse and b.hosted.len == 0:
       result.add b
 
+proc toolCalls*(s: StepResult): seq[ContentBlock] =
+  for b in s.content:
+    if b.kind == ckToolUse and b.hosted.len == 0:
+      result.add b
+
 proc textContent*(blocks: openArray[ContentBlock]): string =
   for b in blocks:
     if b.kind == ckText:
       if result.len > 0: result.add "\n"
       result.add b.text
 
-proc textContent*(r: ProviderResponse): string =
+proc text*(r: ProviderResponse): string =
   textContent(r.content)
+
+proc text*(s: StepResult): string =
+  textContent(s.content)
 
 proc mergeRequestOptions*(body, options: JsonNode) =
   if options.isNil or options.kind == JNull: return
+  if options.kind != JObject:
+    raise newException(ProviderError, "options must be a JSON object")
   for key, value in options:
     body[key] = value
 
-method generateStream*(p: Provider, request: ProviderRequest,
-                       onEvent: StreamCallback): ProviderResponse {.base.} =
+method generateStreamAsync*(p: Provider, request: ProviderRequest,
+                            onEvent: StreamCallback): Future[ProviderResponse]
+    {.base, async.} =
   ## Default: non-streaming fallback that emits thinking, text, then tool calls.
-  result = p.generate(request)
+  result = await p.generateAsync(request)
   for b in result.content:
     case b.kind
     of ckThinking:
@@ -400,6 +466,10 @@ method generateStream*(p: Provider, request: ProviderRequest,
     else:
       discard
   discard onEvent(StreamEvent(kind: seFinished))
+
+proc generateStream*(p: Provider, request: ProviderRequest,
+                     onEvent: StreamCallback): ProviderResponse =
+  waitFor p.generateStreamAsync(request, onEvent)
 
 proc isContextOverflow*(detail: string): bool =
   ## True for known context-window overflow messages (not generic "token" noise).
@@ -449,6 +519,11 @@ proc raiseProviderError*(msg: string, overflow = false, retryable = false,
   e.retryAfterMs = retryAfterMs
   raise e
 
+proc raiseCancelledError*(msg = "aborted") {.noreturn.} =
+  let e = newException(CancelledError, msg)
+  e.aborted = true
+  raise e
+
 proc raiseObjectError*(msg: string, issues: seq[string], raw = "") =
   let e = newException(ObjectError, msg)
   e.issues = issues
@@ -463,12 +538,20 @@ method nativeObjectOptions*(p: Provider, name, description: string,
 method forceToolOptions*(p: Provider, toolName: string): JsonNode {.base.} =
   nil
 
-proc tool*(name, description: string, inputSchema: JsonNode,
-           execute: proc (input: JsonNode): ToolOutput {.closure.} = nil,
-           parallel = false, hosted = "", hostedOptions: JsonNode = nil): Tool =
+proc rawTool*(name, description: string, inputSchema: JsonNode,
+              execute: proc (input: JsonNode): ToolOutput {.closure.} = nil,
+              parallel = false, hosted = "", hostedOptions: JsonNode = nil): Tool =
+  ## Untyped escape hatch for adapters and dynamic schemas.
   Tool(name: name, description: description, inputSchema: inputSchema,
        execute: execute, parallel: parallel, hosted: hosted,
        hostedOptions: hostedOptions)
+
+proc rawAsyncTool*(name, description: string, inputSchema: JsonNode,
+                   execute: proc (input: JsonNode): Future[ToolOutput] {.closure.},
+                   parallel = false): Tool =
+  ## Untyped async escape hatch for dynamic schemas.
+  Tool(name: name, description: description, inputSchema: inputSchema,
+       executeAsync: execute, parallel: parallel)
 
 proc hostedTool*(name: string, options: JsonNode = nil): Tool =
   ## Provider-executed tool (`web_search`, …). OpenAI Responses and Anthropic.

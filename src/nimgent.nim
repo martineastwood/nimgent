@@ -6,7 +6,7 @@ export provider
 import nimgent/jsonschema
 export jsonschema
 
-import std/[json, os, random, strutils]
+import std/[asyncdispatch, json, os, random, strutils]
 when compileOption("threads"):
   import std/typedthreads
 
@@ -14,17 +14,25 @@ proc buildRequest(
   model: string,
   prompt = "",
   messages: seq[Message] = @[],
-  system: seq[string] = @[],
+  system = "",
   tools: seq[ToolDefinition] = @[],
   maxTokens = 0,
   sessionId = "",
   options: JsonNode = nil,
   wakeFd: cint = -1
 ): ProviderRequest =
+  if model.len == 0:
+    raiseProviderError("model must not be empty")
+  if prompt.len > 0 and messages.len > 0:
+    raiseProviderError("pass either prompt or messages, not both")
+  if prompt.len == 0 and messages.len == 0:
+    raiseProviderError("prompt or messages is required")
+  if not options.isNil and options.kind notin {JNull, JObject}:
+    raiseProviderError("options must be a JSON object")
   result = ProviderRequest(
     model: model,
     sessionId: sessionId,
-    system: system,
+    system: if system.len > 0: @[system] else: @[],
     tools: tools,
     maxTokens: maxTokens,
     options: options,
@@ -36,7 +44,7 @@ proc buildRequest(
 
 proc checkAbort(abort: AbortCheck) =
   if not abort.isNil and abort():
-    raiseProviderError("aborted", aborted = true)
+    raiseCancelledError()
 
 const
   retryBaseMs = 250
@@ -55,17 +63,51 @@ proc retryDelayMs*(attempt: int, retryAfterMs = 0): int =
   if backoff > retryCapMs: backoff = retryCapMs
   rand(backoff)
 
-proc sleepAbort(ms: int, abort: AbortCheck) =
+proc sleepAbort(ms: int, abort: AbortCheck): Future[void] {.async.} =
   var left = ms
   while left > 0:
     checkAbort(abort)
     let chunk = min(left, 50)
-    sleep(chunk)
+    await sleepAsync(chunk)
     left -= chunk
 
 proc canExecute(tools: openArray[Tool]): bool =
   for t in tools:
-    if not t.execute.isNil: return true
+    if not t.execute.isNil or not t.executeAsync.isNil: return true
+
+proc validateRun(tools: openArray[Tool], maxRetries, maxSteps: int) =
+  if maxRetries < 0: raiseProviderError("maxRetries must be at least 0")
+  if maxSteps < 1: raiseProviderError("maxSteps must be at least 1")
+  var names: seq[string]
+  for t in tools:
+    if t.name.len == 0: raiseProviderError("tool name must not be empty")
+    if t.name in names: raiseProviderError("duplicate tool name: " & t.name)
+    names.add t.name
+    if t.hosted.len == 0 and (t.inputSchema.isNil or t.inputSchema.kind != JObject):
+      raiseProviderError("tool '" & t.name & "' requires a JSON Schema object")
+
+proc toolOutput[Output](output: Output): ToolOutput =
+  when Output is string: ToolOutput(output: output)
+  elif Output is ToolOutput: output
+  else: ToolOutput(output: $(%*output))
+
+proc tool*[Input, Output](name, description: string,
+                          execute: proc (input: Input): Output {.closure.},
+                          parallel = false): Tool =
+  ## Typed tool with a derived input schema and automatic JSON conversion.
+  rawTool(name, description, jsonSchema(Input),
+    proc (input: JsonNode): ToolOutput =
+      toolOutput(execute(input.to(Input))),
+    parallel)
+
+proc tool*[Input, Output](name, description: string,
+                          execute: proc (input: Input): Future[Output] {.closure.},
+                          parallel = false): Tool =
+  ## Typed async tool; parallel calls overlap when `parallel` is true.
+  rawAsyncTool(name, description, jsonSchema(Input),
+    proc (input: JsonNode): Future[ToolOutput] {.async.} =
+      return toolOutput(await execute(input.to(Input))),
+    parallel)
 
 proc findTool(tools: openArray[Tool], name: string): int =
   for i, t in tools:
@@ -77,13 +119,27 @@ proc execOne(tools: openArray[Tool], call: ContentBlock): ContentBlock =
   if bad.len > 0:
     return toolResult(call.id, bad, true)
   let i = findTool(tools, call.name)
-  if i < 0 or tools[i].execute.isNil:
+  if i < 0 or (tools[i].execute.isNil and tools[i].executeAsync.isNil):
     return toolResult(call.id, "Unknown tool: " & call.name, true)
   try:
     let outp = tools[i].execute(call.input)
     toolResult(call.id, outp.output, outp.isError, outp.images)
   except CatchableError as e:
     toolResult(call.id, e.msg, true)
+
+proc execOneAsync(tools: seq[Tool], call: ContentBlock): Future[ContentBlock] {.async.} =
+  let bad = invalidToolCall(call)
+  if bad.len > 0: return toolResult(call.id, bad, true)
+  let i = findTool(tools, call.name)
+  if i < 0 or (tools[i].execute.isNil and tools[i].executeAsync.isNil):
+    return toolResult(call.id, "Unknown tool: " & call.name, true)
+  try:
+    if not tools[i].executeAsync.isNil:
+      let output = await tools[i].executeAsync(call.input)
+      return toolResult(call.id, output.output, output.isError, output.images)
+    return execOne(tools, call)
+  except CatchableError as e:
+    return toolResult(call.id, e.msg, true)
 
 proc batchOverlaps(tools: openArray[Tool], calls: openArray[ContentBlock]): bool =
   ## True when at least two calls will run execute and every one of those is parallel.
@@ -92,6 +148,17 @@ proc batchOverlaps(tools: openArray[Tool], calls: openArray[ContentBlock]): bool
     if invalidToolCall(call).len > 0: continue
     let i = findTool(tools, call.name)
     if i < 0 or tools[i].execute.isNil: continue
+    if not tools[i].parallel: return false
+    inc n
+  n >= 2
+
+proc asyncBatchOverlaps(tools: openArray[Tool],
+                        calls: openArray[ContentBlock]): bool =
+  var n = 0
+  for call in calls:
+    if invalidToolCall(call).len > 0: continue
+    let i = findTool(tools, call.name)
+    if i < 0 or (tools[i].execute.isNil and tools[i].executeAsync.isNil): continue
     if not tools[i].parallel: return false
     inc n
   n >= 2
@@ -150,16 +217,31 @@ proc execTools(tools: openArray[Tool], calls: openArray[ContentBlock],
     checkAbort(abort)
     result.add execOne(tools, call)
 
+proc execToolsAsync(tools: seq[Tool], calls: seq[ContentBlock],
+                    abort: AbortCheck): Future[seq[ContentBlock]] {.async.} =
+  when compileOption("threads"):
+    if batchOverlaps(tools, calls):
+      return execTools(tools, calls, abort)
+  if asyncBatchOverlaps(tools, calls):
+    checkAbort(abort)
+    var pending: seq[Future[ContentBlock]]
+    for call in calls: pending.add execOneAsync(tools, call)
+    for future in pending: result.add await future
+    return
+  for call in calls:
+    checkAbort(abort)
+    result.add await execOneAsync(tools, call)
+
 proc retryingCall(provider: Provider, request: ProviderRequest,
                   maxRetries: int, abort: AbortCheck,
-                  onEvent: StreamCallback): ProviderResponse =
+                  onEvent: StreamCallback): Future[ProviderResponse] {.async.} =
   for attempt in 0 .. maxRetries:
     checkAbort(abort)
     var started = false
     try:
       if onEvent.isNil:
-        return provider.generate(request)
-      return provider.generateStream(request, proc (ev: StreamEvent): bool =
+        return await provider.generateAsync(request)
+      return await provider.generateStreamAsync(request, proc (ev: StreamEvent): bool =
         if ev.kind in {seTextDelta, seThinkingDelta, seToolCallDelta}:
           started = true
         if ev.kind == seFinished:
@@ -169,13 +251,17 @@ proc retryingCall(provider: Provider, request: ProviderRequest,
       if started or e.aborted or e.overflow or not e.retryable or
           attempt == maxRetries:
         raise
-      sleepAbort(retryDelayMs(attempt, e.retryAfterMs), abort)
+      await sleepAbort(retryDelayMs(attempt, e.retryAfterMs), abort)
 
-proc runLoop(provider: Provider, request: var ProviderRequest,
+proc runLoop(provider: Provider, request: ProviderRequest,
              tools: seq[Tool], maxRetries, maxSteps: int,
-             abort: AbortCheck, onEvent: StreamCallback): ProviderResponse =
-  let steps = max(1, maxSteps)
+             abort: AbortCheck,
+             onEvent: StreamCallback): Future[ProviderResponse] {.async.} =
+  var request = request
+  let stepCap = max(1, maxSteps)
   var cancelled = false
+  var completedSteps: seq[StepResult]
+  var totalUsage: Usage
   let cb = if onEvent.isNil: nil else:
     proc (ev: StreamEvent): bool =
       if not abort.isNil and abort():
@@ -185,25 +271,37 @@ proc runLoop(provider: Provider, request: var ProviderRequest,
         cancelled = true
         return false
       true
-  for step in 1 .. steps:
-    result = retryingCall(provider, request, maxRetries, abort, cb)
+  for step in 1 .. stepCap:
+    result = await retryingCall(provider, request, maxRetries, abort, cb)
     if cancelled:
-      return
+      raiseCancelledError()
     let calls = result.toolCalls
-    if calls.len == 0 or step == steps or not canExecute(tools):
+    var stepResult = StepResult(model: result.model, content: result.content,
+      usage: result.usage, finishReason: result.finishReason)
+    totalUsage.addUsage(result.usage)
+    if calls.len == 0 or not canExecute(tools):
+      completedSteps.add stepResult
       break
-    let parts = execTools(tools, calls, abort)
+    if step == stepCap:
+      completedSteps.add stepResult
+      result.finishReason = frStepLimit
+      break
+    let parts = await execToolsAsync(tools, calls, abort)
+    stepResult.toolResults = parts
+    completedSteps.add stepResult
     request.messages.add Message(role: roleAssistant, content: result.content)
     request.messages.add userMessage(parts)
+  result.steps = completedSteps
+  result.totalUsage = totalUsage
   if not onEvent.isNil and not cancelled:
     discard onEvent(StreamEvent(kind: seFinished))
 
-proc generateText*(
+proc generateTextAsync(
   provider: Provider,
   model: string,
   prompt = "",
   messages: seq[Message] = @[],
-  system: seq[string] = @[],
+  system = "",
   tools: seq[Tool] = @[],
   maxTokens = 0,
   sessionId = "",
@@ -211,33 +309,63 @@ proc generateText*(
   maxRetries = 2,
   maxSteps = 1,
   abort: AbortCheck = nil
-): ProviderResponse =
+): Future[ProviderResponse] {.async.} =
   ## One-shot completion. `prompt` becomes a user message when `messages` is empty.
   ## `maxRetries` retries 429/5xx/transport (default 2) with jitter and
   ## Retry-After. `maxSteps` > 1 plus
   ## `tool(..., execute=)` runs tools and continues until text or the step cap.
-  var request = buildRequest(model, prompt, messages, system,
+  validateRun(tools, maxRetries, maxSteps)
+  let request = buildRequest(model, prompt, messages, system,
     toDefinitions(tools), maxTokens, sessionId, options)
-  runLoop(provider, request, tools, maxRetries, maxSteps, abort, nil)
+  return await runLoop(provider, request, tools, maxRetries, maxSteps, abort, nil)
 
-proc generateText*(
+proc generateTextAsync*(
+  model: LanguageModel,
+  prompt = "",
+  messages: seq[Message] = @[],
+  system = "",
+  tools: seq[Tool] = @[],
+  maxTokens = 0,
+  sessionId = "",
+  options: JsonNode = nil,
+  maxRetries = 2,
+  maxSteps = 1,
+  abort: AbortCheck = nil
+): Future[ProviderResponse] {.async.} =
+  return await generateTextAsync(model.provider, model.id, prompt, messages, system, tools,
+    maxTokens, sessionId, options, maxRetries, maxSteps, abort)
+
+proc generateText*(model: LanguageModel, prompt = "",
+                   messages: seq[Message] = @[], system = "",
+                   tools: seq[Tool] = @[], maxTokens = 0, sessionId = "",
+                   options: JsonNode = nil, maxRetries = 2, maxSteps = 1,
+                   abort: AbortCheck = nil): ProviderResponse =
+  waitFor generateTextAsync(model, prompt, messages, system, tools, maxTokens,
+    sessionId, options, maxRetries, maxSteps, abort)
+
+proc generateTextAsync*(
   provider: Provider,
   request: ProviderRequest,
   maxRetries = 2,
   abort: AbortCheck = nil
-): ProviderResponse =
+): Future[ProviderResponse] {.async.} =
   ## Retry wrapper for a ready-made request. Does not run the tool loop
   ## (`maxSteps` 1); the caller owns tools.
-  var req = request
-  runLoop(provider, req, @[], maxRetries, 1, abort, nil)
+  validateRun(@[], maxRetries, 1)
+  return await runLoop(provider, request, @[], maxRetries, 1, abort, nil)
 
-proc streamText*(
+proc generateText*(provider: Provider, request: ProviderRequest,
+                   maxRetries = 2,
+                   abort: AbortCheck = nil): ProviderResponse =
+  waitFor generateTextAsync(provider, request, maxRetries, abort)
+
+proc streamTextAsync(
   provider: Provider,
   model: string,
   onEvent: StreamCallback,
   prompt = "",
   messages: seq[Message] = @[],
-  system: seq[string] = @[],
+  system = "",
   tools: seq[Tool] = @[],
   maxTokens = 0,
   sessionId = "",
@@ -246,22 +374,55 @@ proc streamText*(
   maxRetries = 2,
   maxSteps = 1,
   abort: AbortCheck = nil
-): ProviderResponse =
+): Future[ProviderResponse] {.async.} =
   ## Streaming completion; `onEvent` receives deltas. Return false to cancel.
-  var request = buildRequest(model, prompt, messages, system,
+  validateRun(tools, maxRetries, maxSteps)
+  let request = buildRequest(model, prompt, messages, system,
     toDefinitions(tools), maxTokens, sessionId, options, wakeFd)
-  runLoop(provider, request, tools, maxRetries, maxSteps, abort, onEvent)
+  return await runLoop(provider, request, tools, maxRetries, maxSteps, abort, onEvent)
 
-proc streamText*(
+proc streamTextAsync*(
+  model: LanguageModel,
+  onEvent: StreamCallback,
+  prompt = "",
+  messages: seq[Message] = @[],
+  system = "",
+  tools: seq[Tool] = @[],
+  maxTokens = 0,
+  sessionId = "",
+  options: JsonNode = nil,
+  wakeFd: cint = -1,
+  maxRetries = 2,
+  maxSteps = 1,
+  abort: AbortCheck = nil
+): Future[ProviderResponse] {.async.} =
+  return await streamTextAsync(model.provider, model.id, onEvent, prompt,
+    messages, system, tools,
+    maxTokens, sessionId, options, wakeFd, maxRetries, maxSteps, abort)
+
+proc streamText*(model: LanguageModel, onEvent: StreamCallback, prompt = "",
+                 messages: seq[Message] = @[], system = "",
+                 tools: seq[Tool] = @[], maxTokens = 0, sessionId = "",
+                 options: JsonNode = nil, wakeFd: cint = -1, maxRetries = 2,
+                 maxSteps = 1, abort: AbortCheck = nil): ProviderResponse =
+  waitFor streamTextAsync(model, onEvent, prompt, messages, system, tools,
+    maxTokens, sessionId, options, wakeFd, maxRetries, maxSteps, abort)
+
+proc streamTextAsync*(
   provider: Provider,
   request: ProviderRequest,
   onEvent: StreamCallback,
   maxRetries = 2,
   abort: AbortCheck = nil
-): ProviderResponse =
+): Future[ProviderResponse] {.async.} =
   ## Streaming retry wrapper for a ready-made request. No tool loop.
-  var req = request
-  runLoop(provider, req, @[], maxRetries, 1, abort, onEvent)
+  validateRun(@[], maxRetries, 1)
+  return await runLoop(provider, request, @[], maxRetries, 1, abort, onEvent)
+
+proc streamText*(provider: Provider, request: ProviderRequest,
+                 onEvent: StreamCallback, maxRetries = 2,
+                 abort: AbortCheck = nil): ProviderResponse =
+  waitFor streamTextAsync(provider, request, onEvent, maxRetries, abort)
 
 type
   ObjectMode* = enum
@@ -305,9 +466,9 @@ proc takeObjectValue(resp: ProviderResponse, useTool: bool): tuple[value: JsonNo
     result = toolObjectValue(resp)
     if not result.value.isNil or result.issue.len > 0:
       return
-  var parsed = extractJson(resp.textContent)
+  var parsed = extractJson(resp.text)
   if parsed.isNil:
-    parsed = parsePartialJson(resp.textContent).value
+    parsed = parsePartialJson(resp.text).value
   if not parsed.isNil:
     return (parsed, "")
   if not useTool:
@@ -375,7 +536,7 @@ proc acceptObject(resp: ProviderResponse, schema: JsonNode,
                   useTool: bool): tuple[value: JsonNode, issues: seq[string], raw: string] =
   let taken = takeObjectValue(resp, useTool)
   result.value = taken.value
-  result.raw = if taken.value.isNil: resp.textContent else: $taken.value
+  result.raw = if taken.value.isNil: resp.text else: $taken.value
   if taken.value.isNil:
     result.issues = @[taken.issue]
   else:
@@ -389,8 +550,10 @@ proc emitPartial(acc: string, last: var JsonNode, onPartial: PartialObjectCallba
   last = parsed.value
   onPartial(parsed.value)
 
-proc finishObject(session: var ObjectSession, first: ProviderResponse,
-                  maxRepairs: int, abort: AbortCheck): ObjectResult[JsonNode] =
+proc finishObjectAsync(session: ObjectSession, first: ProviderResponse,
+                       maxRepairs: int,
+                       abort: AbortCheck): Future[ObjectResult[JsonNode]] {.async.} =
+  var session = session
   result.response = first
   var taken: tuple[value: JsonNode, issues: seq[string], raw: string]
   for repair in 0 .. maxRepairs:
@@ -399,7 +562,7 @@ proc finishObject(session: var ObjectSession, first: ProviderResponse,
         content: result.response.content)
       session.req.messages.add userMessage(
         repairMessage(taken.issues, taken.value, session.useTool))
-      result.response = generateText(session.provider, session.req,
+      result.response = await generateTextAsync(session.provider, session.req,
         session.maxRetries, abort)
     result.usage.addUsage(result.response.usage)
     result.repairs = repair
@@ -412,13 +575,13 @@ proc finishObject(session: var ObjectSession, first: ProviderResponse,
     else: "generateObject failed after " & $maxRepairs & " repair(s): "
   raiseObjectError(prefix & taken.issues.join("; "), taken.issues, taken.raw)
 
-proc generateObject*(
+proc generateObjectAsync(
   provider: Provider,
   model: string,
   schema: JsonNode,
   prompt = "",
   messages: seq[Message] = @[],
-  system: seq[string] = @[],
+  system = "",
   name = "object",
   description = "",
   maxTokens = 0,
@@ -428,7 +591,7 @@ proc generateObject*(
   maxRepairs = 0,
   mode = omAuto,
   abort: AbortCheck = nil
-): ObjectResult[JsonNode] =
+): Future[ObjectResult[JsonNode]] {.async.} =
   ## Schema in, JSON out. Uses native structured output when the provider
   ## has it (`omAuto`), extracts JSON from text or a tool call, validates.
   ## Truncated JSON is closed with `fixJson`. `maxRepairs` (default 0) is
@@ -437,16 +600,48 @@ proc generateObject*(
     provider,
     buildRequest(model, prompt, messages, system, @[], maxTokens, sessionId, options),
     schema, name, description, mode, maxRetries)
-  finishObject(session, generateText(session.provider, session.req,
-    session.maxRetries, abort), maxRepairs, abort)
+  let first = await generateTextAsync(session.provider, session.req,
+    session.maxRetries, abort)
+  return await finishObjectAsync(session, first, maxRepairs, abort)
 
-proc streamObject*(
+proc generateObjectAsync*(
+  model: LanguageModel,
+  schema: JsonNode,
+  prompt = "",
+  messages: seq[Message] = @[],
+  system = "",
+  name = "object",
+  description = "",
+  maxTokens = 0,
+  sessionId = "",
+  options: JsonNode = nil,
+  maxRetries = 2,
+  maxRepairs = 0,
+  mode = omAuto,
+  abort: AbortCheck = nil
+): Future[ObjectResult[JsonNode]] {.async.} =
+  return await generateObjectAsync(model.provider, model.id, schema, prompt,
+    messages, system,
+    name, description, maxTokens, sessionId, options, maxRetries, maxRepairs,
+    mode, abort)
+
+proc generateObject*(model: LanguageModel, schema: JsonNode, prompt = "",
+                     messages: seq[Message] = @[], system = "",
+                     name = "object", description = "", maxTokens = 0,
+                     sessionId = "", options: JsonNode = nil, maxRetries = 2,
+                     maxRepairs = 0, mode = omAuto,
+                     abort: AbortCheck = nil): ObjectResult[JsonNode] =
+  waitFor generateObjectAsync(model, schema, prompt, messages, system, name,
+    description, maxTokens, sessionId, options, maxRetries, maxRepairs, mode,
+    abort)
+
+proc streamObjectAsync(
   provider: Provider,
   model: string,
   schema: JsonNode,
   prompt = "",
   messages: seq[Message] = @[],
-  system: seq[string] = @[],
+  system = "",
   name = "object",
   description = "",
   maxTokens = 0,
@@ -459,7 +654,7 @@ proc streamObject*(
   abort: AbortCheck = nil,
   onPartial: PartialObjectCallback = nil,
   onEvent: StreamCallback = nil
-): ObjectResult[JsonNode] =
+): Future[ObjectResult[JsonNode]] {.async.} =
   ## Like `generateObject`, but the first attempt streams. `onPartial` gets
   ## the repaired JSON tree whenever it changes (not schema-valid). Schema
   ## check and optional model repairs run after the stream ends.
@@ -472,7 +667,7 @@ proc streamObject*(
   var lastPartial: JsonNode = nil
   var accText = ""
   var accTool = ""
-  let first = streamText(
+  let first = await streamTextAsync(
     session.provider, session.req,
     onEvent = proc (ev: StreamEvent): bool =
       case ev.kind
@@ -494,8 +689,44 @@ proc streamObject*(
       true,
     maxRetries = session.maxRetries, abort = abort)
   if cancelled:
-    raiseProviderError("aborted", aborted = true)
-  finishObject(session, first, maxRepairs, abort)
+    raiseCancelledError()
+  return await finishObjectAsync(session, first, maxRepairs, abort)
+
+proc streamObjectAsync*(
+  model: LanguageModel,
+  schema: JsonNode,
+  prompt = "",
+  messages: seq[Message] = @[],
+  system = "",
+  name = "object",
+  description = "",
+  maxTokens = 0,
+  sessionId = "",
+  options: JsonNode = nil,
+  wakeFd: cint = -1,
+  maxRetries = 2,
+  maxRepairs = 0,
+  mode = omAuto,
+  abort: AbortCheck = nil,
+  onPartial: PartialObjectCallback = nil,
+  onEvent: StreamCallback = nil
+): Future[ObjectResult[JsonNode]] {.async.} =
+  return await streamObjectAsync(model.provider, model.id, schema, prompt,
+    messages, system,
+    name, description, maxTokens, sessionId, options, wakeFd, maxRetries,
+    maxRepairs, mode, abort, onPartial, onEvent)
+
+proc streamObject*(model: LanguageModel, schema: JsonNode, prompt = "",
+                   messages: seq[Message] = @[], system = "",
+                   name = "object", description = "", maxTokens = 0,
+                   sessionId = "", options: JsonNode = nil, wakeFd: cint = -1,
+                   maxRetries = 2, maxRepairs = 0, mode = omAuto,
+                   abort: AbortCheck = nil,
+                   onPartial: PartialObjectCallback = nil,
+                   onEvent: StreamCallback = nil): ObjectResult[JsonNode] =
+  waitFor streamObjectAsync(model, schema, prompt, messages, system, name,
+    description, maxTokens, sessionId, options, wakeFd, maxRetries, maxRepairs,
+    mode, abort, onPartial, onEvent)
 
 proc toObject*[T](r: ObjectResult[JsonNode]): ObjectResult[T] =
   ## Decode `r.value` as `T`. Validation already ran against the schema.
@@ -510,12 +741,11 @@ proc toObject*[T](r: ObjectResult[JsonNode]): ObjectResult[T] =
   result.usage = r.usage
   result.repairs = r.repairs
 
-proc generateObject*[T](
-  provider: Provider,
-  model: string,
+proc generateObjectAsync*[T](
+  model: LanguageModel,
   prompt = "",
   messages: seq[Message] = @[],
-  system: seq[string] = @[],
+  system = "",
   name = "",
   description = "",
   maxTokens = 0,
@@ -525,21 +755,30 @@ proc generateObject*[T](
   maxRepairs = 0,
   mode = omAuto,
   abort: AbortCheck = nil
-): ObjectResult[T] =
+): Future[ObjectResult[T]] {.async.} =
   ## `generateObject` with `jsonSchema(T)`, then `toObject`.
   when T is JsonNode:
     {.error: "use generateObject(..., schema=) for JsonNode; not generateObject[JsonNode]".}
   let nm = if name.len > 0: name else: $T
-  toObject[T](generateObject(
-    provider, model, jsonSchema(T), prompt, messages, system, nm, description,
+  return toObject[T](await generateObjectAsync(
+    model, jsonSchema(T), prompt, messages, system, nm, description,
     maxTokens, sessionId, options, maxRetries, maxRepairs, mode, abort))
 
-proc streamObject*[T](
-  provider: Provider,
-  model: string,
+proc generateObject*[T](model: LanguageModel, prompt = "",
+                        messages: seq[Message] = @[], system = "", name = "",
+                        description = "", maxTokens = 0, sessionId = "",
+                        options: JsonNode = nil, maxRetries = 2,
+                        maxRepairs = 0, mode = omAuto,
+                        abort: AbortCheck = nil): ObjectResult[T] =
+  waitFor generateObjectAsync[T](model, prompt, messages, system, name,
+    description, maxTokens, sessionId, options, maxRetries, maxRepairs, mode,
+    abort)
+
+proc streamObjectAsync*[T](
+  model: LanguageModel,
   prompt = "",
   messages: seq[Message] = @[],
-  system: seq[string] = @[],
+  system = "",
   name = "",
   description = "",
   maxTokens = 0,
@@ -552,11 +791,23 @@ proc streamObject*[T](
   abort: AbortCheck = nil,
   onPartial: PartialObjectCallback = nil,
   onEvent: StreamCallback = nil
-): ObjectResult[T] =
+): Future[ObjectResult[T]] {.async.} =
   when T is JsonNode:
     {.error: "use streamObject(..., schema=) for JsonNode; not streamObject[JsonNode]".}
   let nm = if name.len > 0: name else: $T
-  toObject[T](streamObject(
-    provider, model, jsonSchema(T), prompt, messages, system, nm, description,
+  return toObject[T](await streamObjectAsync(
+    model, jsonSchema(T), prompt, messages, system, nm, description,
     maxTokens, sessionId, options, wakeFd, maxRetries, maxRepairs, mode, abort,
     onPartial, onEvent))
+
+proc streamObject*[T](model: LanguageModel, prompt = "",
+                      messages: seq[Message] = @[], system = "", name = "",
+                      description = "", maxTokens = 0, sessionId = "",
+                      options: JsonNode = nil, wakeFd: cint = -1,
+                      maxRetries = 2, maxRepairs = 0, mode = omAuto,
+                      abort: AbortCheck = nil,
+                      onPartial: PartialObjectCallback = nil,
+                      onEvent: StreamCallback = nil): ObjectResult[T] =
+  waitFor streamObjectAsync[T](model, prompt, messages, system, name,
+    description, maxTokens, sessionId, options, wakeFd, maxRetries, maxRepairs,
+    mode, abort, onPartial, onEvent)
