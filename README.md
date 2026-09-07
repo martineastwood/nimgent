@@ -161,6 +161,23 @@ calls marked `parallel = true` overlap without blocking the event loop.
 final model call. `response.steps` records every call and its local tool
 results; `response.totalUsage` is accumulated across them.
 
+Observe retries, local tools, completed steps, and the final response with
+optional lifecycle callbacks. Step numbers are zero-based; callbacks run for
+both blocking and async generation, including streaming.
+
+```nim
+let onStepFinish = proc (step: int, result: StepResult) =
+  echo "step ", step, ": ", result.usage.outputTokens, " output tokens"
+
+let response = generateText(model, prompt = "…",
+  callbacks = RunCallbacks(onStepFinish: onStepFinish))
+```
+
+The other callbacks are `onRetry`, `onToolStart`, `onToolFinish`, and
+`onFinish`. Tool completion includes the output and elapsed milliseconds;
+finish receives the complete `ProviderResponse`. Lifecycle callbacks are
+observers: `StreamEvent` remains the API for live model-output deltas.
+
 `hostedTool("web_search")` runs on the provider (OpenAI Responses, Anthropic).
 Chat Completions skips it. Hosted calls and results stay on the assistant
 message for replay; `toolCalls` / the execute loop ignore them.

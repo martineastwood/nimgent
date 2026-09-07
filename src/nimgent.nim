@@ -6,9 +6,18 @@ export provider
 import nimgent/jsonschema
 export jsonschema
 
-import std/[asyncdispatch, json, os, random, strutils]
+import std/[asyncdispatch, json, os, random, strutils, times]
 when compileOption("threads"):
   import std/typedthreads
+
+type RunCallbacks* = object
+  ## Optional observers for work owned by the high-level generation loop.
+  onRetry*: proc (attempt, delayMs: int, error: ref ProviderError) {.closure.}
+  onToolStart*: proc (step: int, call: ContentBlock) {.closure.}
+  onToolFinish*: proc (step: int, call, output: ContentBlock,
+                       durationMs: int) {.closure.}
+  onStepFinish*: proc (step: int, result: StepResult) {.closure.}
+  onFinish*: proc (response: ProviderResponse) {.closure.}
 
 proc buildRequest(
   model: string,
@@ -218,23 +227,48 @@ proc execTools(tools: openArray[Tool], calls: openArray[ContentBlock],
     result.add execOne(tools, call)
 
 proc execToolsAsync(tools: seq[Tool], calls: seq[ContentBlock],
-                    abort: AbortCheck): Future[seq[ContentBlock]] {.async.} =
+                    abort: AbortCheck, step: int,
+                    callbacks: RunCallbacks): Future[seq[ContentBlock]] {.async.} =
   when compileOption("threads"):
     if batchOverlaps(tools, calls):
-      return execTools(tools, calls, abort)
+      checkAbort(abort)
+      let started = epochTime()
+      if not callbacks.onToolStart.isNil:
+        for call in calls: callbacks.onToolStart(step, call)
+      result = execTools(tools, calls, abort)
+      let durationMs = int((epochTime() - started) * 1000)
+      if not callbacks.onToolFinish.isNil:
+        for i, call in calls:
+          callbacks.onToolFinish(step, call, result[i], durationMs)
+      return
   if asyncBatchOverlaps(tools, calls):
     checkAbort(abort)
+    let started = epochTime()
     var pending: seq[Future[ContentBlock]]
-    for call in calls: pending.add execOneAsync(tools, call)
-    for future in pending: result.add await future
+    for call in calls:
+      if not callbacks.onToolStart.isNil: callbacks.onToolStart(step, call)
+      pending.add execOneAsync(tools, call)
+    for i, future in pending:
+      let output = await future
+      result.add output
+      if not callbacks.onToolFinish.isNil:
+        callbacks.onToolFinish(step, calls[i], output,
+          int((epochTime() - started) * 1000))
     return
   for call in calls:
     checkAbort(abort)
-    result.add await execOneAsync(tools, call)
+    if not callbacks.onToolStart.isNil: callbacks.onToolStart(step, call)
+    let started = epochTime()
+    let output = await execOneAsync(tools, call)
+    result.add output
+    if not callbacks.onToolFinish.isNil:
+      callbacks.onToolFinish(step, call, output,
+        int((epochTime() - started) * 1000))
 
 proc retryingCall(provider: Provider, request: ProviderRequest,
                   maxRetries: int, abort: AbortCheck,
-                  onEvent: StreamCallback): Future[ProviderResponse] {.async.} =
+                  onEvent: StreamCallback,
+                  callbacks: RunCallbacks): Future[ProviderResponse] {.async.} =
   for attempt in 0 .. maxRetries:
     checkAbort(abort)
     var started = false
@@ -251,12 +285,16 @@ proc retryingCall(provider: Provider, request: ProviderRequest,
       if started or e.aborted or e.overflow or not e.retryable or
           attempt == maxRetries:
         raise
-      await sleepAbort(retryDelayMs(attempt, e.retryAfterMs), abort)
+      let delayMs = retryDelayMs(attempt, e.retryAfterMs)
+      if not callbacks.onRetry.isNil:
+        callbacks.onRetry(attempt + 1, delayMs, e)
+      await sleepAbort(delayMs, abort)
 
 proc runLoop(provider: Provider, request: ProviderRequest,
              tools: seq[Tool], maxRetries, maxSteps: int,
              abort: AbortCheck,
-             onEvent: StreamCallback): Future[ProviderResponse] {.async.} =
+             onEvent: StreamCallback,
+             callbacks: RunCallbacks): Future[ProviderResponse] {.async.} =
   var request = request
   let stepCap = max(1, maxSteps)
   var cancelled = false
@@ -271,8 +309,8 @@ proc runLoop(provider: Provider, request: ProviderRequest,
         cancelled = true
         return false
       true
-  for step in 1 .. stepCap:
-    result = await retryingCall(provider, request, maxRetries, abort, cb)
+  for step in 0 ..< stepCap:
+    result = await retryingCall(provider, request, maxRetries, abort, cb, callbacks)
     if cancelled:
       raiseCancelledError()
     let calls = result.toolCalls
@@ -281,20 +319,27 @@ proc runLoop(provider: Provider, request: ProviderRequest,
     totalUsage.addUsage(result.usage)
     if calls.len == 0 or not canExecute(tools):
       completedSteps.add stepResult
+      if not callbacks.onStepFinish.isNil:
+        callbacks.onStepFinish(step, stepResult)
       break
-    if step == stepCap:
+    if step == stepCap - 1:
       completedSteps.add stepResult
       result.finishReason = frStepLimit
+      if not callbacks.onStepFinish.isNil:
+        callbacks.onStepFinish(step, stepResult)
       break
-    let parts = await execToolsAsync(tools, calls, abort)
+    let parts = await execToolsAsync(tools, calls, abort, step, callbacks)
     stepResult.toolResults = parts
     completedSteps.add stepResult
+    if not callbacks.onStepFinish.isNil:
+      callbacks.onStepFinish(step, stepResult)
     request.messages.add Message(role: roleAssistant, content: result.content)
     request.messages.add userMessage(parts)
   result.steps = completedSteps
   result.totalUsage = totalUsage
   if not onEvent.isNil and not cancelled:
     discard onEvent(StreamEvent(kind: seFinished))
+  if not callbacks.onFinish.isNil: callbacks.onFinish(result)
 
 proc generateTextAsync(
   provider: Provider,
@@ -308,7 +353,8 @@ proc generateTextAsync(
   options: JsonNode = nil,
   maxRetries = 2,
   maxSteps = 1,
-  abort: AbortCheck = nil
+  abort: AbortCheck = nil,
+  callbacks = RunCallbacks()
 ): Future[ProviderResponse] {.async.} =
   ## One-shot completion. `prompt` becomes a user message when `messages` is empty.
   ## `maxRetries` retries 429/5xx/transport (default 2) with jitter and
@@ -317,7 +363,8 @@ proc generateTextAsync(
   validateRun(tools, maxRetries, maxSteps)
   let request = buildRequest(model, prompt, messages, system,
     toDefinitions(tools), maxTokens, sessionId, options)
-  return await runLoop(provider, request, tools, maxRetries, maxSteps, abort, nil)
+  return await runLoop(provider, request, tools, maxRetries, maxSteps, abort, nil,
+    callbacks)
 
 proc generateTextAsync*(
   model: LanguageModel,
@@ -330,34 +377,39 @@ proc generateTextAsync*(
   options: JsonNode = nil,
   maxRetries = 2,
   maxSteps = 1,
-  abort: AbortCheck = nil
+  abort: AbortCheck = nil,
+  callbacks = RunCallbacks()
 ): Future[ProviderResponse] {.async.} =
   return await generateTextAsync(model.provider, model.id, prompt, messages, system, tools,
-    maxTokens, sessionId, options, maxRetries, maxSteps, abort)
+    maxTokens, sessionId, options, maxRetries, maxSteps, abort, callbacks)
 
 proc generateText*(model: LanguageModel, prompt = "",
                    messages: seq[Message] = @[], system = "",
                    tools: seq[Tool] = @[], maxTokens = 0, sessionId = "",
                    options: JsonNode = nil, maxRetries = 2, maxSteps = 1,
-                   abort: AbortCheck = nil): ProviderResponse =
+                   abort: AbortCheck = nil,
+                   callbacks = RunCallbacks()): ProviderResponse =
   waitFor generateTextAsync(model, prompt, messages, system, tools, maxTokens,
-    sessionId, options, maxRetries, maxSteps, abort)
+    sessionId, options, maxRetries, maxSteps, abort, callbacks)
 
 proc generateTextAsync*(
   provider: Provider,
   request: ProviderRequest,
   maxRetries = 2,
-  abort: AbortCheck = nil
+  abort: AbortCheck = nil,
+  callbacks = RunCallbacks()
 ): Future[ProviderResponse] {.async.} =
   ## Retry wrapper for a ready-made request. Does not run the tool loop
   ## (`maxSteps` 1); the caller owns tools.
   validateRun(@[], maxRetries, 1)
-  return await runLoop(provider, request, @[], maxRetries, 1, abort, nil)
+  return await runLoop(provider, request, @[], maxRetries, 1, abort, nil,
+    callbacks)
 
 proc generateText*(provider: Provider, request: ProviderRequest,
                    maxRetries = 2,
-                   abort: AbortCheck = nil): ProviderResponse =
-  waitFor generateTextAsync(provider, request, maxRetries, abort)
+                   abort: AbortCheck = nil,
+                   callbacks = RunCallbacks()): ProviderResponse =
+  waitFor generateTextAsync(provider, request, maxRetries, abort, callbacks)
 
 proc streamTextAsync(
   provider: Provider,
@@ -373,13 +425,15 @@ proc streamTextAsync(
   wakeFd: cint = -1,
   maxRetries = 2,
   maxSteps = 1,
-  abort: AbortCheck = nil
+  abort: AbortCheck = nil,
+  callbacks = RunCallbacks()
 ): Future[ProviderResponse] {.async.} =
   ## Streaming completion; `onEvent` receives deltas. Return false to cancel.
   validateRun(tools, maxRetries, maxSteps)
   let request = buildRequest(model, prompt, messages, system,
     toDefinitions(tools), maxTokens, sessionId, options, wakeFd)
-  return await runLoop(provider, request, tools, maxRetries, maxSteps, abort, onEvent)
+  return await runLoop(provider, request, tools, maxRetries, maxSteps, abort,
+    onEvent, callbacks)
 
 proc streamTextAsync*(
   model: LanguageModel,
@@ -394,35 +448,41 @@ proc streamTextAsync*(
   wakeFd: cint = -1,
   maxRetries = 2,
   maxSteps = 1,
-  abort: AbortCheck = nil
+  abort: AbortCheck = nil,
+  callbacks = RunCallbacks()
 ): Future[ProviderResponse] {.async.} =
   return await streamTextAsync(model.provider, model.id, onEvent, prompt,
     messages, system, tools,
-    maxTokens, sessionId, options, wakeFd, maxRetries, maxSteps, abort)
+    maxTokens, sessionId, options, wakeFd, maxRetries, maxSteps, abort, callbacks)
 
 proc streamText*(model: LanguageModel, onEvent: StreamCallback, prompt = "",
                  messages: seq[Message] = @[], system = "",
                  tools: seq[Tool] = @[], maxTokens = 0, sessionId = "",
                  options: JsonNode = nil, wakeFd: cint = -1, maxRetries = 2,
-                 maxSteps = 1, abort: AbortCheck = nil): ProviderResponse =
+                 maxSteps = 1, abort: AbortCheck = nil,
+                 callbacks = RunCallbacks()): ProviderResponse =
   waitFor streamTextAsync(model, onEvent, prompt, messages, system, tools,
-    maxTokens, sessionId, options, wakeFd, maxRetries, maxSteps, abort)
+    maxTokens, sessionId, options, wakeFd, maxRetries, maxSteps, abort, callbacks)
 
 proc streamTextAsync*(
   provider: Provider,
   request: ProviderRequest,
   onEvent: StreamCallback,
   maxRetries = 2,
-  abort: AbortCheck = nil
+  abort: AbortCheck = nil,
+  callbacks = RunCallbacks()
 ): Future[ProviderResponse] {.async.} =
   ## Streaming retry wrapper for a ready-made request. No tool loop.
   validateRun(@[], maxRetries, 1)
-  return await runLoop(provider, request, @[], maxRetries, 1, abort, onEvent)
+  return await runLoop(provider, request, @[], maxRetries, 1, abort, onEvent,
+    callbacks)
 
 proc streamText*(provider: Provider, request: ProviderRequest,
                  onEvent: StreamCallback, maxRetries = 2,
-                 abort: AbortCheck = nil): ProviderResponse =
-  waitFor streamTextAsync(provider, request, onEvent, maxRetries, abort)
+                 abort: AbortCheck = nil,
+                 callbacks = RunCallbacks()): ProviderResponse =
+  waitFor streamTextAsync(provider, request, onEvent, maxRetries, abort,
+    callbacks)
 
 type
   ObjectMode* = enum

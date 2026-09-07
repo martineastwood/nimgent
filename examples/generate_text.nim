@@ -15,3 +15,4 @@ let response: ProviderResponse = generateText(
   prompt = "Explain why the sky is blue in 10 or fewer words.")
 
 echo response.text
+  

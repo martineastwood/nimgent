@@ -226,6 +226,49 @@ method generateAsync(p: BadArgsProvider,
   result.finishReason = frStop
 
 suite "generateText retries, abort, and tools":
+  test "lifecycle callbacks observe retries":
+    let p = ScriptProvider(failLeft: 1)
+    var retries: seq[string]
+    var finished = false
+    let onRetry = proc (attempt, delayMs: int, error: ref ProviderError) =
+      retries.add $attempt & ":" & $delayMs & ":" & error.msg
+    let onFinish = proc (response: ProviderResponse) =
+      finished = response.text == "ok"
+    let r = generateText(p.model("m"), prompt = "hi", maxRetries = 1,
+      callbacks = RunCallbacks(onRetry: onRetry, onFinish: onFinish))
+    check retries.len == 1
+    check retries[0].startsWith("1:")
+    check "rate limited" in retries[0]
+    check r.text == "ok"
+    check finished
+
+  test "lifecycle callbacks observe tools and completed steps":
+    let p = ScriptProvider(toolFirst: true)
+    let echoTool = rawTool("echo", "echo", %*{"type": "object"},
+      proc (input: JsonNode): ToolOutput = ToolOutput(output: "pong"))
+    var events: seq[string]
+    let onToolStart = proc (step: int, call: ContentBlock) =
+      events.add "tool-start:" & $step & ":" & call.name
+    let onToolFinish = proc (step: int, call, output: ContentBlock,
+                             durationMs: int) =
+      check durationMs >= 0
+      events.add "tool-finish:" & $step & ":" & output.output
+    let onStepFinish = proc (step: int, result: StepResult) =
+      events.add "step-finish:" & $step & ":" & $result.toolResults.len
+    let onFinish = proc (response: ProviderResponse) =
+      events.add "finish:" & $response.steps.len
+    let callbacks = RunCallbacks(onToolStart: onToolStart,
+      onToolFinish: onToolFinish, onStepFinish: onStepFinish,
+      onFinish: onFinish)
+    discard generateText(p.model("m"), prompt = "hi", tools = @[echoTool],
+      maxSteps = 2, maxRetries = 0, callbacks = callbacks)
+    check events == @[
+      "tool-start:0:echo",
+      "tool-finish:0:pong",
+      "step-finish:0:1",
+      "step-finish:1:0",
+      "finish:2"]
+
   test "retries retryable errors then succeeds":
     let p = ScriptProvider(failLeft: 1)
     let r = generateText(p.model("m"), prompt = "hi", maxRetries = 2)
