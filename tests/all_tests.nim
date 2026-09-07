@@ -22,6 +22,61 @@ proc withFixture(script: string, body: proc (port: int)) =
   check fixture.waitForExit() == 0
 
 suite "Anthropic streaming":
+  test "HTTP stream reports truncation and rate-limit metadata":
+    for mode in ["cut", "rate"]:
+      withFixture("anthropic_stream_fixture.py", proc (port: int) =
+        let provider = anthropic("fixture-key", "http://127.0.0.1:" & $port)
+        try:
+          discard streamText(provider, ProviderRequest(model: mode, maxTokens: 64,
+            messages: @[userMessage("hi")]), proc (ev: StreamEvent): bool = true,
+            maxRetries = 0)
+          check false
+        except ProviderError as e:
+          check e.retryable
+          if mode == "rate":
+            check e.status == 429
+            check e.retryAfterMs == 2000)
+
+  test "cancelling HTTP tool arguments returns no executable partial call":
+    withFixture("anthropic_stream_fixture.py", proc (port: int) =
+      let response = waitFor anthropic("fixture-key", "http://127.0.0.1:" & $port).generateStreamAsync(
+        ProviderRequest(model: "cancel", maxTokens: 64, messages: @[userMessage("hi")]),
+        proc (ev: StreamEvent): bool = ev.kind != seToolCallDelta)
+      check response.finishReason == frStop
+      check response.content.len == 0)
+
+  test "facade surfaces cancellation as CancelledError":
+    withFixture("anthropic_stream_fixture.py", proc (port: int) =
+      expect CancelledError:
+        discard streamText(anthropic("fixture-key", "http://127.0.0.1:" & $port),
+          ProviderRequest(model: "cancel", maxTokens: 64, messages: @[userMessage("hi")]),
+          proc (ev: StreamEvent): bool = ev.kind != seToolCallDelta, maxRetries = 0))
+
+  test "hosted search and citations replay through HTTP":
+    let previous = parseAnthropicOutput(%*{"content": [
+      {"type": "server_tool_use", "id": "search1", "name": "web_search", "input": {"query": "Nim"}},
+      {"type": "web_search_tool_result", "tool_use_id": "search1", "content": [
+        {"type": "web_search_result", "url": "https://example.com", "encrypted_content": "opaque"}]},
+      {"type": "text", "text": "Found it", "citations": [{"type": "web_search_result_location",
+        "url": "https://example.com", "encrypted_index": "index", "cited_text": "Nim"}]}]})
+    withFixture("anthropic_stream_fixture.py", proc (port: int) =
+      let response = streamText(anthropic("fixture-key", "http://127.0.0.1:" & $port),
+        ProviderRequest(model: "search", maxTokens: 64,
+          messages: @[Message(role: roleAssistant, content: previous.content), userMessage("continue")]),
+        proc (ev: StreamEvent): bool = true, maxRetries = 0)
+      check response.finishReason == frEndTurn
+      check response.usage.outputTokens == 2)
+
+  test "foreign thinking metadata is omitted without changing signed native thinking":
+    let req = ProviderRequest(model: "claude-sonnet-4-6", maxTokens: 64,
+      messages: @[Message(role: roleAssistant, content: @[
+        ContentBlock(kind: ckThinking, thinking: "foreign", signature: "[{\"type\":\"reasoning\"}]"),
+        ContentBlock(kind: ckThinking, thinking: "unsigned"),
+        ContentBlock(kind: ckThinking, thinking: "native", signature: "opaque-signature"), text("answer")])])
+    let body = buildAnthropicBody(req)
+    check body["messages"][0]["content"].len == 2
+    check body["messages"][0]["content"][0]["signature"].getStr == "opaque-signature"
+
   test "reassembles text, signed thinking, tools, citations and cumulative usage":
     var message = newJObject()
     var args: seq[string]

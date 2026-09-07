@@ -71,6 +71,14 @@ Provider-specific knobs (thinking, routing, cache TTL) go in
 `ProviderRequest.options` / the `options` argument on `generateText` /
 `streamText`. Options must be a JSON object.
 
+For Claude, `anthropicThinkingOptions(modelId, "high")` selects adaptive thinking
+on known modern models and explicit budgets on legacy models. Supported efforts
+follow [Anthropic's model-specific effort levels](https://platform.claude.com/docs/en/build-with-claude/effort).
+Pass the result as `options`; manual budgets are added once to `maxTokens`,
+while adaptive thinking shares the requested output limit with the answer.
+Foreign JSON reasoning metadata and unsigned thinking are omitted on Anthropic
+replay; native signed thinking is preserved.
+
 ## Async
 
 Async is the primitive API. Use it in servers and existing event loops:
@@ -185,22 +193,48 @@ calls marked `parallel = true` overlap without blocking the event loop.
 final model call. `response.steps` records every call and its local tool
 results; `response.totalUsage` is accumulated across them.
 
-Observe retries, local tools, completed steps, and the final response with
-optional lifecycle callbacks. Step numbers are zero-based; callbacks run for
-both blocking and async generation, including streaming.
+## Life cycle hooks
+
+`generateText` and `streamText` accept a `callbacks: RunCallbacks` value with
+optional observers for work owned by the generation loop: retries, local tool
+execution, completed steps, and the final response. Step numbers are
+zero-based; callbacks run for both blocking and async generation, including
+streaming.
 
 ```nim
+let onRetry = proc (attempt, delayMs: int, error: ref ProviderError) =
+  echo "retry ", attempt, " in ", delayMs, "ms: ", error.msg
+
 let onStepFinish = proc (step: int, result: StepResult) =
-  echo "step ", step, ": ", result.usage.outputTokens, " output tokens"
+  echo "step ", step, " finished: ",
+    result.usage.outputTokens, " output tokens"
+
+let onFinish = proc (response: ProviderResponse) =
+  echo "run finished: ", response.steps.len, " steps"
 
 let response = generateText(model, prompt = "…",
-  callbacks = RunCallbacks(onStepFinish: onStepFinish))
+  callbacks = RunCallbacks(
+    onRetry: onRetry,
+    onStepFinish: onStepFinish,
+    onFinish: onFinish))
 ```
 
-The other callbacks are `onRetry`, `onToolStart`, `onToolFinish`, and
-`onFinish`. Tool completion includes the output and elapsed milliseconds;
-finish receives the complete `ProviderResponse`. Lifecycle callbacks are
-observers: `StreamEvent` remains the API for live model-output deltas.
+The hook contract:
+
+- `onRetry(attempt, delayMs, error)` — a retryable attempt (429/5xx/transport)
+  is about to back off. `attempt` is 1-based.
+- `onToolStart(step, call)` — a local tool call is starting.
+- `onToolFinish(step, call, output, durationMs)` — a local tool call finished;
+  `output` carries the result (`isError` for failures) and elapsed milliseconds.
+- `onStepFinish(step, result)` — a model turn completed (`StepResult` with its
+  content, usage, finish reason, and local tool results).
+- `onFinish(response)` — the whole run is done; receives the complete
+  `ProviderResponse` (steps and accumulated usage are populated).
+
+Lifecycle hooks are observers, not handlers: they cannot change the request,
+cancel, or inject output. `StreamEvent` (via `onEvent`) remains the API for
+live model-output deltas and cancellation. A full example lives in
+`examples/lifecycle_callbacks.nim`.
 
 `hostedTool("web_search")` runs on the provider (OpenAI Responses, Anthropic).
 Chat Completions skips it. Hosted calls and results stay on the assistant

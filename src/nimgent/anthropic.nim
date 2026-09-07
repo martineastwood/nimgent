@@ -5,6 +5,32 @@ import nimgent/[provider, stream]
 
 const defaultAnthropicEndpoint* = "https://api.anthropic.com/v1/messages"
 
+proc anthropicEfforts*(model: string): seq[string] =
+  ## Explicit known families; unknown models retain manual thinking support.
+  let m = model.toLowerAscii
+  for family in ["claude-sonnet-4-6", "claude-opus-4-6"]:
+    if m == family or m.startsWith(family & "-"):
+      return @["low", "medium", "high", "max"]
+  for family in ["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5",
+                 "claude-sonnet-5", "claude-fable-5"]:
+    if m == family or m.startsWith(family & "-"):
+      return @["low", "medium", "high", "xhigh", "max"]
+
+proc anthropicThinkingOptions*(model, level: string): JsonNode =
+  let efforts = anthropicEfforts(model)
+  if efforts.len == 0: return thinkingOptions("anthropic", level)
+  if level.len == 0: return newJObject()
+  if level == "none":
+    if model.toLowerAscii.startsWith("claude-fable-5"):
+      raise newException(ValueError, "this model requires thinking; choose low or higher")
+    return %*{"thinking": {"type": "disabled"}}
+  let effort = case level
+    of "minimal": "low"
+    of "xhigh": (if "xhigh" in efforts: "xhigh" else: "max")
+    else: level
+  %*{"thinking": {"type": "adaptive", "display": "summarized"},
+    "output_config": {"effort": effort}}
+
 type
   AnthropicProvider* = ref object of Provider
     apiKey: string
@@ -43,6 +69,10 @@ proc encodeBlock(part: ContentBlock): JsonNode =
   of ckText:
     %*{"type": "text", "text": part.text}
   of ckThinking:
+    # Responses/OpenRouter store JSON metadata here; only native opaque
+    # Anthropic signatures can be replayed through the Messages API.
+    if part.signature.len == 0 or part.signature.strip.startsWith("[") or
+        part.signature.strip.startsWith("{"): return nil
     %*{"type": "thinking", "thinking": part.thinking, "signature": part.signature}
   of ckToolUse:
     if part.hosted.len > 0:
@@ -177,7 +207,8 @@ proc buildAnthropicBody*(request: ProviderRequest): JsonNode =
       chunks.add %*{"type": "text", "text": s}
     result["system"] = chunks
   for message in request.messages:
-    result["messages"].add encodeMessage(message)
+    let encoded = encodeMessage(message)
+    if encoded["content"].len > 0: result["messages"].add encoded
   if request.tools.len > 0:
     result["tools"] = newJArray()
     for tool in request.tools:
@@ -320,12 +351,24 @@ method generateStreamAsync*(provider: AnthropicProvider,
       retryAfterMs = parseRetryAfter(response.headers.getOrDefault("Retry-After")))
   var message = %*{"content": [], "usage": {}}
   var args: seq[string]
-  let drive = await forEachSseAsync(response.bodyStream, addr watch,
-    request.wakeFd, onEvent, proc (data: JsonNode): SseAction =
-      handleAnthropicEvent(message, args, data, onEvent))
+  var drive: SseDrive
+  try:
+    drive = await forEachSseAsync(response.bodyStream, addr watch,
+      request.wakeFd, onEvent, proc (data: JsonNode): SseAction =
+        handleAnthropicEvent(message, args, data, onEvent))
+  except ProviderError:
+    raise
+  except CatchableError as e:
+    raiseProviderError("Anthropic stream failed: " & e.msg, retryable = true)
   if drive == sdClosed:
     raiseProviderError("Anthropic stream failed: connection closed mid-response",
       retryable = true)
+  if drive == sdCancelled:
+    # A cancelled argument fragment is not an executable tool call.
+    let content = message["content"]
+    if content.len > 0 and content[content.len - 1]{"type"}.getStr in
+        ["tool_use", "server_tool_use"]:
+      content.elems.setLen(content.len - 1)
   result = parseAnthropicOutput(message)
   if drive == sdCancelled:
     result.finishReason = frStop
