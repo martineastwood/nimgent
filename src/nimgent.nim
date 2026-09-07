@@ -3,6 +3,9 @@
 import nimgent/provider
 export provider
 
+import nimgent/provider_options
+export provider_options
+
 import nimgent/jsonschema
 export jsonschema
 
@@ -36,18 +39,18 @@ proc sleepAbort(ms: int, abort: AbortCheck): Future[void]
 
 proc embedManyAsync*(model: EmbeddingModel, values: seq[string],
                      options: JsonNode = nil, maxRetries = 2,
-                     abort: AbortCheck = nil): Future[EmbedManyResult] {.async.} =
+                     abort: AbortCheck = nil,
+                     providerOptions = ProviderOptions()): Future[EmbedManyResult] {.async.} =
   ## Embed strings in one provider batch, preserving input order.
   if values.len == 0: raiseProviderError("values must not be empty")
   if maxRetries < 0: raiseProviderError("maxRetries must be at least 0")
-  if not options.isNil and options.kind notin {JNull, JObject}:
-    raiseProviderError("options must be a JSON object")
+  let resolved = resolveOptions(options, providerOptions, model.provider.name)
   var attempt = 0
   while true:
     checkAbort(abort)
     try:
       let response = await model.provider.embedAsync(EmbeddingRequest(
-        model: model.id, values: values, options: options))
+        model: model.id, values: values, options: resolved))
       if response.embeddings.len != values.len:
         raiseProviderError("provider returned " & $response.embeddings.len &
           " embeddings for " & $values.len & " values")
@@ -60,19 +63,22 @@ proc embedManyAsync*(model: EmbeddingModel, values: seq[string],
 
 proc embedMany*(model: EmbeddingModel, values: seq[string],
                 options: JsonNode = nil, maxRetries = 2,
-                abort: AbortCheck = nil): EmbedManyResult =
-  waitFor embedManyAsync(model, values, options, maxRetries, abort)
+                abort: AbortCheck = nil,
+                providerOptions = ProviderOptions()): EmbedManyResult =
+  waitFor embedManyAsync(model, values, options, maxRetries, abort, providerOptions)
 
 proc embedAsync*(model: EmbeddingModel, value: string,
                  options: JsonNode = nil, maxRetries = 2,
-                 abort: AbortCheck = nil): Future[EmbedResult] {.async.} =
-  let response = await embedManyAsync(model, @[value], options, maxRetries, abort)
+                 abort: AbortCheck = nil,
+                 providerOptions = ProviderOptions()): Future[EmbedResult] {.async.} =
+  let response = await embedManyAsync(model, @[value], options, maxRetries, abort, providerOptions)
   return EmbedResult(value: value, embedding: response.embeddings[0],
     usage: response.usage)
 
 proc embed*(model: EmbeddingModel, value: string, options: JsonNode = nil,
-            maxRetries = 2, abort: AbortCheck = nil): EmbedResult =
-  waitFor embedAsync(model, value, options, maxRetries, abort)
+            maxRetries = 2, abort: AbortCheck = nil,
+            providerOptions = ProviderOptions()): EmbedResult =
+  waitFor embedAsync(model, value, options, maxRetries, abort, providerOptions)
 
 proc cosineSimilarity*(a, b: openArray[float]): float =
   ## Cosine similarity in [-1, 1]. Both vectors must be non-empty and equal-sized.
@@ -446,38 +452,45 @@ proc generateTextAsync*(
   maxRetries = 2,
   maxSteps = 1,
   abort: AbortCheck = nil,
-  callbacks = RunCallbacks()
+  callbacks = RunCallbacks(),
+  providerOptions = ProviderOptions()
 ): Future[ProviderResponse] {.async.} =
+  let resolved = resolveOptions(options, providerOptions, model.provider.name)
   return await generateTextAsync(model.provider, model.id, prompt, messages, system, tools,
-    maxTokens, sessionId, options, maxRetries, maxSteps, abort, callbacks)
+    maxTokens, sessionId, resolved, maxRetries, maxSteps, abort, callbacks)
 
 proc generateText*(model: LanguageModel, prompt = "",
                    messages: seq[Message] = @[], system = "",
                    tools: seq[Tool] = @[], maxTokens = 0, sessionId = "",
                    options: JsonNode = nil, maxRetries = 2, maxSteps = 1,
                    abort: AbortCheck = nil,
-                   callbacks = RunCallbacks()): ProviderResponse =
+                   callbacks = RunCallbacks(),
+                   providerOptions = ProviderOptions()): ProviderResponse =
   waitFor generateTextAsync(model, prompt, messages, system, tools, maxTokens,
-    sessionId, options, maxRetries, maxSteps, abort, callbacks)
+    sessionId, options, maxRetries, maxSteps, abort, callbacks, providerOptions)
 
 proc generateTextAsync*(
   provider: Provider,
   request: ProviderRequest,
   maxRetries = 2,
   abort: AbortCheck = nil,
-  callbacks = RunCallbacks()
+  callbacks = RunCallbacks(),
+  providerOptions = ProviderOptions()
 ): Future[ProviderResponse] {.async.} =
   ## Retry wrapper for a ready-made request. Does not run the tool loop
   ## (`maxSteps` 1); the caller owns tools.
   validateRun(@[], maxRetries, 1)
-  return await runLoop(provider, request, @[], maxRetries, 1, abort, nil,
+  var resolved = request
+  resolved.options = resolveOptions(request.options, providerOptions, provider.name)
+  return await runLoop(provider, resolved, @[], maxRetries, 1, abort, nil,
     callbacks)
 
 proc generateText*(provider: Provider, request: ProviderRequest,
                    maxRetries = 2,
                    abort: AbortCheck = nil,
-                   callbacks = RunCallbacks()): ProviderResponse =
-  waitFor generateTextAsync(provider, request, maxRetries, abort, callbacks)
+                   callbacks = RunCallbacks(),
+                   providerOptions = ProviderOptions()): ProviderResponse =
+  waitFor generateTextAsync(provider, request, maxRetries, abort, callbacks, providerOptions)
 
 proc streamTextAsync(
   provider: Provider,
@@ -517,20 +530,23 @@ proc streamTextAsync*(
   maxRetries = 2,
   maxSteps = 1,
   abort: AbortCheck = nil,
-  callbacks = RunCallbacks()
+  callbacks = RunCallbacks(),
+  providerOptions = ProviderOptions()
 ): Future[ProviderResponse] {.async.} =
+  let resolved = resolveOptions(options, providerOptions, model.provider.name)
   return await streamTextAsync(model.provider, model.id, onEvent, prompt,
     messages, system, tools,
-    maxTokens, sessionId, options, wakeFd, maxRetries, maxSteps, abort, callbacks)
+    maxTokens, sessionId, resolved, wakeFd, maxRetries, maxSteps, abort, callbacks)
 
 proc streamText*(model: LanguageModel, onEvent: StreamCallback, prompt = "",
                  messages: seq[Message] = @[], system = "",
                  tools: seq[Tool] = @[], maxTokens = 0, sessionId = "",
                  options: JsonNode = nil, wakeFd: cint = -1, maxRetries = 2,
                  maxSteps = 1, abort: AbortCheck = nil,
-                 callbacks = RunCallbacks()): ProviderResponse =
+                 callbacks = RunCallbacks(),
+                 providerOptions = ProviderOptions()): ProviderResponse =
   waitFor streamTextAsync(model, onEvent, prompt, messages, system, tools,
-    maxTokens, sessionId, options, wakeFd, maxRetries, maxSteps, abort, callbacks)
+    maxTokens, sessionId, options, wakeFd, maxRetries, maxSteps, abort, callbacks, providerOptions)
 
 proc streamTextAsync*(
   provider: Provider,
@@ -538,19 +554,23 @@ proc streamTextAsync*(
   onEvent: StreamCallback,
   maxRetries = 2,
   abort: AbortCheck = nil,
-  callbacks = RunCallbacks()
+  callbacks = RunCallbacks(),
+  providerOptions = ProviderOptions()
 ): Future[ProviderResponse] {.async.} =
   ## Streaming retry wrapper for a ready-made request. No tool loop.
   validateRun(@[], maxRetries, 1)
-  return await runLoop(provider, request, @[], maxRetries, 1, abort, onEvent,
+  var resolved = request
+  resolved.options = resolveOptions(request.options, providerOptions, provider.name)
+  return await runLoop(provider, resolved, @[], maxRetries, 1, abort, onEvent,
     callbacks)
 
 proc streamText*(provider: Provider, request: ProviderRequest,
                  onEvent: StreamCallback, maxRetries = 2,
                  abort: AbortCheck = nil,
-                 callbacks = RunCallbacks()): ProviderResponse =
+                 callbacks = RunCallbacks(),
+                 providerOptions = ProviderOptions()): ProviderResponse =
   waitFor streamTextAsync(provider, request, onEvent, maxRetries, abort,
-    callbacks)
+    callbacks, providerOptions)
 
 type
   ObjectMode* = enum
@@ -746,11 +766,13 @@ proc generateObjectAsync*(
   maxRetries = 2,
   maxRepairs = 0,
   mode = omAuto,
-  abort: AbortCheck = nil
+  abort: AbortCheck = nil,
+  providerOptions = ProviderOptions()
 ): Future[ObjectResult[JsonNode]] {.async.} =
+  let resolved = resolveOptions(options, providerOptions, model.provider.name)
   return await generateObjectAsync(model.provider, model.id, schema, prompt,
     messages, system,
-    name, description, maxTokens, sessionId, options, maxRetries, maxRepairs,
+    name, description, maxTokens, sessionId, resolved, maxRetries, maxRepairs,
     mode, abort)
 
 proc generateObject*(model: LanguageModel, schema: JsonNode, prompt = "",
@@ -758,10 +780,11 @@ proc generateObject*(model: LanguageModel, schema: JsonNode, prompt = "",
                      name = "object", description = "", maxTokens = 0,
                      sessionId = "", options: JsonNode = nil, maxRetries = 2,
                      maxRepairs = 0, mode = omAuto,
-                     abort: AbortCheck = nil): ObjectResult[JsonNode] =
+                     abort: AbortCheck = nil,
+                     providerOptions = ProviderOptions()): ObjectResult[JsonNode] =
   waitFor generateObjectAsync(model, schema, prompt, messages, system, name,
     description, maxTokens, sessionId, options, maxRetries, maxRepairs, mode,
-    abort)
+    abort, providerOptions)
 
 proc streamObjectAsync(
   provider: Provider,
@@ -837,11 +860,13 @@ proc streamObjectAsync*(
   mode = omAuto,
   abort: AbortCheck = nil,
   onPartial: PartialObjectCallback = nil,
-  onEvent: StreamCallback = nil
+  onEvent: StreamCallback = nil,
+  providerOptions = ProviderOptions()
 ): Future[ObjectResult[JsonNode]] {.async.} =
+  let resolved = resolveOptions(options, providerOptions, model.provider.name)
   return await streamObjectAsync(model.provider, model.id, schema, prompt,
     messages, system,
-    name, description, maxTokens, sessionId, options, wakeFd, maxRetries,
+    name, description, maxTokens, sessionId, resolved, wakeFd, maxRetries,
     maxRepairs, mode, abort, onPartial, onEvent)
 
 proc streamObject*(model: LanguageModel, schema: JsonNode, prompt = "",
@@ -851,10 +876,11 @@ proc streamObject*(model: LanguageModel, schema: JsonNode, prompt = "",
                    maxRetries = 2, maxRepairs = 0, mode = omAuto,
                    abort: AbortCheck = nil,
                    onPartial: PartialObjectCallback = nil,
-                   onEvent: StreamCallback = nil): ObjectResult[JsonNode] =
+                   onEvent: StreamCallback = nil,
+                   providerOptions = ProviderOptions()): ObjectResult[JsonNode] =
   waitFor streamObjectAsync(model, schema, prompt, messages, system, name,
     description, maxTokens, sessionId, options, wakeFd, maxRetries, maxRepairs,
-    mode, abort, onPartial, onEvent)
+    mode, abort, onPartial, onEvent, providerOptions)
 
 proc toObject*[T](r: ObjectResult[JsonNode]): ObjectResult[T] =
   ## Decode `r.value` as `T`. Validation already ran against the schema.
@@ -882,7 +908,8 @@ proc generateObjectAsync*[T](
   maxRetries = 2,
   maxRepairs = 0,
   mode = omAuto,
-  abort: AbortCheck = nil
+  abort: AbortCheck = nil,
+  providerOptions = ProviderOptions()
 ): Future[ObjectResult[T]] {.async.} =
   ## `generateObject` with `jsonSchema(T)`, then `toObject`.
   when T is JsonNode:
@@ -890,17 +917,18 @@ proc generateObjectAsync*[T](
   let nm = if name.len > 0: name else: $T
   return toObject[T](await generateObjectAsync(
     model, jsonSchema(T), prompt, messages, system, nm, description,
-    maxTokens, sessionId, options, maxRetries, maxRepairs, mode, abort))
+    maxTokens, sessionId, options, maxRetries, maxRepairs, mode, abort, providerOptions))
 
 proc generateObject*[T](model: LanguageModel, prompt = "",
                         messages: seq[Message] = @[], system = "", name = "",
                         description = "", maxTokens = 0, sessionId = "",
                         options: JsonNode = nil, maxRetries = 2,
                         maxRepairs = 0, mode = omAuto,
-                        abort: AbortCheck = nil): ObjectResult[T] =
+                        abort: AbortCheck = nil,
+                        providerOptions = ProviderOptions()): ObjectResult[T] =
   waitFor generateObjectAsync[T](model, prompt, messages, system, name,
     description, maxTokens, sessionId, options, maxRetries, maxRepairs, mode,
-    abort)
+    abort, providerOptions)
 
 proc streamObjectAsync*[T](
   model: LanguageModel,
@@ -918,7 +946,8 @@ proc streamObjectAsync*[T](
   mode = omAuto,
   abort: AbortCheck = nil,
   onPartial: PartialObjectCallback = nil,
-  onEvent: StreamCallback = nil
+  onEvent: StreamCallback = nil,
+  providerOptions = ProviderOptions()
 ): Future[ObjectResult[T]] {.async.} =
   when T is JsonNode:
     {.error: "use streamObject(..., schema=) for JsonNode; not streamObject[JsonNode]".}
@@ -926,7 +955,7 @@ proc streamObjectAsync*[T](
   return toObject[T](await streamObjectAsync(
     model, jsonSchema(T), prompt, messages, system, nm, description,
     maxTokens, sessionId, options, wakeFd, maxRetries, maxRepairs, mode, abort,
-    onPartial, onEvent))
+    onPartial, onEvent, providerOptions))
 
 proc streamObject*[T](model: LanguageModel, prompt = "",
                       messages: seq[Message] = @[], system = "", name = "",
@@ -935,7 +964,8 @@ proc streamObject*[T](model: LanguageModel, prompt = "",
                       maxRetries = 2, maxRepairs = 0, mode = omAuto,
                       abort: AbortCheck = nil,
                       onPartial: PartialObjectCallback = nil,
-                      onEvent: StreamCallback = nil): ObjectResult[T] =
+                      onEvent: StreamCallback = nil,
+                      providerOptions = ProviderOptions()): ObjectResult[T] =
   waitFor streamObjectAsync[T](model, prompt, messages, system, name,
     description, maxTokens, sessionId, options, wakeFd, maxRetries, maxRepairs,
-    mode, abort, onPartial, onEvent)
+    mode, abort, onPartial, onEvent, providerOptions)

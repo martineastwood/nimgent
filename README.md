@@ -71,6 +71,50 @@ Provider-specific knobs (thinking, routing, cache TTL) go in
 `ProviderRequest.options` / the `options` argument on `generateText` /
 `streamText`. Options must be a JSON object.
 
+### Typed provider options
+
+Pass scoped objects through `providerOptions` on text generation, streaming,
+structured output, and embedding calls (including their async variants):
+
+```nim
+import std/options
+import nimgent
+import nimgent/openai
+
+let answer = generateText(openAI(apiKey).model(modelId), prompt = "Explain this code",
+  providerOptions = ProviderOptions(
+    openai: OpenAIOptions(reasoningEffort: some("high"), store: some(false)),
+    anthropic: AnthropicOptions(thinking: some(AdaptiveThinking)),
+    openrouter: OpenRouterOptions(routing: some(OpenRouterRouting(
+      order: some(@["Anthropic"]), allowFallbacks: some(false))))))
+```
+
+Only the selected provider's namespace is used. OpenRouter and Hyper do not
+consume OpenAI settings despite sharing its transport implementation.
+`Option[T]` fields omit unset values; `some(false)`, `some(0)`, and empty
+sequences remain explicit. Model-specific supported values are checked by the API.
+
+The initial types cover OpenAI reasoning effort, parallel tool calls, storage,
+user identifiers and embedding dimensions; Anthropic thinking mode, budget and
+effort; and OpenRouter routing. `dimensions` is for embedding calls only.
+For manual Anthropic thinking, use `thinking: some(EnabledThinking)` with
+`budgetTokens: some(2048)` (at least 1024); adaptive/disabled thinking omit budgets.
+
+Each provider object has an `extra: JsonNode` escape hatch using native API field
+names. `ProviderOptions.extra` accepts additional namespaces, for example
+`%*{"hyper": {"temperature": 0.5}}`. Merge order is legacy `options`, namespaced
+`extra`, the provider object's `extra`, then its typed fields. Merges are shallow:
+a later nested object replaces the earlier object. Typed OpenAI reasoning effort
+also overrides an effort supplied through the native Responses `reasoning` object.
+Structured-output schema and forced-tool settings are applied after these options.
+Caller JSON is copied before adapter processing.
+
+Ready-made requests can use `generateText(provider, request, providerOptions = ...)`
+and `streamText(provider, request, callback, providerOptions = ...)`. Direct adapter
+calls continue to use raw `ProviderRequest.options`; `resolveOptions(raw, scoped,
+provider.name)` is available when building those requests yourself.
+Message/content-block options and explicit cache controls are deferred.
+
 For Claude, `anthropicThinkingOptions(modelId, "high")` selects adaptive thinking
 on known modern models and explicit budgets on legacy models. Supported efforts
 follow [Anthropic's model-specific effort levels](https://platform.claude.com/docs/en/build-with-claude/effort).

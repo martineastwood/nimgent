@@ -4,7 +4,7 @@
 ## OpenRouter, Hyper, and any `*/chat/completions` URL keep Chat Completions.
 ## Session_id, cache_control, and HTTP-Referer stay optional on this type.
 
-import std/[asyncdispatch, httpclient, json, net, strutils]
+import std/[options, asyncdispatch, httpclient, json, net, strutils]
 import nimgent/[provider, stream, openai_chat, openai_responses]
 export popLine, buildChatBody, openAiImagePart, buildResponsesBody,
   parseResponsesOutput, chatObjectOptions, chatForceToolOptions,
@@ -246,3 +246,22 @@ method generateStreamAsync*(provider: OpenAIProvider,
   assembleStream(acc, resp)
   result = resp
   discard onEvent(StreamEvent(kind: seFinished))
+
+
+type OpenAIOptions* = object
+  ## Optional request settings. `extra` uses native API field names.
+  reasoningEffort*: Option[string]
+  parallelToolCalls*: Option[bool]
+  store*: Option[bool]
+  user*: Option[string]
+  dimensions*: Option[int] ## Embedding requests only.
+  extra*: JsonNode
+
+proc toProviderJson*(value: OpenAIOptions): JsonNode =
+  result = newJObject()
+  mergeRequestOptions(result, value.extra)
+  if value.reasoningEffort.isSome: result["reasoning_effort"] = %value.reasoningEffort.get
+  if value.parallelToolCalls.isSome: result["parallel_tool_calls"] = %value.parallelToolCalls.get
+  if value.store.isSome: result["store"] = %value.store.get
+  if value.user.isSome: result["user"] = %value.user.get
+  if value.dimensions.isSome: result["dimensions"] = %value.dimensions.get

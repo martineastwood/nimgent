@@ -1367,3 +1367,114 @@ suite "wrapProvider":
       prompt = "x", maxRetries = 0)
     check r.value["ok"].getBool
     check p.last.options["response_format"]["type"].getStr == "json_schema"
+
+suite "typed provider options":
+  test "unset values, false, zero and namespace isolation":
+    check resolveOptions(nil, ProviderOptions(), "openai") == newJObject()
+    let scoped = ProviderOptions(
+      openai: OpenAIOptions(store: some(false), dimensions: some(0)),
+      anthropic: AnthropicOptions(thinking: some(AdaptiveThinking)),
+      openrouter: OpenRouterOptions(routing: some(OpenRouterRouting(
+        allowFallbacks: some(false), only: some(newSeq[string]())))))
+    check resolveOptions(nil, scoped, "openai") == %*{"store": false, "dimensions": 0}
+    check resolveOptions(nil, scoped, "anthropic") == %*{"thinking": {"type": "adaptive"}}
+    check resolveOptions(nil, scoped, "openrouter") ==
+      %*{"provider": {"allow_fallbacks": false, "only": []}}
+    check resolveOptions(nil, scoped, "hyper") == newJObject()
+
+  test "shallow precedence and caller JSON ownership":
+    let legacy = %*{"store": true, "metadata": {"old": "value"}}
+    let extra = %*{"store": true, "metadata": {"new": "value"}}
+    let scoped = ProviderOptions(openai: OpenAIOptions(store: some(false), extra: extra),
+      extra: %*{"openai": {"user": "test"}, "hyper": {"temperature": 0}})
+    let resolved = resolveOptions(legacy, scoped, "openai")
+    check resolved == %*{"store": false, "metadata": {"new": "value"}, "user": "test"}
+    resolved["metadata"]["new"] = %"changed"
+    check extra["metadata"]["new"].getStr == "value"
+    check legacy["store"].getBool
+    check resolveOptions(nil, scoped, "hyper") == %*{"temperature": 0}
+    expect ProviderError:
+      discard resolveOptions(nil, ProviderOptions(openai: OpenAIOptions(extra: %*[1])), "openai")
+    expect ProviderError:
+      discard resolveOptions(nil, ProviderOptions(extra: %*[1]), "openai")
+    expect ProviderError:
+      discard resolveOptions(nil, ProviderOptions(extra: %*{"openai": 1}), "openai")
+
+  test "reasoning serializes for both OpenAI APIs":
+    let opts = resolveOptions(nil, ProviderOptions(openai: OpenAIOptions(
+      reasoningEffort: some("high"), parallelToolCalls: some(false))), "openai")
+    let req = ProviderRequest(model: "test", messages: @[userMessage("hello")], options: opts)
+    let responses = buildResponsesBody(req, false)
+    check responses["reasoning"]["effort"].getStr == "high"
+    check "reasoning_effort" notin responses
+    check not responses["parallel_tool_calls"].getBool
+    let chat = buildChatBody(req, false)
+    check chat["reasoning_effort"].getStr == "high"
+
+  test "Anthropic thinking validates and budgets once":
+    let opts = resolveOptions(nil, ProviderOptions(anthropic: AnthropicOptions(
+      thinking: some(EnabledThinking), budgetTokens: some(2048))), "anthropic")
+    let req = ProviderRequest(model: "test", maxTokens: 100, options: opts)
+    check buildAnthropicBody(req)["max_tokens"].getInt == 2148
+    check buildAnthropicBody(req)["max_tokens"].getInt == 2148
+    for value in [AnthropicOptions(thinking: some(EnabledThinking)),
+                  AnthropicOptions(budgetTokens: some(2048)),
+                  AnthropicOptions(thinking: some(AdaptiveThinking), budgetTokens: some(2048))]:
+      expect ProviderError:
+        discard value.toProviderJson
+
+  test "sync, async, streaming and ready-made request forwarding":
+    let model = scriptedModel(@[textResponse("ok")])
+    model.provider.name = "openai"
+    let p = FakeProvider(model.provider)
+    let scoped = ProviderOptions(openai: OpenAIOptions(store: some(false)))
+    let onEvent: StreamCallback = proc (ev: StreamEvent): bool = true
+    discard generateText(model, prompt = "hi", providerOptions = scoped)
+    discard waitFor generateTextAsync(model, prompt = "hi", providerOptions = scoped)
+    discard streamText(model, onEvent, prompt = "hi", providerOptions = scoped)
+    discard waitFor streamTextAsync(model, onEvent, prompt = "hi", providerOptions = scoped)
+    let req = ProviderRequest(model: "test", messages: @[userMessage("hi")])
+    discard generateText(p, req, providerOptions = scoped)
+    discard streamText(p, req, onEvent, providerOptions = scoped)
+    check p.requests.len == 6
+    for request in p.requests: check request.options == %*{"store": false}
+
+  test "embedding facade forwards typed options":
+    withFixture("openai_embeddings_fixture.py", proc (port: int) =
+      let model = openAI("test", endpoint = "http://127.0.0.1:" & $port & "/v1/responses").embeddingModel("text-embedding-3-small")
+      let response = embedMany(model, @["alpha", "beta"],
+        providerOptions = ProviderOptions(openai: OpenAIOptions(dimensions: some(2))))
+      check response.embeddings == @[@[1.0, 0.0], @[0.0, 1.0]]
+      check embed(model, "single", providerOptions = ProviderOptions()).embedding == @[0.5, 0.5])
+
+  test "typed effort overrides native Responses effort without mutation":
+    let legacy = %*{"reasoning": {"effort": "low", "summary": "auto"}}
+    let opts = resolveOptions(legacy, ProviderOptions(openai: OpenAIOptions(
+      reasoningEffort: some("high"))), "openai")
+    let body = buildResponsesBody(ProviderRequest(model: "test", options: opts), false)
+    check body["reasoning"] == %*{"effort": "high", "summary": "auto"}
+    check legacy["reasoning"]["effort"].getStr == "low"
+
+  test "structured output wins over provider extras across object facades":
+    type Answer = object
+      ok: bool
+    let p = ChatObjectScript(name: "openai", replies: @["{\"ok\":true}"])
+    let model = p.model("test")
+    let schema = jsonSchema(Answer)
+    let scoped = ProviderOptions(openai: OpenAIOptions(store: some(false),
+      extra: %*{"response_format": {"type": "text"}, "tool_choice": "none"}))
+    discard generateObject(model, schema, prompt = "x", providerOptions = scoped)
+    check p.last.options["response_format"]["type"].getStr == "json_schema"
+    discard generateObject[Answer](model, prompt = "x", providerOptions = scoped)
+    check not p.last.options["store"].getBool
+    discard waitFor generateObjectAsync[Answer](model, prompt = "x", providerOptions = scoped)
+    check not p.last.options["store"].getBool
+    discard streamObject(model, schema, prompt = "x", providerOptions = scoped)
+    check p.last.options["response_format"]["type"].getStr == "json_schema"
+    discard streamObject[Answer](model, prompt = "x", providerOptions = scoped)
+    check not p.last.options["store"].getBool
+    discard waitFor streamObjectAsync[Answer](model, prompt = "x", providerOptions = scoped)
+    check not p.last.options["store"].getBool
+    p.toolValue = %*{"ok": true}
+    discard generateObject(model, schema, prompt = "x", mode = omTool, providerOptions = scoped)
+    check p.last.options["tool_choice"]["function"]["name"].getStr == "submit"
