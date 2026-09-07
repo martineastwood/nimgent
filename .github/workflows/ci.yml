@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        nim-version: ["stable", "2.0.0"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenSSL headers
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ matrix.nim-version }}
+          use-nightlies: false
+
+      - name: Run tests
+        run: nimble test -y
