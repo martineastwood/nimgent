@@ -96,9 +96,29 @@ if model.provider.supports(pcStreaming):
 For deterministic application tests, `import nimgent/testing` and use
 `scriptedModel(@[textResponse("hello")])`.
 
+## Embeddings
+
+OpenAI and OpenRouter expose text embedding models with AI-SDK-style `embed`
+and `embedMany` helpers. Both have async variants, retry transient failures,
+and return input-token usage. Provider-specific settings such as reduced
+dimensions go in `options`.
+
+```nim
+let embeddingModel = openAI(getEnv("OPENAI_API_KEY")).embeddingModel(
+  "text-embedding-3-small")
+
+let result = embedMany(
+  embeddingModel,
+  @["sunny day at the beach", "rainy afternoon in the city"],
+  options = %*{"dimensions": 512})
+
+echo result.usage.tokens
+echo cosineSimilarity(result.embeddings[0], result.embeddings[1])
+```
+
 ## Wrapping providers
 
-`wrapProvider` runs every call through optional request and response hooks —
+`wrapProvider` runs text-generation calls through optional request and response hooks —
 inject defaults, drop images, redact, log usage — without touching the
 adapters. Capabilities and structured-output support forward.
 
@@ -111,7 +131,7 @@ let wrapped = wrapProvider(model.provider,
 ```
 
 `mapResponse(req, resp)` edits the response in place. Streaming calls pass
-through the same hooks.
+through the same hooks; embedding calls forward unchanged.
 
 ## Retries, cancel, tools
 

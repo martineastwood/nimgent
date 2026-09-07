@@ -56,6 +56,29 @@ suite "provider types":
       cacheReadTokens: 900, cacheReported: true)
     check "CH90.0%" in formatUsageLabels(anthropic)
 
+suite "embeddings":
+  test "OpenAI embeds batches in input order and forwards options":
+    withFixture("openai_embeddings_fixture.py") do (port: int):
+      let provider = openAI("fixture-key",
+        "http://127.0.0.1:" & $port & "/v1/responses", timeoutSeconds = 5)
+      check provider.supports(pcEmbeddings)
+      let model = provider.embeddingModel("text-embedding-3-small")
+      let batch = embedMany(model, @["alpha", "beta"],
+        options = %*{"dimensions": 2})
+      check batch.values == @["alpha", "beta"]
+      check batch.embeddings == @[@[1.0, 0.0], @[0.0, 1.0]]
+      check batch.usage.tokens == 3
+      let one = embed(model, "single")
+      check one.value == "single"
+      check one.embedding == @[0.5, 0.5]
+      check one.usage.tokens == 1
+
+  test "cosine similarity validates and compares vectors":
+    check cosineSimilarity(@[1.0, 0.0], @[1.0, 0.0]) == 1.0
+    check cosineSimilarity(@[1.0, 0.0], @[0.0, 1.0]) == 0.0
+    expect ValueError:
+      discard cosineSimilarity(@[1.0], @[1.0, 2.0])
+
 suite "OpenRouter provider":
   test "stream line buffer splits on newlines":
     var buf = "data: one\ndata: two\npartial"

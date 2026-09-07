@@ -96,6 +96,7 @@ type
     pcImages
     pcFiles
     pcHostedTools
+    pcEmbeddings
 
   Usage* = object
     inputTokens*: int
@@ -184,6 +185,24 @@ type
     provider*: Provider
     id*: string
 
+  EmbeddingModel* = object
+    provider*: Provider
+    id*: string
+
+  EmbeddingUsage* = object
+    tokens*: int
+
+  EmbeddingRequest* = object
+    model*: string
+    values*: seq[string]
+    ## Escape hatch for provider-specific embedding settings (dimensions, user, ...).
+    options*: JsonNode
+
+  EmbeddingResponse* = object
+    model*: string
+    embeddings*: seq[seq[float]]
+    usage*: EmbeddingUsage
+
   StreamEventKind* = enum
     seTextDelta
     seThinkingDelta
@@ -221,6 +240,18 @@ proc model*(provider: Provider, id: string): LanguageModel =
   if provider.isNil: raise newException(ProviderError, "provider must not be nil")
   if id.len == 0: raise newException(ProviderError, "model id must not be empty")
   LanguageModel(provider: provider, id: id)
+
+proc embeddingModel*(provider: Provider, id: string): EmbeddingModel =
+  if provider.isNil: raise newException(ProviderError, "provider must not be nil")
+  if id.len == 0: raise newException(ProviderError, "model id must not be empty")
+  EmbeddingModel(provider: provider, id: id)
+
+method embedAsync*(p: Provider, request: EmbeddingRequest): Future[EmbeddingResponse]
+    {.base, async.} =
+  raise newException(CatchableError, "provider does not implement embeddings")
+
+proc embed*(p: Provider, request: EmbeddingRequest): EmbeddingResponse =
+  waitFor p.embedAsync(request)
 
 proc supports*(provider: Provider, capability: ProviderCapability): bool =
   not provider.isNil and capability in provider.capabilities
@@ -648,6 +679,11 @@ method generateStreamAsync*(p: WrapProvider, request: ProviderRequest,
   let mapped = if p.mapRequest.isNil: request else: p.mapRequest(request)
   result = await p.inner.generateStreamAsync(mapped, onEvent)
   if not p.mapResponse.isNil: p.mapResponse(mapped, result)
+
+method embedAsync*(p: WrapProvider,
+                   request: EmbeddingRequest): Future[EmbeddingResponse] {.async.} =
+  ## Text-generation mappers intentionally do not alter embedding requests.
+  return await p.inner.embedAsync(request)
 
 method nativeObjectOptions*(p: WrapProvider, name, description: string,
                             schema: JsonNode): JsonNode =

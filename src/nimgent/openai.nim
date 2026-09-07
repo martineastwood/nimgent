@@ -32,6 +32,7 @@ type
     displayName*: string
     ## True: POST /v1/responses. False: Chat Completions (OpenRouter / compat).
     useResponses*: bool
+    embeddingsEndpoint*: string
 
   OpenRouterProvider* = OpenAIProvider
   HyperProvider* = OpenAIProvider
@@ -40,9 +41,9 @@ proc initOpenAIProvider(name, displayName, apiKey, endpoint: string,
                       timeoutSeconds: int, siteUrl = "", siteName = "",
                       includeSessionId = false, applyCache = false,
                       maxTokensField = "max_completion_tokens",
-                      useResponses = false): OpenAIProvider =
+                      useResponses = false, embeddingsEndpoint = ""): OpenAIProvider =
   let capabilities = {pcStreaming, pcTools, pcStructuredOutput, pcImages, pcFiles}
-  OpenAIProvider(name: name, capabilities:
+  result = OpenAIProvider(name: name, capabilities:
                    if useResponses: capabilities + {pcHostedTools}
                    else: capabilities,
                  displayName: displayName, apiKey: apiKey,
@@ -50,6 +51,11 @@ proc initOpenAIProvider(name, displayName, apiKey, endpoint: string,
                  siteUrl: siteUrl, siteName: siteName,
                  includeSessionId: includeSessionId, applyCache: applyCache,
                  maxTokensField: maxTokensField, useResponses: useResponses)
+  result.embeddingsEndpoint = if embeddingsEndpoint.len > 0: embeddingsEndpoint
+    elif endpoint.endsWith("/responses"): endpoint[0 ..< endpoint.len - "/responses".len] & "/embeddings"
+    elif endpoint.endsWith("/chat/completions"): endpoint[0 ..< endpoint.len - "/chat/completions".len] & "/embeddings"
+    else: endpoint & "/embeddings"
+  if name != "hyper": result.capabilities.incl pcEmbeddings
 
 proc openAI*(apiKey: string, endpoint = "",
              timeoutSeconds = 300): OpenAIProvider =
@@ -147,6 +153,45 @@ method generateAsync*(provider: OpenAIProvider,
   if provider.useResponses:
     return parseResponsesOutput(data, provider.label)
   result = parseChatOutput(data, provider.label)
+
+method embedAsync*(provider: OpenAIProvider,
+                   request: EmbeddingRequest): Future[EmbeddingResponse] {.async.} =
+  provider.ensureApiKey()
+  var body = if request.options.isNil: newJObject() else: copy(request.options)
+  if body.kind != JObject:
+    raiseProviderError("embedding options must be a JSON object")
+  body["model"] = %request.model
+  body["input"] = %request.values
+  body["encoding_format"] = %"float"
+  let client = newAsyncHttpClient(
+    sslContext = newContext(verifyMode = CVerifyPeer),
+    headers = provider.makeHeaders())
+  client.timeout = provider.timeoutSeconds * 1000
+  defer: client.close()
+  var response: AsyncResponse
+  try:
+    response = await client.request(provider.embeddingsEndpoint, HttpPost, $body)
+  except CatchableError as e:
+    raiseProviderError(provider.label & " embedding request failed: " & e.msg,
+      retryable = true)
+  let raw = await drainBodyStreamAsync(response.bodyStream)
+  if response.code.int >= 400:
+    provider.raiseApiError(response.code.int, raw, response.headers)
+  var data: JsonNode
+  try:
+    data = parseJson(raw)
+    result.model = data{"model"}.getStr(request.model)
+    result.embeddings.setLen(request.values.len)
+    for item in data["data"]:
+      let index = item["index"].getInt
+      if index < 0 or index >= result.embeddings.len:
+        raise newException(ValueError, "embedding index is out of range")
+      for value in item["embedding"]:
+        result.embeddings[index].add value.getFloat
+    result.usage.tokens = data{"usage", "prompt_tokens"}.getInt(
+      data{"usage", "total_tokens"}.getInt)
+  except CatchableError as e:
+    raiseProviderError(provider.label & " returned invalid embedding JSON: " & e.msg)
 
 method generateStreamAsync*(provider: OpenAIProvider,
                             request: ProviderRequest,
