@@ -56,13 +56,13 @@ proc sliceJsonValue(s: string): string =
   ""
 
 proc stripFence(s: string): string =
-  result = s.strip
+  result = strutils.strip(s)
   if not result.startsWith("```"): return
   let nl = result.find('\n')
   if nl < 0: return
   result = result[nl + 1 .. ^1]
   if result.endsWith("```"):
-    result = result[0 .. ^4].strip
+    result = strutils.strip(result[0 .. ^4])
 
 proc extractJson*(s: string): JsonNode =
   ## A complete JSON value, or the first object/array after leading prose.
