@@ -826,6 +826,26 @@ type GenericBinding = object
 proc schemaFromType(t: NimNode, bindings: seq[GenericBinding]): JsonNode
 proc schemaFromType(t: NimNode): JsonNode = schemaFromType(t, @[])
 
+proc genericParamName(n: NimNode): string =
+  var param = n
+  if param.kind == nnkIdentDefs and param.len > 0:
+    param = param[0]
+  if param.kind == nnkPragmaExpr and param.len > 0:
+    param = param[0]
+  if param.kind == nnkPostfix and param.len > 1:
+    param = param[1]
+  if param.kind in {nnkSym, nnkIdent}:
+    return param.strVal
+  typeLeafName(param)
+
+proc genericParamNames(params: NimNode): seq[string] =
+  for param in params:
+    if param.kind == nnkIdentDefs:
+      for i in 0 ..< param.len - 2:
+        result.add genericParamName(param[i])
+    else:
+      result.add genericParamName(param)
+
 proc substituteType(n: NimNode, bindings: seq[GenericBinding]): NimNode =
   if n.isNil: return n
   if n.kind in {nnkSym, nnkIdent}:
@@ -1057,8 +1077,9 @@ proc schemaFromType(t: NimNode, bindings: seq[GenericBinding]): JsonNode =
         if genericDef.kind == nnkTypeDef and genericDef.len > 1 and
             genericDef[1].kind == nnkGenericParams:
           let params = genericDef[1]
-          for i in 0 ..< min(params.len, inst.len - 1):
-            activeBindings.add GenericBinding(name: $params[i], value: inst[i + 1])
+          let names = genericParamNames(params)
+          for i in 0 ..< min(names.len, inst.len - 1):
+            activeBindings.add GenericBinding(name: names[i], value: inst[i + 1])
       except CatchableError:
         discard
     try:
@@ -1082,9 +1103,10 @@ proc schemaFromType(t: NimNode, bindings: seq[GenericBinding]): JsonNode =
             if genericDef.kind == nnkTypeDef and genericDef.len > 1 and
                 genericDef[1].kind == nnkGenericParams:
               let params = genericDef[1]
+              let names = genericParamNames(params)
               baseBindings = @[]
-              for i in 0 ..< min(params.len, base.len - 1):
-                baseBindings.add GenericBinding(name: $params[i],
+              for i in 0 ..< min(names.len, base.len - 1):
+                baseBindings.add GenericBinding(name: names[i],
                   value: substituteType(base[i + 1], activeBindings))
           except CatchableError:
             discard
