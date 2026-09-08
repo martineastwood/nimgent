@@ -15,8 +15,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install OpenSSL headers
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev libpcre3
 
       - uses: jiro4989/setup-nim-action@v2
         with:
