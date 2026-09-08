@@ -359,7 +359,9 @@ AI-SDK-style “run my callbacks until the model is done.”
 it. Truncated JSON is rejected by default; pass `truncation = otRepair` to
 accept locally closed JSON (`fixJson`). OpenAI (Responses and Chat
 Completions), OpenRouter, Hyper, and Anthropic get native structured-output
-knobs automatically; anything else is prompt + extract (including ``` fences).
+knobs automatically when the schema fits the provider's strict dialect;
+`omAuto` otherwise falls back to prompt + extract (including ``` fences).
+`omNative` reports incompatible schemas locally instead of sending a request.
 The result's `locallyRepaired` flag reports when local JSON completion was used.
 `result.attempts` counts model turns (including any repair turns), while
 `result.repairs` counts only the latter.

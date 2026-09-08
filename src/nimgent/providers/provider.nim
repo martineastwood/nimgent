@@ -597,6 +597,11 @@ method nativeObjectOptions*(p: Provider, name, description: string,
   ## Provider-body knobs for native structured output. nil means none.
   nil
 
+method nativeObjectSchemaIssues*(p: Provider, schema: JsonNode): seq[string]
+    {.base.} =
+  ## Provider-specific native-schema restrictions. Empty means compatible.
+  @[]
+
 method forceToolOptions*(p: Provider, toolName: string): JsonNode {.base.} =
   nil
 
@@ -726,6 +731,10 @@ method embedAsync*(p: WrapProvider,
 method nativeObjectOptions*(p: WrapProvider, name, description: string,
                             schema: JsonNode): JsonNode =
   p.inner.nativeObjectOptions(name, description, schema)
+
+method nativeObjectSchemaIssues*(p: WrapProvider,
+                                 schema: JsonNode): seq[string] =
+  p.inner.nativeObjectSchemaIssues(schema)
 
 method forceToolOptions*(p: WrapProvider, toolName: string): JsonNode =
   p.inner.forceToolOptions(toolName)

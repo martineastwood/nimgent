@@ -1004,6 +1004,10 @@ type
     name: string
     notes {.jsonOptional.}: string
 
+  NestedOptionalRecipe = object
+    ingredients: Option[seq[string]]
+    details: Option[OptionalRecipe]
+
   OnlyOptionalRecipe = object
     notes {.jsonOptional.}: string
 
@@ -1085,6 +1089,10 @@ method nativeObjectOptions(p: ChatObjectScript, name, description: string,
                            schema: JsonNode): JsonNode =
   chatObjectOptions(name, description, schema)
 
+method nativeObjectSchemaIssues(p: ChatObjectScript,
+                                schema: JsonNode): seq[string] =
+  validateOpenAiStrictSchema(schema)
+
 method forceToolOptions(p: ChatObjectScript, toolName: string): JsonNode =
   chatForceToolOptions(toolName)
 
@@ -1157,6 +1165,12 @@ suite "json schema":
     check "vegetarian" in required
     check schemaName("Recipe Title") == "Recipe_Title"
     check schemaName("2bad") == "n2bad"
+    check schemaName(repeat('x', 80)).len == 64
+    let nestedOptions = jsonSchema(NestedOptionalRecipe)
+    check nestedOptions["properties"]["ingredients"]["type"] ==
+      %*["array", "null"]
+    check nestedOptions["properties"]["details"]["type"] ==
+      %*["object", "null"]
     let wire = prepareWireSchema(%*{"type": "object", "properties": {
       "x": {"type": "string"}}})
     check wire["additionalProperties"].getBool == false
@@ -1263,6 +1277,8 @@ suite "json schema":
     check validateJsonSchema(numeric).len == 0
     check validateSchema(%*1.5, numeric).len == 0
     check "exclusiveMaximum" in validateSchema(%*2, numeric).join(" ")
+    check "multiple" in validateSchema(%*0.0000000001,
+      %*{"type": "number", "multipleOf": 1}).join(" ")
 
     let p = ObjectScript(replies: @["""{"tag":"nim","values":[1,2]}"""])
     let r = generateObject(p.model("m"), schema, prompt = "x",
@@ -1329,6 +1345,40 @@ suite "generateObject":
     check r.value == %*{"ok": true, "extra": 1}
     check r.value["extra"].getInt == 1
     check r.repairs == 0
+    check "additionalProperties" notin p.last.system[0]
+
+  test "omAuto falls back when a schema is incompatible with native strict output":
+    let optional = ChatObjectScript(replies: @["""{"name":"soup"}"""])
+    let optionalResult = generateObject[OptionalRecipe](optional.model("m"),
+      prompt = "cook", maxRetries = 0)
+    check optionalResult.value.name == "soup"
+    check optionalResult.source == osText
+    check "response_format" notin optional.last.options
+
+    let scalar = ChatObjectScript(replies: @["42"])
+    check generateObject[int](scalar.model("m"), prompt = "number",
+      maxRetries = 0).value == 42
+    check "response_format" notin scalar.last.options
+
+    let variant = ChatObjectScript(replies: @[
+      """{"kind":"low","mild":"gentle"}"""])
+    check generateObject[VariantRecipe](variant.model("m"), prompt = "x",
+      maxRetries = 0).value.kind == low
+    check "response_format" notin variant.last.options
+
+  test "omNative rejects incompatible strict schemas before calling provider":
+    let p = ChatObjectScript()
+    expect ObjectError:
+      discard generateObject[OptionalRecipe](p.model("m"), prompt = "x",
+        mode = omNative, maxRetries = 0)
+    check p.calls == 0
+
+  test "tool mode rejects scalar parameter schemas locally":
+    let p = ChatObjectScript()
+    expect ObjectError:
+      discard generateObject[int](p.model("m"), prompt = "x", mode = omTool,
+        maxRetries = 0)
+    check p.calls == 0
 
   test "closes truncated JSON without a model repair":
     let p = ObjectScript(replies: @["{\"ok\": tru"])
@@ -1690,6 +1740,7 @@ suite "wrapProvider":
     check w.supports(pcHostedTools)
     check w.nativeObjectOptions("o", "", %*{"type": "object"})["text"]["format"][
       "type"].getStr == "json_schema"
+    check w.nativeObjectSchemaIssues(%*{"type": "integer"}).len > 0
     check w.forceToolOptions("submit")["tool_choice"]["name"].getStr == "submit"
     check wrapProvider(inner, name = "gate").name == "gate"
     expect ProviderError:

@@ -6,6 +6,7 @@
 
 import std/[options, asyncdispatch, httpclient, json, net, strutils]
 import nimgent/providers/[provider, stream, http_metadata, openai_chat, openai_responses]
+import nimgent/structured_output/jsonschema_validate
 export popLine, buildChatBody, openAiImagePart, buildResponsesBody,
   parseResponsesOutput, chatObjectOptions, chatForceToolOptions,
   responsesObjectOptions, responsesForceToolOptions
@@ -121,6 +122,10 @@ method nativeObjectOptions*(provider: OpenAIProvider, name, description: string,
     responsesObjectOptions(name, description, schema)
   else:
     chatObjectOptions(name, description, schema)
+
+method nativeObjectSchemaIssues*(provider: OpenAIProvider,
+                                 schema: JsonNode): seq[string] =
+  validateOpenAiStrictSchema(schema)
 
 method forceToolOptions*(provider: OpenAIProvider, toolName: string): JsonNode =
   if provider.useResponses:

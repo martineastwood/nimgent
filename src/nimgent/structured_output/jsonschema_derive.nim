@@ -17,13 +17,14 @@ template jsonPattern*(value: static[string]) {.pragma.}
 template jsonOptional*() {.pragma.}
 
 proc schemaName*(s: string): string =
-  ## OpenAI structured-output names: `[a-zA-Z0-9_-]+`.
+  ## OpenAI structured-output names: at most 64 `[a-zA-Z0-9_-]` characters.
   if s.len == 0: return "object"
   for c in s:
     if c.isAlphaNumeric or c in {'_', '-'}: result.add c
     else: result.add '_'
   if result[0] notin {'A'..'Z', 'a'..'z'}:
     result = "n" & result
+  if result.len > 64: result.setLen(64)
 
 proc typeLeafName(n: NimNode): string =
   case n.kind
@@ -41,6 +42,18 @@ type GenericBinding = object
 
 proc schemaFromType(t: NimNode, bindings: seq[GenericBinding]): JsonNode
 proc schemaFromType(t: NimNode): JsonNode = schemaFromType(t, @[])
+
+proc fixedArraySchema(itemSchema: JsonNode, bound: NimNode): JsonNode =
+  result = %*{"type": "array", "items": itemSchema}
+  var count = -1'i64
+  if bound.kind == nnkIntLit:
+    count = bound.intVal
+  elif bound.kind == nnkInfix and $bound[0] == ".." and bound.len >= 3 and
+      bound[1].kind == nnkIntLit and bound[2].kind == nnkIntLit:
+    count = bound[2].intVal - bound[1].intVal + 1
+  if count >= 0:
+    result["minItems"] = %count
+    result["maxItems"] = %count
 
 proc genericParamName(n: NimNode): string =
   var param = n
@@ -268,17 +281,7 @@ proc schemaFromType(t: NimNode, bindings: seq[GenericBinding]): JsonNode =
     if ctor in ["seq", "openArray"]:
       return %*{"type": "array", "items": schemaFromType(inst[1])}
     if ctor == "array" and inst.len >= 3:
-      result = %*{"type": "array", "items": schemaFromType(inst[^1])}
-      let bound = inst[1]
-      if bound.kind == nnkIntLit:
-        result["minItems"] = %bound.intVal
-        result["maxItems"] = %bound.intVal
-      elif bound.kind == nnkInfix and $bound[0] == ".." and bound.len >= 3 and
-          bound[1].kind == nnkIntLit and bound[2].kind == nnkIntLit:
-        let count = bound[2].intVal - bound[1].intVal + 1
-        result["minItems"] = %count
-        result["maxItems"] = %count
-      return
+      return fixedArraySchema(schemaFromType(inst[^1]), inst[1])
     if ctor in ["set", "HashSet", "OrderedSet"] and inst.len >= 2:
       return %*{"type": "array", "items": schemaFromType(inst[1]),
         "uniqueItems": true}
@@ -286,11 +289,19 @@ proc schemaFromType(t: NimNode, bindings: seq[GenericBinding]): JsonNode =
       return %*{"type": "object", "additionalProperties": schemaFromType(inst[2])}
     if ctor == "Option":
       result = schemaFromType(inst[1])
-      var types = newJArray()
-      if "type" in result and result["type"].kind == JString:
-        types.add result["type"]
-        types.add %"null"
-        result["type"] = types
+      if "type" in result:
+        case result["type"].kind
+        of JString:
+          result["type"] = %*[result["type"], "null"]
+        of JArray:
+          var hasNull = false
+          for item in result["type"]:
+            if item.kind == JString and item.getStr == "null": hasNull = true
+          if not hasNull: result["type"].add %"null"
+        else:
+          result = %*{"anyOf": [result, {"type": "null"}]}
+      else:
+        result = %*{"anyOf": [result, {"type": "null"}]}
       return
   let coreType = if inst.kind == nnkBracketExpr: inst[0] else: inst
   let core = unwrapType(coreType)
@@ -298,14 +309,7 @@ proc schemaFromType(t: NimNode, bindings: seq[GenericBinding]): JsonNode =
   if impl.kind == nnkBracketExpr and impl.len >= 3:
     let ctor = typeLeafName(impl[0])
     if ctor == "array":
-      result = %*{"type": "array", "items": schemaFromType(impl[^1])}
-      let bound = impl[1]
-      if bound.kind == nnkInfix and $bound[0] == ".." and bound.len >= 3 and
-          bound[1].kind == nnkIntLit and bound[2].kind == nnkIntLit:
-        let count = bound[2].intVal - bound[1].intVal + 1
-        result["minItems"] = %count
-        result["maxItems"] = %count
-      return
+      return fixedArraySchema(schemaFromType(impl[^1]), impl[1])
   case impl.kind
   of nnkObjectTy:
     result = %*{

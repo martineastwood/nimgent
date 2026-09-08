@@ -250,6 +250,45 @@ proc typeNames(schema: JsonNode): seq[string] =
     for x in t:
       if x.kind == JString: result.add x.getStr
 
+proc validateOpenAiStrictSchema*(schema: JsonNode): seq[string] =
+  ## Restrictions imposed by OpenAI's strict structured-output dialect.
+  if schema.isNil or schema.kind != JObject:
+    return @["$: native structured output requires a root object schema"]
+  var issues: seq[string]
+  if schema.getOrDefault("type").kind != JString or
+      schema.getOrDefault("type").getStr != "object":
+    issues.add "$: native structured output requires type object at the root"
+
+  proc walk(n: JsonNode, path: string) =
+    if n.isNil or n.kind != JObject: return
+    for key in ["oneOf", "allOf", "not", "if", "then", "else", "contains",
+                "propertyNames"]:
+      if key in n:
+        issues.add pathField(path, key) &
+          ": unsupported by native strict structured output"
+    let objectLike = n.getOrDefault("type").getStr == "object" or
+      "properties" in n
+    if objectLike:
+      let extra = n.getOrDefault("additionalProperties")
+      if extra.isNil or extra.kind != JBool or extra.getBool:
+        issues.add path & ".additionalProperties: native strict objects require false"
+      let props = n.getOrDefault("properties")
+      if props.kind == JObject:
+        var required: seq[string]
+        let requiredNode = n.getOrDefault("required")
+        if requiredNode.kind == JArray:
+          for item in requiredNode:
+            if item.kind == JString: required.add item.getStr
+        for key, _ in props:
+          if key notin required:
+            issues.add pathField(pathField(path, "properties"), key) &
+              ": native strict output requires every property to be required"
+    for child in schemaChildPaths(n, path):
+      walk(child.node, child.path)
+
+  walk(schema, "$")
+  result = issues
+
 proc jsonKindName(n: JsonNode): string =
   case n.kind
   of JNull: "null"
@@ -323,10 +362,15 @@ proc resolvePointer(root: JsonNode, refPath: string): JsonNode =
 proc numberValue(n: JsonNode): float =
   if n.kind == JInt: n.getInt.float else: n.getFloat
 
-proc isMultiple(value, divisor: float): bool =
-  if divisor <= 0: return false
-  let quotient = value / divisor
-  abs(quotient - quotient.round) <= 1e-9
+proc isMultiple(value, divisor: JsonNode): bool =
+  if value.kind == JInt and divisor.kind == JInt:
+    return divisor.getInt > 0 and value.getInt mod divisor.getInt == 0
+  let d = numberValue(divisor)
+  if d <= 0: return false
+  let quotient = numberValue(value) / d
+  let tolerance = min(1e-9,
+    8 * 2.220446049250313e-16 * max(1.0, abs(quotient)))
+  abs(quotient - quotient.round) <= tolerance
 
 proc matchesPattern(value, pattern: string): bool =
   value.find(re(pattern)) >= 0
@@ -419,7 +463,7 @@ proc validateSchemaAt(value, schema: JsonNode, path: string,
       result.add path & ": not above exclusiveMinimum " & $schema["exclusiveMinimum"]
     if "exclusiveMaximum" in schema and x >= numberValue(schema["exclusiveMaximum"]):
       result.add path & ": not below exclusiveMaximum " & $schema["exclusiveMaximum"]
-    if "multipleOf" in schema and not isMultiple(x, numberValue(schema["multipleOf"])):
+    if "multipleOf" in schema and not isMultiple(value, schema["multipleOf"]):
       result.add path & ": not a multiple of " & $schema["multipleOf"]
   if value.kind == JArray:
     if "minItems" in schema and value.len < schema["minItems"].getInt:

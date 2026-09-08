@@ -727,7 +727,11 @@ proc startObjectSession(
     raiseObjectError("generateObject received an invalid JSON Schema: " &
       schemaIssues.join("; "), schemaIssues)
   let wire = prepareWireSchema(schema)
-  let native = provider.nativeObjectOptions(schemaName(name), description, wire)
+  let nativeOptions = provider.nativeObjectOptions(
+    schemaName(name), description, wire)
+  let nativeIssues = if nativeOptions.isNil: @[]
+                     else: provider.nativeObjectSchemaIssues(wire)
+  let native = if nativeIssues.len == 0: nativeOptions else: nil
   result.provider = provider
   result.req = req
   result.schema = schema
@@ -735,20 +739,27 @@ proc startObjectSession(
   result.maxRetries = maxRetries
   case mode
   of omNative:
-    if native.isNil:
+    if not nativeOptions.isNil and nativeIssues.len > 0:
+      raiseObjectError("schema is incompatible with provider '" & provider.name &
+        "' native structured output: " & nativeIssues.join("; "), nativeIssues)
+    if nativeOptions.isNil:
       raiseObjectError("provider '" & provider.name &
         "' has no native structured output", @[])
     appendSystemInstruction(result.req, objectInstruction(wire, mode, false))
     result.req.options = mergeOptions(result.req.options, native)
     result.source = osNative
   of omAuto:
-    appendSystemInstruction(result.req, objectInstruction(wire, mode, native.isNil))
+    appendSystemInstruction(result.req,
+      objectInstruction(if native.isNil: schema else: wire, mode, native.isNil))
     if not native.isNil:
       result.req.options = mergeOptions(result.req.options, native)
       result.source = osNative
     else:
       result.source = osText
   of omTool:
+    if wire.getOrDefault("type").getStr != "object":
+      raiseObjectError("tool structured output requires a root object schema",
+        @["$: tool structured output requires type object at the root"])
     appendSystemInstruction(result.req, objectInstruction(wire, mode, false))
     result.useTool = true
     result.req.tools = @[ToolDefinition(name: objectToolName,
@@ -758,7 +769,7 @@ proc startObjectSession(
       result.req.options = mergeOptions(result.req.options, forced)
     result.source = osTool
   of omJson:
-    appendSystemInstruction(result.req, objectInstruction(wire, mode, true))
+    appendSystemInstruction(result.req, objectInstruction(schema, mode, true))
     result.source = osText
 
 proc acceptObject(resp: ProviderResponse, schema: JsonNode,
@@ -868,10 +879,11 @@ proc generateObjectAsync*(
   truncation = otReject
 ): Future[ObjectResult[JsonNode]] {.async.} =
   let resolved = resolveOptions(options, providerOptions, model.provider.name)
-  return await generateObjectAsync(model.provider, model.id, schema, prompt,
-    messages, system,
-    name, description, maxTokens, sessionId, resolved, maxRetries, maxRepairs,
-    mode, abort, truncation)
+  return await generateObjectAsync(model.provider, model.id, schema,
+    prompt = prompt, messages = messages, system = system, name = name,
+    description = description, maxTokens = maxTokens, sessionId = sessionId,
+    options = resolved, maxRetries = maxRetries, maxRepairs = maxRepairs,
+    mode = mode, abort = abort, truncation = truncation)
 
 proc generateObject*(model: LanguageModel, schema: JsonNode, prompt = "",
                      messages: seq[Message] = @[], system = "",
@@ -881,9 +893,12 @@ proc generateObject*(model: LanguageModel, schema: JsonNode, prompt = "",
                      abort: AbortCheck = nil,
                      providerOptions = ProviderOptions(),
                      truncation = otReject): ObjectResult[JsonNode] =
-  waitFor generateObjectAsync(model, schema, prompt, messages, system, name,
-    description, maxTokens, sessionId, options, maxRetries, maxRepairs, mode,
-    abort, providerOptions, truncation)
+  waitFor generateObjectAsync(model, schema, prompt = prompt,
+    messages = messages, system = system, name = name,
+    description = description, maxTokens = maxTokens, sessionId = sessionId,
+    options = options, maxRetries = maxRetries, maxRepairs = maxRepairs,
+    mode = mode, abort = abort, providerOptions = providerOptions,
+    truncation = truncation)
 
 proc streamObjectAsync(
   provider: Provider,
@@ -975,10 +990,12 @@ proc streamObjectAsync*(
   truncation = otReject
 ): Future[ObjectResult[JsonNode]] {.async.} =
   let resolved = resolveOptions(options, providerOptions, model.provider.name)
-  return await streamObjectAsync(model.provider, model.id, schema, prompt,
-    messages, system,
-    name, description, maxTokens, sessionId, resolved, wakeFd, maxRetries,
-    maxRepairs, mode, abort, onPartial, onEvent, truncation)
+  return await streamObjectAsync(model.provider, model.id, schema,
+    prompt = prompt, messages = messages, system = system, name = name,
+    description = description, maxTokens = maxTokens, sessionId = sessionId,
+    options = resolved, wakeFd = wakeFd, maxRetries = maxRetries,
+    maxRepairs = maxRepairs, mode = mode, abort = abort,
+    onPartial = onPartial, onEvent = onEvent, truncation = truncation)
 
 proc streamObject*(model: LanguageModel, schema: JsonNode, prompt = "",
                    messages: seq[Message] = @[], system = "",
@@ -990,9 +1007,13 @@ proc streamObject*(model: LanguageModel, schema: JsonNode, prompt = "",
                    onEvent: StreamCallback = nil,
                    providerOptions = ProviderOptions(),
                    truncation = otReject): ObjectResult[JsonNode] =
-  waitFor streamObjectAsync(model, schema, prompt, messages, system, name,
-    description, maxTokens, sessionId, options, wakeFd, maxRetries, maxRepairs,
-    mode, abort, onPartial, onEvent, providerOptions, truncation)
+  waitFor streamObjectAsync(model, schema, prompt = prompt,
+    messages = messages, system = system, name = name,
+    description = description, maxTokens = maxTokens, sessionId = sessionId,
+    options = options, wakeFd = wakeFd, maxRetries = maxRetries,
+    maxRepairs = maxRepairs, mode = mode, abort = abort,
+    onPartial = onPartial, onEvent = onEvent,
+    providerOptions = providerOptions, truncation = truncation)
 
 proc toObject*[T](r: ObjectResult[JsonNode]): ObjectResult[T] =
   ## Decode `r.value` as `T`. Validation already ran against the schema.
@@ -1031,10 +1052,12 @@ proc generateObjectAsync*[T](
   when T is JsonNode:
     {.error: "use generateObject(..., schema=) for JsonNode; not generateObject[JsonNode]".}
   let nm = if name.len > 0: name else: $T
-  return toObject[T](await generateObjectAsync(
-    model, jsonSchema(T), prompt, messages, system, nm, description,
-    maxTokens, sessionId, options, maxRetries, maxRepairs, mode, abort,
-    providerOptions, truncation))
+  return toObject[T](await generateObjectAsync(model, jsonSchema(T),
+    prompt = prompt, messages = messages, system = system, name = nm,
+    description = description, maxTokens = maxTokens, sessionId = sessionId,
+    options = options, maxRetries = maxRetries, maxRepairs = maxRepairs,
+    mode = mode, abort = abort, providerOptions = providerOptions,
+    truncation = truncation))
 
 proc generateObject*[T](model: LanguageModel, prompt = "",
                         messages: seq[Message] = @[], system = "", name = "",
@@ -1044,9 +1067,11 @@ proc generateObject*[T](model: LanguageModel, prompt = "",
                         abort: AbortCheck = nil,
                         providerOptions = ProviderOptions(),
                         truncation = otReject): ObjectResult[T] =
-  waitFor generateObjectAsync[T](model, prompt, messages, system, name,
-    description, maxTokens, sessionId, options, maxRetries, maxRepairs, mode,
-    abort, providerOptions, truncation)
+  waitFor generateObjectAsync[T](model, prompt = prompt, messages = messages,
+    system = system, name = name, description = description,
+    maxTokens = maxTokens, sessionId = sessionId, options = options,
+    maxRetries = maxRetries, maxRepairs = maxRepairs, mode = mode,
+    abort = abort, providerOptions = providerOptions, truncation = truncation)
 
 proc streamObjectAsync*[T](
   model: LanguageModel,
@@ -1071,10 +1096,13 @@ proc streamObjectAsync*[T](
   when T is JsonNode:
     {.error: "use streamObject(..., schema=) for JsonNode; not streamObject[JsonNode]".}
   let nm = if name.len > 0: name else: $T
-  return toObject[T](await streamObjectAsync(
-    model, jsonSchema(T), prompt, messages, system, nm, description,
-    maxTokens, sessionId, options, wakeFd, maxRetries, maxRepairs, mode, abort,
-    onPartial, onEvent, providerOptions, truncation))
+  return toObject[T](await streamObjectAsync(model, jsonSchema(T),
+    prompt = prompt, messages = messages, system = system, name = nm,
+    description = description, maxTokens = maxTokens, sessionId = sessionId,
+    options = options, wakeFd = wakeFd, maxRetries = maxRetries,
+    maxRepairs = maxRepairs, mode = mode, abort = abort,
+    onPartial = onPartial, onEvent = onEvent,
+    providerOptions = providerOptions, truncation = truncation))
 
 proc streamObject*[T](model: LanguageModel, prompt = "",
                       messages: seq[Message] = @[], system = "", name = "",
@@ -1086,6 +1114,9 @@ proc streamObject*[T](model: LanguageModel, prompt = "",
                       onEvent: StreamCallback = nil,
                       providerOptions = ProviderOptions(),
                       truncation = otReject): ObjectResult[T] =
-  waitFor streamObjectAsync[T](model, prompt, messages, system, name,
-    description, maxTokens, sessionId, options, wakeFd, maxRetries, maxRepairs,
-    mode, abort, onPartial, onEvent, providerOptions, truncation)
+  waitFor streamObjectAsync[T](model, prompt = prompt, messages = messages,
+    system = system, name = name, description = description,
+    maxTokens = maxTokens, sessionId = sessionId, options = options,
+    wakeFd = wakeFd, maxRetries = maxRetries, maxRepairs = maxRepairs,
+    mode = mode, abort = abort, onPartial = onPartial, onEvent = onEvent,
+    providerOptions = providerOptions, truncation = truncation)
