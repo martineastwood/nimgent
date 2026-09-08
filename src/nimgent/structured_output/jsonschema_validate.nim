@@ -544,11 +544,6 @@ proc validateSchemaAt(value, schema: JsonNode, path: string,
 proc validateSchema*(value, schema: JsonNode, path = "$"): seq[string] =
   validateSchemaAt(value, schema, path, schema, @[])
 
-proc schemaChildren(n: JsonNode): seq[JsonNode] =
-  ## All nested schema positions shared by validation and wire preparation.
-  for child in schemaChildPaths(n, ""):
-    result.add child.node
-
 proc prepareWireSchema*(schema: JsonNode): JsonNode =
   ## Copy. Objects without additionalProperties get false (OpenAI/Anthropic strict).
   proc walk(n: JsonNode) =
@@ -556,7 +551,7 @@ proc prepareWireSchema*(schema: JsonNode): JsonNode =
     if n.getOrDefault("type").getStr == "object" or "properties" in n:
       if "additionalProperties" notin n:
         n["additionalProperties"] = %false
-    for child in schemaChildren(n):
-      walk(child)
+    for child in schemaChildPaths(n, ""):
+      walk(child.node)
   result = copy(schema)
   walk(result)

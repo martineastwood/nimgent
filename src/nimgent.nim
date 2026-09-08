@@ -372,7 +372,6 @@ proc runLoop(provider: Provider, request: ProviderRequest,
              onEvent: StreamCallback,
              callbacks: RunCallbacks): Future[ProviderResponse] {.async.} =
   var request = request
-  let stepCap = max(1, maxSteps)
   var cancelled = false
   var completedSteps: seq[StepResult]
   var totalUsage: Usage
@@ -385,7 +384,7 @@ proc runLoop(provider: Provider, request: ProviderRequest,
         cancelled = true
         return false
       true
-  for step in 0 ..< stepCap:
+  for step in 0 ..< maxSteps:
     result = await retryingCall(provider, request, maxRetries, abort, cb, callbacks)
     if cancelled:
       raiseCancelledError()
@@ -398,7 +397,7 @@ proc runLoop(provider: Provider, request: ProviderRequest,
       if not callbacks.onStepFinish.isNil:
         callbacks.onStepFinish(step, stepResult)
       break
-    if step == stepCap - 1:
+    if step == maxSteps - 1:
       completedSteps.add stepResult
       result.finishReason = frStepLimit
       if not callbacks.onStepFinish.isNil:
