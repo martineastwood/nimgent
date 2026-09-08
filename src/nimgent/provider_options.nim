@@ -1,13 +1,14 @@
 ## Typed request options, scoped to the logical provider name.
 import std/[json, options]
-import nimgent/[provider, openai, anthropic, openrouter]
+import nimgent/[provider, openai, anthropic, openrouter, google]
 export OpenAIOptions, AnthropicOptions, AnthropicThinking, OpenRouterOptions,
-  OpenRouterRouting
+  OpenRouterRouting, GoogleOptions
 
 type ProviderOptions* = object
   openai*: OpenAIOptions
   anthropic*: AnthropicOptions
   openrouter*: OpenRouterOptions
+  google*: GoogleOptions
   extra*: JsonNode ## Additional provider namespaces, e.g. {"hyper": {...}}.
 
 proc resolveOptions*(options: JsonNode, scoped: ProviderOptions,
@@ -24,6 +25,7 @@ proc resolveOptions*(options: JsonNode, scoped: ProviderOptions,
   of "openai": mergeRequestOptions(result, scoped.openai.toProviderJson)
   of "anthropic": mergeRequestOptions(result, scoped.anthropic.toProviderJson)
   of "openrouter": mergeRequestOptions(result, scoped.openrouter.toProviderJson)
+  of "google": mergeRequestOptions(result, scoped.google.toProviderJson)
   else: discard
   result = result.copy
   # Responses also accepts the native `reasoning` object. Keep an explicit

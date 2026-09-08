@@ -1,7 +1,7 @@
 import std/[asyncdispatch, json, options, os, osproc, streams, strutils, times,
   unittest]
 import nimgent
-import nimgent/[anthropic, openrouter]
+import nimgent/[anthropic, openrouter, google]
 import nimgent/testing
 import nimgent/stream
 from nimgent/openai import openAI, hyper,
@@ -156,6 +156,11 @@ suite "provider types":
   test "api error body prefers error.message":
     check apiErrorMessage("""{"error":{"message":"nope"}}""") == "nope"
     check apiErrorMessage("not-json") == "not-json"
+
+  test "api error body handles Google's top-level array form":
+    check apiErrorMessage(
+      """[{"error":{"code":403,"message":"Gemini API disabled","status":"PERMISSION_DENIED"}}]""") ==
+      "Gemini API disabled"
 
   test "cache hit percent does not double-count inclusive prompt tokens":
     let openrouter = Usage(inputTokens: 10000, outputTokens: 1,
@@ -748,7 +753,7 @@ suite "encoding":
   test "providers encode image blocks and cache breakpoints":
     check anthropicImageBlock("image/png", "QUJD")["source"]["data"].getStr == "QUJD"
     check "data:image/png;base64,QUJD" in $openAiImagePart("image/png", "QUJD")
-    let body = buildBody(ProviderRequest(
+    let body = openrouter.buildBody(ProviderRequest(
       model: "vision",
       messages: @[userMessage(@[text("see"), image("image/png", "QUJD")])],
       maxTokens: 10), stream = false)
@@ -757,7 +762,7 @@ suite "encoding":
     check content.len == 2
     check content[1]["type"].getStr == "image_url"
     check "cache_control" in content[1]
-    let sysBody = buildBody(ProviderRequest(
+    let sysBody = openrouter.buildBody(ProviderRequest(
       model: "vision",
       system: @["stable prefix", "skills"],
       messages: @[userMessage("hi")],

@@ -40,6 +40,7 @@ type
     raw*: JsonNode  ## provider citation object; required for Anthropic replay
 
   ContentBlock* = object
+    googlePart*: JsonNode ## Original native Gemini part, retained for signed replay.
     ## Non-empty when the provider already ran this tool use/result
     ## (`web_search`, …). `toolCalls` skips these; generateText must not
     ## execute them. Value is the logical tool name, used to replay results.
@@ -55,6 +56,7 @@ type
       name*: string
       input*: JsonNode
       parseError*: string  ## set when the provider got invalid tool JSON; do not execute
+      thoughtSignature*: string ## Google tool-call signature, replayed unchanged
     of ckToolResult:
       toolUseId*: string
       output*: string
@@ -208,7 +210,7 @@ type
     seThinkingDelta
     seToolCallDelta
     seFinished
-    seWake          ## wakeFd became readable while waiting on the provider
+    seWake          ## Input or periodic cancellation check while waiting on the provider
 
   StreamEvent* = object
     case kind*: StreamEventKind
@@ -534,11 +536,19 @@ proc parseRetryAfter*(value: string): int =
     return 0
 
 proc apiErrorMessage*(raw: string): string =
-  ## `error.message` from an OpenAI-family JSON body; otherwise the raw text.
+  ## `error.message` from an OpenAI-family JSON body, including the top-level
+  ## array form Google's OpenAI-compatible endpoint returns
+  ## (`[{"error": {"message": ...}}]`). Falls back to the raw text.
+  var node: JsonNode
   try:
-    result = parseJson(raw).getOrDefault("error").getOrDefault("message").getStr
+    node = parseJson(raw)
   except CatchableError:
-    result = raw
+    return raw
+  if node.kind == JArray and node.len > 0:
+    node = node[0]
+  if node.isNil or node.kind != JObject: return raw
+  result = node.getOrDefault("error").getOrDefault("message").getStr
+  if result.len == 0: result = raw
 
 proc raiseProviderError*(msg: string, overflow = false, retryable = false,
                          aborted = false, status = 0, retryAfterMs = 0) =
@@ -585,7 +595,7 @@ proc rawAsyncTool*(name, description: string, inputSchema: JsonNode,
        executeAsync: execute, parallel: parallel)
 
 proc hostedTool*(name: string, options: JsonNode = nil): Tool =
-  ## Provider-executed tool (`web_search`, …). OpenAI Responses and Anthropic.
+  ## Provider-executed tool (`web_search`, …). OpenAI Responses, Anthropic, native Gemini.
   Tool(name: name, hosted: name, hostedOptions: options)
 
 proc toDefinitions*(tools: openArray[Tool]): seq[ToolDefinition] =
@@ -616,6 +626,9 @@ proc thinkingOptions*(provider, level: string, wire = twEffort): JsonNode =
     case p
     of "openrouter", "openai", "hyper":
       result["reasoning"] = %*{"effort": lv}
+    of "google":
+      # OpenAI-compatible surface uses the standard top-level reasoning_effort.
+      result["reasoning_effort"] = %lv
     of "anthropic":
       let budget = thinkingBudgetTokens(lv)
       if budget > 0:
@@ -628,6 +641,8 @@ proc thinkingOptions*(provider, level: string, wire = twEffort): JsonNode =
       result["reasoning"] = %*{"enabled": true}
     of "openai", "hyper":
       result["reasoning"] = %*{"effort": "medium"}
+    of "google":
+      result = thinkingOptions(p, "high", twEffort)
     of "anthropic":
       result = thinkingOptions(p, "high", twEffort)
     else:
@@ -638,6 +653,8 @@ proc thinkingOptions*(provider, level: string, wire = twEffort): JsonNode =
       result["reasoning"] = %*{"max_tokens": thinkingBudgetTokens(lv)}
     of "openai", "hyper":
       result["reasoning"] = %*{"effort": lv}
+    of "google":
+      result = thinkingOptions(p, lv, twEffort)
     of "anthropic":
       result = thinkingOptions(p, lv, twEffort)
     else:

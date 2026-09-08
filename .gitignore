@@ -1,5 +1,7 @@
 nimcache/
 tests/all_tests
+tests/stream_cancel_tests
+tests/google_tests
 *.dSYM/
 .nimble/
 .DS_Store

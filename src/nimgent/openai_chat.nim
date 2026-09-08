@@ -271,10 +271,10 @@ proc handleChatEvent*(acc: var StreamAcc, response: var ProviderResponse,
     return sseContinue
   let choice = data["choices"][0]
   let fr = choice.getOrDefault("finish_reason")
-  if fr.kind == JString and fr.getStr.len > 0:
+  if not fr.isNil and fr.kind == JString and fr.getStr.len > 0:
     response.finishReason = finishFrom(fr.getStr)
   let delta = choice.getOrDefault("delta")
-  if delta.kind != JObject:
+  if delta.isNil or delta.kind != JObject:
     return sseContinue
   if "content" in delta and delta["content"].kind == JString:
     let piece = delta["content"].getStr
@@ -300,7 +300,7 @@ proc handleChatEvent*(acc: var StreamAcc, response: var ProviderResponse,
       let fn = tc.getOrDefault("function")
       var nameNew = false
       var argsPiece = ""
-      if fn.kind == JObject:
+      if not fn.isNil and fn.kind == JObject:
         if "name" in fn and fn["name"].kind == JString:
           if acc.tools[idx].name.len == 0:
             nameNew = true

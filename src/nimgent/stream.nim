@@ -95,15 +95,17 @@ proc waitWakeOnce(watch: var WakeWatch, wakeFd: cint): Future[void] =
 
 proc awaitWithWakeAsync*[T](fut: Future[T], watch: ptr WakeWatch, wakeFd: cint,
                             onEvent: StreamCallback): Future[bool] {.async.} =
-  ## Await `fut` without nesting an event loop. False if wakeFd cancellation wins.
+  ## Check cancellation even when another input poller has consumed wakeFd.
+  var wake: Future[void]
   while not fut.finished:
-    if wakeFd < 0:
-      discard await fut
-      break
-    let wake = waitWakeOnce(watch[], wakeFd)
-    await fut or wake
+    if wakeFd >= 0 and (wake.isNil or wake.finished):
+      wake = waitWakeOnce(watch[], wakeFd)
+    if wake.isNil:
+      await fut or sleepAsync(100)
+    else:
+      await fut or wake or sleepAsync(100)
     if fut.finished:
-      if not wake.finished: watch[].unregister()
+      watch[].unregister()
       break
     if not onEvent(StreamEvent(kind: seWake)):
       watch[].unregister()

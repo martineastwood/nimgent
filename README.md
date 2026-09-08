@@ -52,13 +52,16 @@ echo "finish: ", response.finishReason
 ## Providers
 
 ```nim
-import nimgent/[anthropic, hyper, openai, openrouter]
+import nimgent/[anthropic, google, hyper, openai, openrouter]
 
 let openaiProvider = openAI(getEnv("OPENAI_API_KEY"))
 # /v1/responses; pass a */chat/completions URL for compat servers
 
 let hyperProvider = hyper(getEnv("HYPER_API_KEY"))
 # https://hyper.charm.land/v1/chat/completions
+
+let googleProvider = google(getEnv("AI_STUDIO_API_KEY"))
+# Native Gemini API, including Google Search, URL Context, and embeddings
 
 let anthropicProvider = anthropic(getEnv("ANTHROPIC_API_KEY"))
 ```
@@ -86,7 +89,8 @@ let answer = generateText(openAI(apiKey).model(modelId), prompt = "Explain this 
     openai: OpenAIOptions(reasoningEffort: some("high"), store: some(false)),
     anthropic: AnthropicOptions(thinking: some(AdaptiveThinking)),
     openrouter: OpenRouterOptions(routing: some(OpenRouterRouting(
-      order: some(@["Anthropic"]), allowFallbacks: some(false))))))
+      order: some(@["Anthropic"]), allowFallbacks: some(false)))),
+    google: GoogleOptions(reasoningEffort: some("high")))))
 ```
 
 Only the selected provider's namespace is used. OpenRouter and Hyper do not
@@ -96,7 +100,8 @@ sequences remain explicit. Model-specific supported values are checked by the AP
 
 The initial types cover OpenAI reasoning effort, parallel tool calls, storage,
 user identifiers and embedding dimensions; Anthropic thinking mode, budget and
-effort; and OpenRouter routing. `dimensions` is for embedding calls only.
+effort; OpenRouter routing; and Google Gemini reasoning effort.
+`dimensions` is for embedding calls only.
 For manual Anthropic thinking, use `thinking: some(EnabledThinking)` with
 `budgetTokens: some(2048)` (at least 1024); adaptive/disabled thinking omit budgets.
 
@@ -280,7 +285,8 @@ cancel, or inject output. `StreamEvent` (via `onEvent`) remains the API for
 live model-output deltas and cancellation. A full example lives in
 `examples/lifecycle_callbacks.nim`.
 
-`hostedTool("web_search")` runs on the provider (OpenAI Responses, Anthropic).
+`hostedTool("web_search")` runs on the provider (OpenAI Responses, Anthropic,
+native Gemini).
 Chat Completions skips it. Hosted calls and results stay on the assistant
 message for replay; `toolCalls` / the execute loop ignore them.
 
@@ -289,6 +295,35 @@ let response = generateText(
   model, prompt = "What landed today?",
   tools = @[hostedTool("web_search")])
 ```
+
+For Gemini hosted tools, use the native adapter:
+
+```nim
+import nimgent/google
+
+let model = google(getEnv("AI_STUDIO_API_KEY")).model("gemini-3.5-flash-lite")
+let response = generateText(model,
+  prompt = "Search for Nim's official documentation and read https://nim-lang.org.",
+  tools = @[hostedTool("web_search"), hostedTool("url_context")])
+```
+
+`google_search` is also accepted as an alias for `web_search`. Hosted tool options
+are passed inside the native tool object. Other hosted tools are rejected.
+`google` supports generation, streaming, embeddings, custom functions, structured
+JSON, images and files. Its endpoint override is an API root (default
+`https://generativelanguage.googleapis.com/v1beta`).
+
+Native options go in `GoogleOptions.extra` using Gemini field names such as
+`generationConfig`. The typed `reasoningEffort` maps to native thinking settings.
+Model support and quotas determine which tool combinations can run.
+
+Web sources are returned as `ckSource`. Complete `groundingMetadata`, including
+citation spans, queries and Search Suggestions HTML, is retained in a hosted
+`web_search` result's JSON output. URL retrieval statuses are retained in a hosted
+`url_context` result. Applications can use these to render citations and Google's
+Search Suggestions. Native response parts are retained in `ContentBlock.googlePart`
+for signed conversation replay; preserve this field when serializing history.
+See `examples/google_smoke.nim` for live search, URL retrieval and tool-loop checks.
 
 Pass already encoded data with `file(...)`, or load a local PDF with
 `fileFromPath(...)`. Citations come back as `ckSource`.
