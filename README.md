@@ -353,6 +353,32 @@ For multi-turn conversations, use `userMessage(...)` and
 niminal still owns its own agent loop; this helper is for apps that want the
 AI-SDK-style “run my callbacks until the model is done.”
 
+## First-class agents
+
+For applications that want the generic model → tool → model loop, use
+`nimgent/agent`:
+
+```nim
+import std/os
+import nimgent/agent
+import nimgent/openai
+
+let researcher = newAgent(
+  model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-5"),
+  instructions = "You are a concise research assistant.",
+  maxSteps = 8)
+
+let response = researcher.run("What is the weather in Paris?")
+echo response.text
+```
+
+`Agent` is reusable configuration; each `run` or `stream` call gets fresh
+execution state. `run` and `stream` are blocking convenience wrappers, while
+`runAsync` and `streamAsync` are intended for servers and existing event loops.
+The agent defaults to a bounded eight-model-turn tool loop. niminal keeps its
+own loop because its coding-agent behavior also owns workspace tools, hooks,
+permissions, compaction, persistence, and TUI presentation.
+
 ## Structured output
 
 `generateObject` asks the model for JSON that matches a schema and validates

@@ -1,7 +1,7 @@
 import std/[asyncdispatch, atomics, json, options, os, osproc, sets, streams,
   strutils, tables, times, unittest]
 import nimgent
-import nimgent/[anthropic, openrouter, google]
+import nimgent/[agent, anthropic, openrouter, google]
 import nimgent/testing
 import nimgent/stream
 from nimgent/openai import openAI, hyper,
@@ -1912,3 +1912,35 @@ suite "typed provider options":
     discard generateObject(toolP.model("test"), schema, prompt = "x",
       mode = omTool, providerOptions = scoped)
     check toolP.last.options["tool_choice"]["function"]["name"].getStr == "submit"
+
+suite "first-class Agent API":
+  test "runs a bounded typed-tool agent with configured defaults":
+    let p = ScriptProvider(toolFirst: true)
+    type EchoInput = object
+      x: int
+    let echoTool = tool[EchoInput, string]("echo", "echo",
+      proc (input: EchoInput): string = "pong")
+    let agent = newAgent(p.model("m"),
+      instructions = "Be concise.", tools = @[echoTool], maxSteps = 2,
+      maxRetries = 0)
+    let response = agent.run("hi")
+    check response.text == "ok"
+    check response.steps.len == 2
+    check p.calls == 2
+    check p.last.system == @["Be concise."]
+
+  test "streams through the same agent configuration":
+    let p = ScriptProvider()
+    let agent = newAgent(p.model("m"), instructions = "Be concise.",
+      maxRetries = 0)
+    var deltas: seq[string]
+    let response = agent.stream("hi", proc (ev: StreamEvent): bool =
+      if ev.kind == seTextDelta: deltas.add ev.text
+      true)
+    check deltas == @["ok"]
+    check response.text == "ok"
+
+  test "rejects invalid agent configuration":
+    let p = ScriptProvider()
+    expect ProviderError:
+      discard newAgent(p.model("m"), maxSteps = 0)
