@@ -1,7 +1,7 @@
 import std/[asyncdispatch, atomics, json, options, os, osproc, sets, streams,
   strutils, tables, times, unittest]
 import nimgent
-import nimgent/[agent, anthropic, openrouter, google]
+import nimgent/[agent, session, anthropic, openrouter, google]
 import nimgent/testing
 import nimgent/stream
 from nimgent/openai import openAI, hyper,
@@ -1944,3 +1944,51 @@ suite "first-class Agent API":
     let p = ScriptProvider()
     expect ProviderError:
       discard newAgent(p.model("m"), maxSteps = 0)
+
+suite "agent sessions":
+  test "retains transcript and accumulates usage across turns":
+    let p = ScriptProvider(toolFirst: true)
+    type EchoInput = object
+      x: int
+    let echoTool = tool[EchoInput, string]("echo", "echo",
+      proc (input: EchoInput): string = "pong")
+    let conversation = newSession(newAgent(p.model("m"),
+      instructions = "Be concise.", tools = @[echoTool], maxSteps = 2,
+      maxRetries = 0))
+    let first = conversation.run("first")
+    check first.text == "ok"
+    check conversation.turns == 1
+    check conversation.messages.len == 4
+    check conversation.messages[0].role == roleUser
+    check conversation.messages[1].role == roleAssistant
+    check conversation.messages[1].content[0].kind == ckToolUse
+    check conversation.messages[2].content[0].kind == ckToolResult
+    check conversation.messages[3].content[0].text == "ok"
+    let second = conversation.run("second")
+    check second.text == "ok"
+    check conversation.turns == 2
+    check conversation.messages.len == 6
+    check conversation.totalUsage.inputTokens == 6
+    check conversation.totalUsage.outputTokens == 12
+    check conversation.lastResponse.text == "ok"
+
+  test "streaming commits only after the turn completes":
+    let conversation = newSession(newAgent(ScriptProvider().model("m"),
+      maxRetries = 0))
+    var deltas: seq[string]
+    let response = conversation.stream("hello", proc (ev: StreamEvent): bool =
+      if ev.kind == seTextDelta: deltas.add ev.text
+      true)
+    check response.text == "ok"
+    check deltas == @["ok"]
+    check conversation.messages.len == 2
+    check conversation.messages[1].content[0].text == "ok"
+
+  test "reset clears state but keeps the agent":
+    let conversation = newSession(newAgent(ScriptProvider().model("m"),
+      maxRetries = 0))
+    discard conversation.run("hello")
+    conversation.reset()
+    check conversation.messages.len == 0
+    check conversation.turns == 0
+    check conversation.totalUsage == Usage()

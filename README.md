@@ -379,6 +379,29 @@ The agent defaults to a bounded eight-model-turn tool loop. niminal keeps its
 own loop because its coding-agent behavior also owns workspace tools, hooks,
 permissions, compaction, persistence, and TUI presentation.
 
+## Agent sessions
+
+Use `nimgent/session` when an agent needs to remember previous turns:
+
+```nim
+import std/os
+import nimgent/[agent, openai, session]
+
+let researcher = newAgent(openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini"),
+  instructions = "Remember the conversation.", maxSteps = 5)
+let conversation = newSession(researcher)
+
+let first = conversation.run("My name is Nim.")
+let second = conversation.run("What is my name?")
+echo second.text
+```
+
+`Session` stores the provider-neutral transcript, including assistant tool
+calls and tool results, and accumulates usage across turns. `newConversation`
+is an equivalent descriptive constructor. `reset` clears the transcript while
+retaining the agent configuration. The current implementation is in-memory;
+serialization, resume, and compaction are planned extensions.
+
 ## Structured output
 
 `generateObject` asks the model for JSON that matches a schema and validates
