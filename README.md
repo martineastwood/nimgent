@@ -201,6 +201,10 @@ defaults to 2) with jittered backoff and `Retry-After`. Context overflow and
 4xx are not retried. Cancellation raises `CancelledError`, including when a
 streaming callback returns `false`.
 
+When a provider returns a request identifier, it is available as
+`ProviderResponse.requestId`; failed calls expose the same value as
+`ProviderError.requestId` for support and log correlation.
+
 Pass `abort` to cancel before the next attempt (or, while streaming, from
 `onEvent` by returning `false`):
 

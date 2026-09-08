@@ -139,6 +139,8 @@ type
     ## Usage across every model call in `steps`. For a single call this equals usage.
     totalUsage*: Usage
     finishReason*: FinishReason
+    ## Request ID returned by the provider, when available.
+    requestId*: string
     ## Every model call made by the high-level tool loop.
     steps*: seq[StepResult]
   ProviderError* = object of CatchableError
@@ -149,6 +151,7 @@ type
     aborted*: bool     ## caller abort() returned true
     status*: int       ## HTTP status, or 0 when there was no response
     retryAfterMs*: int ## from Retry-After; 0 if the server did not send one
+    requestId*: string ## Provider request ID, when the server returned one.
 
   ObjectIssue* = object
     ## Best-effort JSON path and diagnostic message for one validation issue.
@@ -211,6 +214,8 @@ type
     model*: string
     embeddings*: seq[seq[float]]
     usage*: EmbeddingUsage
+    ## Request ID returned by the provider, when available.
+    requestId*: string
 
   StreamEventKind* = enum
     seTextDelta
@@ -558,13 +563,15 @@ proc apiErrorMessage*(raw: string): string =
   if result.len == 0: result = raw
 
 proc raiseProviderError*(msg: string, overflow = false, retryable = false,
-                         aborted = false, status = 0, retryAfterMs = 0) =
+                         aborted = false, status = 0, retryAfterMs = 0,
+                         requestId = "") =
   let e = newException(ProviderError, msg)
   e.overflow = overflow
   e.retryable = retryable or isRetryableStatus(status)
   e.aborted = aborted
   e.status = status
   e.retryAfterMs = retryAfterMs
+  e.requestId = requestId
   raise e
 
 proc raiseCancelledError*(msg = "aborted") {.noreturn.} =

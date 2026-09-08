@@ -117,6 +117,7 @@ suite "native Gemini":
         check response.text == "Nim"
         if mode == "stream": check deltas == "Nim"
         check response.usage.inputTokens == 10
+        check response.requestId == "req-google"
         check response.content[^1].hosted == "web_search"
         check response.content[^2].source.url == "https://nim-lang.org")
 

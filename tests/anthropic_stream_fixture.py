@@ -16,11 +16,13 @@ class Handler(BaseHTTPRequestHandler):
         if mode == 'rate':
             self.send_response(429)
             self.send_header('Retry-After', '2')
+            self.send_header('x-request-id', 'req-anthropic-rate')
             self.end_headers()
             self.wfile.write(b'{"error":{"type":"rate_limit_error","message":"Slow down"}}')
             return
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
+        self.send_header('x-request-id', 'req-anthropic')
         self.end_headers()
 
         def emit(kind, **fields):

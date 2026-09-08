@@ -35,7 +35,9 @@ suite "Anthropic streaming":
           check e.retryable
           if mode == "rate":
             check e.status == 429
-            check e.retryAfterMs == 2000)
+            check e.retryAfterMs == 2000
+            check e.requestId == "req-anthropic-rate"
+        )
 
   test "cancelling HTTP tool arguments returns no executable partial call":
     withFixture("anthropic_stream_fixture.py", proc (port: int) =
@@ -65,7 +67,8 @@ suite "Anthropic streaming":
           messages: @[Message(role: roleAssistant, content: previous.content), userMessage("continue")]),
         proc (ev: StreamEvent): bool = true, maxRetries = 0)
       check response.finishReason == frEndTurn
-      check response.usage.outputTokens == 2)
+      check response.usage.outputTokens == 2
+      check response.requestId == "req-anthropic")
 
   test "foreign thinking metadata is omitted without changing signed native thinking":
     let req = ProviderRequest(model: "claude-sonnet-4-6", maxTokens: 64,
@@ -716,6 +719,19 @@ suite "OpenAI provider":
       check response.usage.inputTokens == 20
       check response.usage.cacheReadTokens == 8
       check response.usage.cacheReported
+      check response.requestId == "req-fixture"
+
+  test "HTTP errors retain the provider request id":
+    withFixture("openai_fixture.py") do (port: int):
+      var caught = false
+      try:
+        discard openAI("fixture-key", "http://127.0.0.1:" & $port,
+          timeoutSeconds = 5).generate(ProviderRequest(model: "wrong"))
+      except ProviderError as e:
+        caught = true
+        check e.status == 400
+        check e.requestId == "req-fixture"
+      check caught
 
   test "generateStream emits deltas before the response finishes":
     withFixture("openai_responses_stream_fixture.py") do (port: int):

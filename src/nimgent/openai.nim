@@ -5,7 +5,7 @@
 ## Session_id, cache_control, and HTTP-Referer stay optional on this type.
 
 import std/[options, asyncdispatch, httpclient, json, net, strutils]
-import nimgent/[provider, stream, openai_chat, openai_responses]
+import nimgent/[provider, stream, http_metadata, openai_chat, openai_responses]
 export popLine, buildChatBody, openAiImagePart, buildResponsesBody,
   parseResponsesOutput, chatObjectOptions, chatForceToolOptions,
   responsesObjectOptions, responsesForceToolOptions
@@ -103,7 +103,8 @@ proc raiseApiError(provider: OpenAIProvider, code: int, raw: string,
   let ra = if headers.isNil: 0
            else: parseRetryAfter(headers.getOrDefault("Retry-After"))
   raiseProviderError(provider.label & " API error (" & $code & "): " & detail,
-    overflow = isContextOverflow(detail), status = code, retryAfterMs = ra)
+    overflow = isContextOverflow(detail), status = code, retryAfterMs = ra,
+    requestId = requestIdFromHeaders(headers))
 
 proc requestBody(provider: OpenAIProvider, request: ProviderRequest,
                  stream: bool): JsonNode =
@@ -151,8 +152,10 @@ method generateAsync*(provider: OpenAIProvider,
   except CatchableError as e:
     raiseProviderError(provider.label & " returned invalid JSON: " & e.msg)
   if provider.useResponses:
-    return parseResponsesOutput(data, provider.label)
-  result = parseChatOutput(data, provider.label)
+    result = parseResponsesOutput(data, provider.label)
+  else:
+    result = parseChatOutput(data, provider.label)
+  result.requestId = requestIdFromHeaders(response.headers)
 
 method embedAsync*(provider: OpenAIProvider,
                    request: EmbeddingRequest): Future[EmbeddingResponse] {.async.} =
@@ -192,6 +195,7 @@ method embedAsync*(provider: OpenAIProvider,
       data{"usage", "total_tokens"}.getInt)
   except CatchableError as e:
     raiseProviderError(provider.label & " returned invalid embedding JSON: " & e.msg)
+  result.requestId = requestIdFromHeaders(response.headers)
 
 method generateStreamAsync*(provider: OpenAIProvider,
                             request: ProviderRequest,
@@ -225,6 +229,7 @@ method generateStreamAsync*(provider: OpenAIProvider,
 
   var acc = initStreamAcc()
   var resp = ProviderResponse()
+  let requestId = requestIdFromHeaders(response.headers)
   let handle =
     if provider.useResponses:
       proc (data: JsonNode): SseAction =
@@ -237,6 +242,7 @@ method generateStreamAsync*(provider: OpenAIProvider,
   if drive == sdCancelled:
     assembleStream(acc, resp)
     result = resp
+    result.requestId = requestId
     if result.finishReason == frUnknown:
       result.finishReason = frStop
     return
@@ -245,6 +251,7 @@ method generateStreamAsync*(provider: OpenAIProvider,
       " stream failed: connection closed mid-response", retryable = true)
   assembleStream(acc, resp)
   result = resp
+  result.requestId = requestId
   discard onEvent(StreamEvent(kind: seFinished))
 
 

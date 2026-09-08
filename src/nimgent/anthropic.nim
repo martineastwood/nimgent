@@ -1,7 +1,7 @@
 ## Anthropic Messages API adapter.
 
 import std/[options, asyncdispatch, base64, httpclient, json, net, strutils]
-import nimgent/[provider, stream]
+import nimgent/[provider, stream, http_metadata]
 
 const defaultAnthropicEndpoint* = "https://api.anthropic.com/v1/messages"
 
@@ -257,14 +257,16 @@ method generateAsync*(provider: AnthropicProvider,
     raiseProviderError("Anthropic API error (" & $code & "): " & detail,
                        overflow = overflow, status = code,
                        retryAfterMs = parseRetryAfter(
-                         response.headers.getOrDefault("Retry-After")))
+                         response.headers.getOrDefault("Retry-After")),
+                       requestId = requestIdFromHeaders(response.headers))
 
   var data: JsonNode
   try:
     data = parseJson(raw)
   except CatchableError as e:
     raiseProviderError("Anthropic returned invalid JSON: " & e.msg)
-  parseAnthropicOutput(data)
+  result = parseAnthropicOutput(data)
+  result.requestId = requestIdFromHeaders(response.headers)
 
 proc handleAnthropicEvent*(message: var JsonNode, args: var seq[string],
                           data: JsonNode, onEvent: StreamCallback): SseAction =
@@ -348,7 +350,8 @@ method generateStreamAsync*(provider: AnthropicProvider,
     raiseProviderError("Anthropic API error (" & $response.code.int & "): " & detail,
       overflow = response.code.int == 400 and isContextOverflow(detail),
       status = response.code.int,
-      retryAfterMs = parseRetryAfter(response.headers.getOrDefault("Retry-After")))
+      retryAfterMs = parseRetryAfter(response.headers.getOrDefault("Retry-After")),
+      requestId = requestIdFromHeaders(response.headers))
   var message = %*{"content": [], "usage": {}}
   var args: seq[string]
   var drive: SseDrive
@@ -370,6 +373,7 @@ method generateStreamAsync*(provider: AnthropicProvider,
         ["tool_use", "server_tool_use"]:
       content.elems.setLen(content.len - 1)
   result = parseAnthropicOutput(message)
+  result.requestId = requestIdFromHeaders(response.headers)
   if drive == sdCancelled:
     result.finishReason = frStop
   else:

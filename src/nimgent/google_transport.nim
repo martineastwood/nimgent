@@ -1,6 +1,6 @@
 ## Native Gemini generateContent transport, including provider-executed tools.
 import std/[asyncdispatch, httpclient, json, net, strutils, tables, uri]
-import nimgent/[provider, stream]
+import nimgent/[provider, stream, http_metadata]
 
 const defaultGoogleEndpoint* = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -243,12 +243,15 @@ proc requestNative(p: GoogleProvider, request: ProviderRequest,
       raiseProviderError("Google API error (" & $response.code.int & "): " & detail,
         status = response.code.int,
         overflow = response.code.int == 400 and isContextOverflow(detail),
-        retryAfterMs = parseRetryAfter(response.headers.getOrDefault("Retry-After")))
+        retryAfterMs = parseRetryAfter(response.headers.getOrDefault("Retry-After")),
+        requestId = requestIdFromHeaders(response.headers))
     if not streaming:
       result = parseGoogleOutput(parseJson(await drainBodyStreamAsync(response.bodyStream)))
+      result.requestId = requestIdFromHeaders(response.headers)
       if result.finishReason == frUnknown: raiseProviderError("Google returned no completed candidate")
       return
     var accumulated: ProviderResponse
+    let requestId = requestIdFromHeaders(response.headers)
     let drive = await forEachSseAsync(response.bodyStream, addr watch, request.wakeFd,
       onEvent, proc (data: JsonNode): SseAction =
         handleGoogleEvent(accumulated, data, onEvent))
@@ -258,6 +261,7 @@ proc requestNative(p: GoogleProvider, request: ProviderRequest,
     if accumulated.finishReason == frUnknown:
       raiseProviderError("Google stream closed mid-response", retryable = true)
     result = accumulated
+    result.requestId = requestId
     discard onEvent(StreamEvent(kind: seFinished))
   except ProviderError: raise
   except CatchableError as e:
@@ -295,12 +299,14 @@ method embedAsync*(p: GoogleProvider,
     if response.code.int >= 400:
       raiseProviderError("Google API error (" & $response.code.int & "): " &
         apiErrorMessage(raw), status = response.code.int,
-        retryAfterMs = parseRetryAfter(response.headers.getOrDefault("Retry-After")))
+        retryAfterMs = parseRetryAfter(response.headers.getOrDefault("Retry-After")),
+        requestId = requestIdFromHeaders(response.headers))
     let data = parseJson(raw)
     let embeddings = data{"embeddings"}
     if embeddings.isNil or embeddings.len != request.values.len:
       raiseProviderError("Google returned an unexpected number of embeddings")
     result.model = request.model
+    result.requestId = requestIdFromHeaders(response.headers)
     for embedding in embeddings:
       var values: seq[float]
       for value in embedding{"values"}: values.add value.getFloat
