@@ -1013,12 +1013,27 @@ type
   RecipeChild = object of RecipeBase
     name*: string
 
+  VariantInheritedRecipe = object of RecipeBase
+    case kind*: Heat
+    of low:
+      mild*: string
+    else:
+      spicy*: bool
+
   VariantRecipe = object
     case kind*: Heat
     of low:
       mild*: string
     of high:
       spicy*: bool
+
+  VariantCommonRecipe = object
+    common: string
+    case kind: Heat
+    of low:
+      mild: string
+    else:
+      spicy: bool
 
   ContainerRecipe = object
     flags: set[Heat]
@@ -1119,6 +1134,9 @@ suite "json schema":
     check parsePartialJson("[1, 2").value.len == 2
     check parsePartialJson("""{"a":1}""").state == ppSuccess
     check parsePartialJson("```json\n{\"a\":").value.len == 0
+    let escapedKey = parsePartialJson("""{"a\"b":1""")
+    check escapedKey.state == ppRepaired
+    check escapedKey.value["a\"b"].getInt == 1
     check jsonEqual(%*{"a": 1}, %*{"a": 1})
     check not jsonEqual(%*{"a": 1}, %*{"a": 2})
 
@@ -1166,6 +1184,17 @@ suite "json schema":
     check validateSchema(%*{"kind": "low", "mild": "gentle"}, variant).len == 0
     check validateSchema(%*{"kind": "high", "spicy": true}, variant).len == 0
     check validateSchema(%*{"kind": "low"}, variant).len > 0
+    let variantCommon = jsonSchema(VariantCommonRecipe)
+    check validateJsonSchema(variantCommon).len == 0
+    check validateSchema(%*{"common": "shared", "kind": "low", "mild": "gentle"},
+      variantCommon).len == 0
+    check validateSchema(%*{"common": "shared", "kind": "high", "spicy": true},
+      variantCommon).len == 0
+    check validateSchema(%*{"common": "shared", "kind": "low", "spicy": true},
+      variantCommon).len > 0
+    let variantInherited = jsonSchema(VariantInheritedRecipe)
+    check validateSchema(%*{"id": "base", "kind": "high", "spicy": true},
+      variantInherited).len == 0
     let fixed = jsonSchema(array[3, string])
     check fixed["minItems"].getInt == 3
     check fixed["maxItems"].getInt == 3
@@ -1191,6 +1220,11 @@ suite "json schema":
     check "$ref: external references are not supported" in issues.join(" ")
     check "unresolved reference" in validateJsonSchema(%*{
       "$ref": "#/missing"}).join(" ")
+    let cyclic = %*{
+      "$defs": {"node": {"$ref": "#/$defs/node"}},
+      "$ref": "#/$defs/node"
+    }
+    check "cyclic reference" in validateJsonSchema(cyclic).join(" ")
 
     let p = ObjectScript()
     var err: ref ObjectError
