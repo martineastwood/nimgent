@@ -1018,7 +1018,10 @@ proc unwrapType(t: NimNode): NimNode =
     result = impl[0]
 
 proc schemaFromType(t: NimNode, bindings: seq[GenericBinding]): JsonNode =
-  let inst = getTypeInst(t)
+  var inst = getTypeInst(t)
+  if inst.kind == nnkBracketExpr and inst.len >= 2 and
+      typeLeafName(inst[0]) == "typeDesc":
+    inst = inst[1]
   if inst.kind == nnkBracketExpr:
     let ctor = typeLeafName(inst[0])
     if ctor in ["seq", "openArray"]:
@@ -1048,7 +1051,8 @@ proc schemaFromType(t: NimNode, bindings: seq[GenericBinding]): JsonNode =
         types.add %"null"
         result["type"] = types
       return
-  let core = unwrapType(t)
+  let coreType = if inst.kind == nnkBracketExpr: inst[0] else: inst
+  let core = unwrapType(coreType)
   let impl = getTypeImpl(core)
   if impl.kind == nnkBracketExpr and impl.len >= 3:
     let ctor = typeLeafName(impl[0])
@@ -1147,6 +1151,13 @@ macro jsonSchema*(T: typedesc): JsonNode =
   ## primitives. Field pragmas add constraints or make a property optional.
   ## Option fields stay in `required` as `[T, null]` (OpenAI strict).
   let impl = T.getType
-  let t = if impl.kind == nnkBracketExpr and impl.len >= 2: impl[1] else: T
+  let typeValue = if impl.kind == nnkBracketExpr and impl.len >= 2:
+                    impl[1]
+                  else:
+                    T
+  let t = if T.kind == nnkBracketExpr and typeValue.kind in {nnkSym, nnkIdent}:
+            T
+          else:
+            typeValue
   let s = $schemaFromType(t)
   result = newCall(bindSym"parseJson", newLit(s))
