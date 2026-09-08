@@ -253,6 +253,29 @@ calls marked `parallel = true` overlap without blocking the event loop.
 final model call. `response.steps` records every call and its local tool
 results; `response.totalUsage` is accumulated across them.
 
+## Agent sessions
+
+`nimgent/session` separates reusable agent configuration from mutable
+conversation state. Sessions keep an event-backed transcript, derive provider
+messages from it, record failed turns, and can be serialized without storing
+the agent's credentials or tool callbacks:
+
+```nim
+import nimgent/[agent, session]
+
+let conversation = newSession(agent, id = "research-1")
+discard conversation.run("Research Nim web frameworks.")
+
+let saved = conversation.sessionJsonString
+let resumed = sessionFromJson(agent, saved)
+discard resumed.run("Which one should I try first?")
+```
+
+The JSON document is versioned and contains provider-neutral content, tool
+results, usage, response steps, and turn lifecycle events. Applications can
+store it in a file or database; `niminal` can add its own durable storage
+policy around the same event model.
+
 ## Life cycle hooks
 
 `generateText` and `streamText` accept a `callbacks: RunCallbacks` value with

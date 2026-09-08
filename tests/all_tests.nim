@@ -1,5 +1,5 @@
 import std/[asyncdispatch, atomics, json, options, os, osproc, sets, streams,
-  strutils, tables, times, unittest]
+  sequtils, strutils, tables, times, unittest]
 import nimgent
 import nimgent/[agent, session, anthropic, openrouter, google]
 import nimgent/testing
@@ -1946,6 +1946,78 @@ suite "first-class Agent API":
       discard newAgent(p.model("m"), maxSteps = 0)
 
 suite "agent sessions":
+  test "records lifecycle events and forwards the session id":
+    let p = ScriptProvider()
+    let conversation = newSession(newAgent(p.model("m"), maxRetries = 0),
+      id = "session-1")
+    discard conversation.run("hello")
+    check p.last.sessionId == "session-1"
+    check conversation.events.mapIt(it.kind) == @[
+      sekTurnStarted, sekUser, sekAssistant, sekTurnFinished]
+    check conversation.events[0].prompt == "hello"
+    check conversation.events[^1].response.text == "ok"
+
+  test "round trips the event log and derived state through JSON":
+    let p = ScriptProvider(toolFirst: true)
+    type EchoInput = object
+      x: int
+    let echoTool = tool[EchoInput, string]("echo", "echo",
+      proc (input: EchoInput): string = "pong")
+    let conversation = newSession(newAgent(p.model("m"), tools = @[echoTool],
+      maxSteps = 2, maxRetries = 0), id = "round-trip")
+    discard conversation.run("hello")
+    let restored = sessionFromJson(newAgent(p.model("m"), tools = @[echoTool],
+      maxSteps = 2, maxRetries = 0), conversation.sessionJson)
+    check restored.id == "round-trip"
+    check restored.sessionJson == conversation.sessionJson
+    check restored.sessionJsonString == conversation.sessionJsonString
+    check restored.turns == 1
+    check restored.totalUsage == conversation.totalUsage
+    check restored.lastResponse.text == "ok"
+
+  test "round trips multimodal and provider-native content metadata":
+    var thinking = ContentBlock(kind: ckThinking, thinking: "scratch",
+      signature: "signed")
+    thinking.googlePart = %*{"thought": true}
+    var call = toolUse("call", "lookup", %*{"q": "Nim"})
+    call.thoughtSignature = "tool-signature"
+    var toolOutput = toolResult("call", "result", images = @[
+      ImageContent(mimeType: "image/png", data: "QUJD", path: "tile.png")])
+    toolOutput.googlePart = %*{"function_response": true}
+    let blocks = @[
+      text("hello"), thinking, call, toolOutput,
+      image("image/png", "REVG", "photo.png"),
+      file("application/pdf", "R0hJ", "spec.pdf", "spec.pdf"),
+      source("https://example.com", "Example", "src-1", "quoted",
+        %*{"raw": "citation"})]
+    let conversation = newSession(newAgent(ScriptProvider().model("m")),
+      @[userMessage(blocks)], id = "metadata")
+    let restored = sessionFromJson(newAgent(ScriptProvider().model("m")),
+      conversation.sessionJson)
+    check restored.messages[0].content.len == blocks.len
+    check restored.messages[0].content[1].googlePart["thought"].getBool
+    check restored.messages[0].content[2].thoughtSignature == "tool-signature"
+    check restored.messages[0].content[3].images[0].path == "tile.png"
+    check restored.messages[0].content[3].googlePart["function_response"].getBool
+    check restored.messages[0].content[4].data == "REVG"
+    check restored.messages[0].content[5].file.data == "R0hJ"
+    check restored.messages[0].content[6].source.raw["raw"].getStr == "citation"
+
+  test "persists failed turns without adding incomplete messages":
+    let conversation = newSession(newAgent(BoomProvider().model("m"),
+      maxRetries = 0), id = "failed")
+    expect ProviderError:
+      discard conversation.run("hello")
+    check conversation.messages.len == 0
+    check conversation.events.len == 2
+    check conversation.events[0].kind == sekTurnStarted
+    check conversation.events[1].kind == sekTurnFailed
+    check conversation.events[1].error.startsWith("prompt is too long")
+    let restored = sessionFromJson(newAgent(BoomProvider().model("m"),
+      maxRetries = 0), conversation.sessionJsonString)
+    check restored.sessionJson == conversation.sessionJson
+    check restored.messages.len == 0
+
   test "retains transcript and accumulates usage across turns":
     let p = ScriptProvider(toolFirst: true)
     type EchoInput = object

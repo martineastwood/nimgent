@@ -18,15 +18,24 @@ let researcher = newAgent(
   tools = @[weather],
   maxSteps = 5)
 
-let conversation = newSession(researcher)
+let conversation = newSession(researcher, id = "weather-demo")
 
 proc main() {.async.} =
   let first = await conversation.runAsync("What's the weather like in Paris?")
   echo "assistant: ", first.text
+  echo "session: ", conversation.id
+  echo "events: ", conversation.events.len
 
-  let second = await conversation.runAsync(
+  # A snapshot contains the transcript and lifecycle state, but not the
+  # agent's credentials or tool callbacks. Rehydrate it with the agent.
+  let snapshot = conversation.sessionJsonString
+  let resumed = sessionFromJson(researcher, snapshot)
+  echo "restored session: ", resumed.id
+
+  let second = await resumed.runAsync(
     "Based on that weather, what should I wear? Keep it brief.")
   echo "assistant: ", second.text
-  echo "turns: ", conversation.turns
+  echo "turns: ", resumed.turns
+  echo "events after resume: ", resumed.events.len
 
 waitFor main()
