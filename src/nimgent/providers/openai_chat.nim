@@ -1,7 +1,7 @@
 ## Chat Completions wire format (OpenRouter, Hyper, OpenAI-compat).
 
 import std/json
-import nimgent/[provider, stream]
+import nimgent/providers/[provider, stream]
 
 proc openAiImagePart*(mimeType, data: string): JsonNode =
   %*{"type": "image_url", "image_url": {

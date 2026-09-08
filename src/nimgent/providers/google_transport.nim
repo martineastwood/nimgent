@@ -1,6 +1,6 @@
 ## Native Gemini generateContent transport, including provider-executed tools.
 import std/[asyncdispatch, httpclient, json, net, strutils, tables, uri]
-import nimgent/[provider, stream, http_metadata]
+import nimgent/providers/[provider, stream, http_metadata]
 
 const defaultGoogleEndpoint* = "https://generativelanguage.googleapis.com/v1beta"
 

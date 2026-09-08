@@ -16,6 +16,13 @@ Or path-depend during development (sibling checkout):
 --path:"../nimgent/src"
 ```
 
+## Module layout
+
+The implementation is grouped under `src/nimgent/structured_output/` for JSON
+Schema and structured-output support, and `src/nimgent/providers/` for provider
+types, adapters, transports, and streaming helpers. Existing flat imports such
+as `nimgent/openai` remain available as compatibility facades.
+
 ## Quick start
 
 ```nim

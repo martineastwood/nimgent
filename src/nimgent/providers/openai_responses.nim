@@ -1,7 +1,7 @@
 ## Native OpenAI Responses API wire format.
 
 import std/[json, strutils]
-import nimgent/[provider, stream]
+import nimgent/providers/[provider, stream]
 
 proc responsesImagePart(mimeType, data: string): JsonNode =
   %*{"type": "input_image", "image_url": "data:" & mimeType & ";base64," & data}

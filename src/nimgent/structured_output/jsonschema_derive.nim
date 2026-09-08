@@ -1,7 +1,7 @@
 ## Compile-time derivation of JSON Schema from Nim types.
 
 import std/[json, macros, strutils]
-import nimgent/jsonschema_validate
+import nimgent/structured_output/jsonschema_validate
 
 ## Optional field annotations understood by `jsonSchema`. They are declared
 ## as pragmas so they can be used directly on object fields without generating

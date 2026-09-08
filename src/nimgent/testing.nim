@@ -1,7 +1,7 @@
 ## Deterministic provider for application tests.
 
 import std/asyncdispatch
-import nimgent/provider
+import nimgent/providers/provider
 
 type FakeProvider* = ref object of Provider
   responses*: seq[ProviderResponse]

@@ -1,12 +1,12 @@
 ## Lightweight LLM client: shared types, generate/stream facade, providers.
 
-import nimgent/provider
+import nimgent/providers/provider
 export provider
 
-import nimgent/provider_options
+import nimgent/providers/provider_options
 export provider_options
 
-import nimgent/jsonschema
+import nimgent/structured_output/jsonschema
 export jsonschema
 
 import std/[asyncdispatch, json, jsonutils, math, options, os, random, strutils,
