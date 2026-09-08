@@ -1362,8 +1362,10 @@ suite "generateObject":
 
     let variant = ChatObjectScript(replies: @[
       """{"kind":"low","mild":"gentle"}"""])
-    check generateObject[VariantRecipe](variant.model("m"), prompt = "x",
-      maxRetries = 0).value.kind == low
+    let variantResult = generateObject(variant.model("m"),
+      jsonSchema(VariantRecipe), prompt = "x", maxRetries = 0)
+    check variantResult.value == %*{"kind": "low", "mild": "gentle"}
+    check variantResult.source == osText
     check "response_format" notin variant.last.options
 
   test "omNative rejects incompatible strict schemas before calling provider":
