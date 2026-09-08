@@ -345,15 +345,29 @@ AI-SDK-style “run my callbacks until the model is done.”
 ## Structured output
 
 `generateObject` asks the model for JSON that matches a schema and validates
-it. Truncated JSON is closed locally (`fixJson`). OpenAI (Responses and Chat
+it. Truncated JSON is rejected by default; pass `truncation = otRepair` to
+accept locally closed JSON (`fixJson`). OpenAI (Responses and Chat
 Completions), OpenRouter, Hyper, and Anthropic get native structured-output
 knobs automatically; anything else is prompt + extract (including ``` fences).
+The result's `locallyRepaired` flag reports when local JSON completion was used.
+`result.attempts` counts model turns (including any repair turns), while
+`result.repairs` counts only the latter.
+`result.source` identifies whether the value came from native structured output
+(`osNative`), text extraction (`osText`), or the forced `submit` tool
+(`osTool`). Failed calls expose both the legacy `ObjectError.issues` strings and
+`ObjectError.issueDetails` entries with a JSON path and message.
+The built-in validator supports common draft-07 constraints and local,
+non-cyclic `$ref` references; unsupported schema keywords fail before a provider
+request.
+Native and tool modes keep the full schema in their provider/tool configuration;
+the prompt-only JSON mode includes it in the instruction.
 
 ```nim
 type Recipe = object
   name: string
-  servings: int
+  servings {.jsonMinimum: 1.}: int
   ingredients: seq[string]
+  notes {.jsonOptional.}: string
 
 let recipe = generateObject[Recipe](
   model,

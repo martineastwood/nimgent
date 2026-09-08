@@ -9,7 +9,9 @@ export provider_options
 import nimgent/jsonschema
 export jsonschema
 
-import std/[asyncdispatch, json, math, os, random, strutils, times]
+import std/[asyncdispatch, json, jsonutils, math, options, os, random, strutils,
+  times]
+export fromJsonHook
 when compileOption("threads"):
   import std/typedthreads
 
@@ -579,11 +581,23 @@ type
     omJson    ## prompt + extract JSON from text
     omTool    ## forced submit tool; arguments are the value
 
+  ObjectSource* = enum
+    osNative  ## provider-native structured output
+    osText     ## JSON extracted from model text
+    osTool     ## value extracted from the submit tool
+
+  ObjectTruncation* = enum
+    otReject   ## reject locally repaired JSON after max-token truncation
+    otRepair   ## accept locally repaired JSON after max-token truncation
+
   ObjectResult*[T] = object
     value*: T
     response*: ProviderResponse
     usage*: Usage
     repairs*: int
+    attempts*: int
+    locallyRepaired*: bool
+    source*: ObjectSource
 
 const objectToolName = "submit"
 
@@ -591,41 +605,77 @@ proc mergeOptions(base, extra: JsonNode): JsonNode =
   result = if base.isNil or base.kind != JObject: newJObject() else: copy(base)
   if extra.isNil or extra.kind != JObject: return
   for k, v in extra:
-    result[k] = copy(v)
+    if k == "generationConfig" and k in result and
+        result[k].kind == JObject and v.kind == JObject:
+      for nestedKey, nestedValue in v:
+        result[k][nestedKey] = copy(nestedValue)
+    else:
+      result[k] = copy(v)
 
-proc objectInstruction(schema: JsonNode, mode: ObjectMode): string =
-  result = "Respond with a single JSON value that matches this schema:\n"
-  result.add schema.pretty
-  if mode == omTool:
-    result.add "\nCall the " & objectToolName & " tool with that value."
+proc objectInstruction(schema: JsonNode, mode: ObjectMode,
+                        includeSchema = true): string =
+  if includeSchema:
+    result = "Respond with a single JSON value that matches this schema:\n"
+    result.add schema.pretty
+  elif mode == omTool:
+    result = "Call the " & objectToolName & " tool with the structured result."
   else:
+    result = "Return the structured result as JSON. No markdown, no prose."
+  if includeSchema and mode == omTool:
+    result.add "\nCall the " & objectToolName & " tool with that value."
+  elif includeSchema:
     result.add "\nNo markdown, no prose."
 
-proc toolObjectValue(resp: ProviderResponse): tuple[value: JsonNode, issue: string] =
-  if resp.toolCalls.len == 0:
-    return (nil, "")
-  let bad = invalidToolCall(resp.toolCalls[0])
-  if bad.len > 0:
-    return (nil, bad)
-  (resp.toolCalls[0].input, "")
+proc appendSystemInstruction(req: var ProviderRequest, instruction: string) =
+  if req.system.len == 0:
+    req.system.add instruction
+  else:
+    req.system[^1].add "\n\n" & instruction
 
-proc takeObjectValue(resp: ProviderResponse, useTool: bool): tuple[value: JsonNode, issue: string] =
+proc toolObjectValue(resp: ProviderResponse): tuple[value: JsonNode, issue: string,
+                                                    locallyRepaired: bool] =
+  let calls = resp.toolCalls
+  if calls.len == 0:
+    return (nil, "expected one '" & objectToolName & "' tool call, got none", false)
+  if calls.len != 1:
+    return (nil, "expected one '" & objectToolName & "' tool call, got " &
+      $calls.len, false)
+  let call = calls[0]
+  if call.name != objectToolName:
+    return (nil, "expected '" & objectToolName & "' tool call, got '" &
+      call.name & "'", false)
+  let bad = invalidToolCall(call)
+  if bad.len > 0:
+    return (nil, bad, false)
+  if call.input.isNil:
+    return (nil, "'" & objectToolName & "' tool call has no arguments", false)
+  (call.input, "", false)
+
+proc takeObjectValue(resp: ProviderResponse, useTool: bool,
+                     truncation: ObjectTruncation): tuple[value: JsonNode,
+                     issue: string, locallyRepaired: bool] =
   if useTool:
     result = toolObjectValue(resp)
     if not result.value.isNil or result.issue.len > 0:
       return
   var parsed = extractJson(resp.text)
   if parsed.isNil:
-    parsed = parsePartialJson(resp.text).value
+    let partial = parsePartialJson(resp.text)
+    if not partial.value.isNil:
+      if partial.state == ppRepaired and resp.finishReason == frMaxTokens and
+          truncation == otReject:
+        return (nil, "response truncated (max tokens)", false)
+      return (partial.value, "", partial.state == ppRepaired)
   if not parsed.isNil:
-    return (parsed, "")
+    return (parsed, "", false)
   if not useTool:
-    result = toolObjectValue(resp)
-    if not result.value.isNil or result.issue.len > 0:
-      return
+    if resp.toolCalls.len > 0:
+      result = toolObjectValue(resp)
+      if not result.value.isNil or result.issue.len > 0:
+        return
   if resp.finishReason == frMaxTokens:
-    return (nil, "response truncated (max tokens)")
-  return (nil, "no JSON object or array in the model response")
+    return (nil, "response truncated (max tokens)", false)
+  return (nil, "no JSON value in the model response", false)
 
 proc repairMessage(issues: seq[string], value: JsonNode, useTool: bool): string =
   result = "Your output did not match the required schema:\n"
@@ -641,50 +691,83 @@ proc repairMessage(issues: seq[string], value: JsonNode, useTool: bool): string 
 type PartialObjectCallback* = proc (value: JsonNode): bool {.closure.}
   ## Partial JSON tree. Not schema-valid. Return false to cancel.
 
+type ObjectToolPartial = object
+  id: string
+  name: string
+  args: string
+
+proc objectToolSlot(parts: var seq[ObjectToolPartial], id, name: string): int =
+  for i, part in parts:
+    if (id.len > 0 and part.id == id) or
+        (id.len == 0 and part.id.len == 0 and part.name == name):
+      return i
+  parts.add ObjectToolPartial(id: id, name: name)
+  parts.high
+
 type ObjectSession = object
   provider: Provider
   req: ProviderRequest
   schema: JsonNode
   useTool: bool
+  source: ObjectSource
+  truncation: ObjectTruncation
   maxRetries: int
 
 proc startObjectSession(
   provider: Provider, req: ProviderRequest, schema: JsonNode,
-  name, description: string, mode: ObjectMode, maxRetries: int
+  name, description: string, mode: ObjectMode, maxRetries, maxRepairs: int,
+  truncation: ObjectTruncation
 ): ObjectSession =
+  if maxRepairs < 0:
+    raiseProviderError("maxRepairs must be at least 0")
   if schema.isNil or schema.kind != JObject:
     raiseObjectError("generateObject requires a JSON Schema object", @[])
+  let schemaIssues = validateJsonSchema(schema)
+  if schemaIssues.len > 0:
+    raiseObjectError("generateObject received an invalid JSON Schema: " &
+      schemaIssues.join("; "), schemaIssues)
   let wire = prepareWireSchema(schema)
+  let native = provider.nativeObjectOptions(schemaName(name), description, wire)
   result.provider = provider
   result.req = req
   result.schema = schema
+  result.truncation = truncation
   result.maxRetries = maxRetries
-  result.req.system.add objectInstruction(wire, mode)
-  let native = provider.nativeObjectOptions(schemaName(name), description, wire)
   case mode
   of omNative:
     if native.isNil:
       raiseObjectError("provider '" & provider.name &
         "' has no native structured output", @[])
+    appendSystemInstruction(result.req, objectInstruction(wire, mode, false))
     result.req.options = mergeOptions(result.req.options, native)
+    result.source = osNative
   of omAuto:
+    appendSystemInstruction(result.req, objectInstruction(wire, mode, native.isNil))
     if not native.isNil:
       result.req.options = mergeOptions(result.req.options, native)
+      result.source = osNative
+    else:
+      result.source = osText
   of omTool:
+    appendSystemInstruction(result.req, objectInstruction(wire, mode, false))
     result.useTool = true
     result.req.tools = @[ToolDefinition(name: objectToolName,
       description: "Submit the structured result.", inputSchema: wire)]
     let forced = provider.forceToolOptions(objectToolName)
     if not forced.isNil:
       result.req.options = mergeOptions(result.req.options, forced)
+    result.source = osTool
   of omJson:
-    discard
+    appendSystemInstruction(result.req, objectInstruction(wire, mode, true))
+    result.source = osText
 
 proc acceptObject(resp: ProviderResponse, schema: JsonNode,
-                  useTool: bool): tuple[value: JsonNode, issues: seq[string], raw: string] =
-  let taken = takeObjectValue(resp, useTool)
+                  useTool: bool, truncation: ObjectTruncation): tuple[value: JsonNode,
+                  issues: seq[string], raw: string, locallyRepaired: bool] =
+  let taken = takeObjectValue(resp, useTool, truncation)
   result.value = taken.value
   result.raw = if taken.value.isNil: resp.text else: $taken.value
+  result.locallyRepaired = taken.locallyRepaired
   if taken.value.isNil:
     result.issues = @[taken.issue]
   else:
@@ -703,18 +786,30 @@ proc finishObjectAsync(session: ObjectSession, first: ProviderResponse,
                        abort: AbortCheck): Future[ObjectResult[JsonNode]] {.async.} =
   var session = session
   result.response = first
-  var taken: tuple[value: JsonNode, issues: seq[string], raw: string]
+  result.source = session.source
+  var taken: tuple[value: JsonNode, issues: seq[string], raw: string,
+                   locallyRepaired: bool]
   for repair in 0 .. maxRepairs:
     if repair > 0:
       session.req.messages.add Message(role: roleAssistant,
         content: result.response.content)
-      session.req.messages.add userMessage(
-        repairMessage(taken.issues, taken.value, session.useTool))
+      let instruction = repairMessage(taken.issues, taken.value, session.useTool)
+      if session.useTool and result.response.toolCalls.len > 0:
+        var parts: seq[ContentBlock]
+        for call in result.response.toolCalls:
+          parts.add toolResult(call.id, instruction, isError = true)
+        parts.add text(instruction)
+        session.req.messages.add userMessage(parts)
+      else:
+        session.req.messages.add userMessage(instruction)
       result.response = await generateTextAsync(session.provider, session.req,
         session.maxRetries, abort)
     result.usage.addUsage(result.response.usage)
     result.repairs = repair
-    taken = acceptObject(result.response, session.schema, session.useTool)
+    result.attempts = repair + 1
+    taken = acceptObject(result.response, session.schema, session.useTool,
+      session.truncation)
+    result.locallyRepaired = result.locallyRepaired or taken.locallyRepaired
     if taken.issues.len == 0:
       result.value = taken.value
       return
@@ -738,16 +833,18 @@ proc generateObjectAsync(
   maxRetries = 2,
   maxRepairs = 0,
   mode = omAuto,
-  abort: AbortCheck = nil
+  abort: AbortCheck = nil,
+  truncation = otReject
 ): Future[ObjectResult[JsonNode]] {.async.} =
   ## Schema in, JSON out. Uses native structured output when the provider
   ## has it (`omAuto`), extracts JSON from text or a tool call, validates.
-  ## Truncated JSON is closed with `fixJson`. `maxRepairs` (default 0) is
-  ## extra model turns after that.
+  ## Truncated JSON is rejected by default; set `truncation = otRepair` to
+  ## accept locally repaired JSON. `maxRepairs` (default 0) is extra model
+  ## turns after local parsing/validation fails.
   var session = startObjectSession(
     provider,
     buildRequest(model, prompt, messages, system, @[], maxTokens, sessionId, options),
-    schema, name, description, mode, maxRetries)
+    schema, name, description, mode, maxRetries, maxRepairs, truncation)
   let first = await generateTextAsync(session.provider, session.req,
     session.maxRetries, abort)
   return await finishObjectAsync(session, first, maxRepairs, abort)
@@ -767,13 +864,14 @@ proc generateObjectAsync*(
   maxRepairs = 0,
   mode = omAuto,
   abort: AbortCheck = nil,
-  providerOptions = ProviderOptions()
+  providerOptions = ProviderOptions(),
+  truncation = otReject
 ): Future[ObjectResult[JsonNode]] {.async.} =
   let resolved = resolveOptions(options, providerOptions, model.provider.name)
   return await generateObjectAsync(model.provider, model.id, schema, prompt,
     messages, system,
     name, description, maxTokens, sessionId, resolved, maxRetries, maxRepairs,
-    mode, abort)
+    mode, abort, truncation)
 
 proc generateObject*(model: LanguageModel, schema: JsonNode, prompt = "",
                      messages: seq[Message] = @[], system = "",
@@ -781,10 +879,11 @@ proc generateObject*(model: LanguageModel, schema: JsonNode, prompt = "",
                      sessionId = "", options: JsonNode = nil, maxRetries = 2,
                      maxRepairs = 0, mode = omAuto,
                      abort: AbortCheck = nil,
-                     providerOptions = ProviderOptions()): ObjectResult[JsonNode] =
+                     providerOptions = ProviderOptions(),
+                     truncation = otReject): ObjectResult[JsonNode] =
   waitFor generateObjectAsync(model, schema, prompt, messages, system, name,
     description, maxTokens, sessionId, options, maxRetries, maxRepairs, mode,
-    abort, providerOptions)
+    abort, providerOptions, truncation)
 
 proc streamObjectAsync(
   provider: Provider,
@@ -804,20 +903,23 @@ proc streamObjectAsync(
   mode = omAuto,
   abort: AbortCheck = nil,
   onPartial: PartialObjectCallback = nil,
-  onEvent: StreamCallback = nil
+  onEvent: StreamCallback = nil,
+  truncation = otReject
 ): Future[ObjectResult[JsonNode]] {.async.} =
   ## Like `generateObject`, but the first attempt streams. `onPartial` gets
   ## the repaired JSON tree whenever it changes (not schema-valid). Schema
-  ## check and optional model repairs run after the stream ends.
+  ## check and optional model repairs run after the stream ends. Max-token
+  ## truncation is rejected unless `truncation = otRepair`.
   var session = startObjectSession(
     provider,
     buildRequest(model, prompt, messages, system, @[], maxTokens, sessionId,
       options, wakeFd),
-    schema, name, description, mode, maxRetries)
+    schema, name, description, mode, maxRetries, maxRepairs, truncation)
   var cancelled = false
   var lastPartial: JsonNode = nil
   var accText = ""
   var accTool = ""
+  var toolParts: seq[ObjectToolPartial] = @[]
   let first = await streamTextAsync(
     session.provider, session.req,
     onEvent = proc (ev: StreamEvent): bool =
@@ -828,10 +930,18 @@ proc streamObjectAsync(
           cancelled = true
           return false
       of seToolCallDelta:
-        accTool.add ev.toolArgs
-        if not emitPartial(accTool, lastPartial, onPartial):
-          cancelled = true
-          return false
+        if session.useTool:
+          if ev.toolName == objectToolName:
+            let slot = objectToolSlot(toolParts, ev.toolCallId, ev.toolName)
+            toolParts[slot].args.add ev.toolArgs
+            if not emitPartial(toolParts[slot].args, lastPartial, onPartial):
+              cancelled = true
+              return false
+        else:
+          accTool.add ev.toolArgs
+          if not emitPartial(accTool, lastPartial, onPartial):
+            cancelled = true
+            return false
       else:
         discard
       if not onEvent.isNil and not onEvent(ev):
@@ -861,13 +971,14 @@ proc streamObjectAsync*(
   abort: AbortCheck = nil,
   onPartial: PartialObjectCallback = nil,
   onEvent: StreamCallback = nil,
-  providerOptions = ProviderOptions()
+  providerOptions = ProviderOptions(),
+  truncation = otReject
 ): Future[ObjectResult[JsonNode]] {.async.} =
   let resolved = resolveOptions(options, providerOptions, model.provider.name)
   return await streamObjectAsync(model.provider, model.id, schema, prompt,
     messages, system,
     name, description, maxTokens, sessionId, resolved, wakeFd, maxRetries,
-    maxRepairs, mode, abort, onPartial, onEvent)
+    maxRepairs, mode, abort, onPartial, onEvent, truncation)
 
 proc streamObject*(model: LanguageModel, schema: JsonNode, prompt = "",
                    messages: seq[Message] = @[], system = "",
@@ -877,23 +988,27 @@ proc streamObject*(model: LanguageModel, schema: JsonNode, prompt = "",
                    abort: AbortCheck = nil,
                    onPartial: PartialObjectCallback = nil,
                    onEvent: StreamCallback = nil,
-                   providerOptions = ProviderOptions()): ObjectResult[JsonNode] =
+                   providerOptions = ProviderOptions(),
+                   truncation = otReject): ObjectResult[JsonNode] =
   waitFor streamObjectAsync(model, schema, prompt, messages, system, name,
     description, maxTokens, sessionId, options, wakeFd, maxRetries, maxRepairs,
-    mode, abort, onPartial, onEvent, providerOptions)
+    mode, abort, onPartial, onEvent, providerOptions, truncation)
 
 proc toObject*[T](r: ObjectResult[JsonNode]): ObjectResult[T] =
   ## Decode `r.value` as `T`. Validation already ran against the schema.
   when T is JsonNode:
     {.error: "toObject[JsonNode] is a no-op; use the ObjectResult[JsonNode]".}
   try:
-    result.value = r.value.to(T)
+    result.value = jsonTo(r.value, T, Joptions(allowMissingKeys: true))
   except CatchableError as e:
     raiseObjectError("decoded JSON does not match " & $T & ": " & e.msg,
       @["$.: " & e.msg], $r.value)
   result.response = r.response
   result.usage = r.usage
   result.repairs = r.repairs
+  result.attempts = r.attempts
+  result.locallyRepaired = r.locallyRepaired
+  result.source = r.source
 
 proc generateObjectAsync*[T](
   model: LanguageModel,
@@ -909,7 +1024,8 @@ proc generateObjectAsync*[T](
   maxRepairs = 0,
   mode = omAuto,
   abort: AbortCheck = nil,
-  providerOptions = ProviderOptions()
+  providerOptions = ProviderOptions(),
+  truncation = otReject
 ): Future[ObjectResult[T]] {.async.} =
   ## `generateObject` with `jsonSchema(T)`, then `toObject`.
   when T is JsonNode:
@@ -917,7 +1033,8 @@ proc generateObjectAsync*[T](
   let nm = if name.len > 0: name else: $T
   return toObject[T](await generateObjectAsync(
     model, jsonSchema(T), prompt, messages, system, nm, description,
-    maxTokens, sessionId, options, maxRetries, maxRepairs, mode, abort, providerOptions))
+    maxTokens, sessionId, options, maxRetries, maxRepairs, mode, abort,
+    providerOptions, truncation))
 
 proc generateObject*[T](model: LanguageModel, prompt = "",
                         messages: seq[Message] = @[], system = "", name = "",
@@ -925,10 +1042,11 @@ proc generateObject*[T](model: LanguageModel, prompt = "",
                         options: JsonNode = nil, maxRetries = 2,
                         maxRepairs = 0, mode = omAuto,
                         abort: AbortCheck = nil,
-                        providerOptions = ProviderOptions()): ObjectResult[T] =
+                        providerOptions = ProviderOptions(),
+                        truncation = otReject): ObjectResult[T] =
   waitFor generateObjectAsync[T](model, prompt, messages, system, name,
     description, maxTokens, sessionId, options, maxRetries, maxRepairs, mode,
-    abort, providerOptions)
+    abort, providerOptions, truncation)
 
 proc streamObjectAsync*[T](
   model: LanguageModel,
@@ -947,7 +1065,8 @@ proc streamObjectAsync*[T](
   abort: AbortCheck = nil,
   onPartial: PartialObjectCallback = nil,
   onEvent: StreamCallback = nil,
-  providerOptions = ProviderOptions()
+  providerOptions = ProviderOptions(),
+  truncation = otReject
 ): Future[ObjectResult[T]] {.async.} =
   when T is JsonNode:
     {.error: "use streamObject(..., schema=) for JsonNode; not streamObject[JsonNode]".}
@@ -955,7 +1074,7 @@ proc streamObjectAsync*[T](
   return toObject[T](await streamObjectAsync(
     model, jsonSchema(T), prompt, messages, system, nm, description,
     maxTokens, sessionId, options, wakeFd, maxRetries, maxRepairs, mode, abort,
-    onPartial, onEvent, providerOptions))
+    onPartial, onEvent, providerOptions, truncation))
 
 proc streamObject*[T](model: LanguageModel, prompt = "",
                       messages: seq[Message] = @[], system = "", name = "",
@@ -965,7 +1084,8 @@ proc streamObject*[T](model: LanguageModel, prompt = "",
                       abort: AbortCheck = nil,
                       onPartial: PartialObjectCallback = nil,
                       onEvent: StreamCallback = nil,
-                      providerOptions = ProviderOptions()): ObjectResult[T] =
+                      providerOptions = ProviderOptions(),
+                      truncation = otReject): ObjectResult[T] =
   waitFor streamObjectAsync[T](model, prompt, messages, system, name,
     description, maxTokens, sessionId, options, wakeFd, maxRetries, maxRepairs,
-    mode, abort, onPartial, onEvent, providerOptions)
+    mode, abort, onPartial, onEvent, providerOptions, truncation)

@@ -1,5 +1,5 @@
-import std/[asyncdispatch, json, options, os, osproc, streams, strutils, times,
-  unittest]
+import std/[asyncdispatch, atomics, json, options, os, osproc, sets, streams,
+  strutils, tables, times, unittest]
 import nimgent
 import nimgent/[anthropic, openrouter, google]
 import nimgent/testing
@@ -558,14 +558,20 @@ suite "generateText retries, abort, and tools":
 
   test "parallel execute overlaps":
     let p = ScriptProvider(toolFirst: true, twoTools: true)
-    proc slow(_: JsonNode): ToolOutput {.gcsafe.} =
+    var firstStarted, secondStarted, overlap: Atomic[bool]
+    proc slow(input: JsonNode): ToolOutput {.gcsafe.} =
+      if input["x"].getInt == 1:
+        firstStarted.store(true)
+        if secondStarted.load: overlap.store(true)
+      else:
+        secondStarted.store(true)
+        if firstStarted.load: overlap.store(true)
       sleep(120)
       ToolOutput(output: "pong")
     let echoTool = rawTool("echo", "echo", %*{"type": "object"}, slow, parallel = true)
-    let t0 = epochTime()
     let r = generateText(p.model("m"), prompt = "hi",
       tools = @[echoTool], maxSteps = 2, maxRetries = 0)
-    check epochTime() - t0 < 0.20
+    check overlap.load
     check r.text == "ok"
     check p.calls == 2
     var results: seq[string]
@@ -971,27 +977,78 @@ type
     vegetarian*: Option[bool]
     heat*: Heat
 
+  AnnotatedRecipe = object
+    title {.jsonDescription: "Display title".}: string
+    servings {.jsonMinimum: 1.}: int
+    notes {.jsonOptional.}: string
+
+  EmptyRecipe = object
+
+  OptionalRecipe = object
+    name: string
+    notes {.jsonOptional.}: string
+
+  OnlyOptionalRecipe = object
+    notes {.jsonOptional.}: string
+
+  RecipeBase = object of RootObj
+    id*: string
+
+  RecipeChild = object of RecipeBase
+    name*: string
+
+  VariantRecipe = object
+    case kind*: Heat
+    of low:
+      mild*: string
+    of high:
+      spicy*: bool
+
+  ContainerRecipe = object
+    flags: set[Heat]
+    tags: HashSet[string]
+    counts: Table[string, int]
+
+  Box[T] = object
+    value: T
+
   ObjectScript = ref object of Provider
     calls*: int
     last*: ProviderRequest
     replies*: seq[string]
+    finishReasons*: seq[FinishReason]
     toolValue*: JsonNode
+    toolValues*: seq[JsonNode]
+    toolResponse*: seq[ContentBlock]
     usageEach*: Usage
 
   ChatObjectScript = ref object of ObjectScript
+  GoogleObjectScript = ref object of ObjectScript
 
 method generateAsync(p: ObjectScript,
                      request: ProviderRequest): Future[ProviderResponse] {.async.} =
   inc p.calls
   p.last = request
   result.usage = p.usageEach
+  if p.toolValues.len > 0:
+    result.content.add toolUse("call_" & $p.calls, "submit",
+      copy(p.toolValues[min(p.calls - 1, p.toolValues.high)]))
+    result.finishReason = frToolUse
+    return
+  if p.toolResponse.len > 0 and p.calls == 1:
+    result.content = p.toolResponse
+    result.finishReason = frToolUse
+    return
   if not p.toolValue.isNil and p.calls == 1:
     result.content.add toolUse("call_1", "submit", copy(p.toolValue))
     result.finishReason = frToolUse
     return
   if p.replies.len > 0:
     result.content.add text(p.replies[min(p.calls - 1, p.replies.high)])
-  result.finishReason = frStop
+  result.finishReason = if p.finishReasons.len > 0:
+    p.finishReasons[min(p.calls - 1, p.finishReasons.high)]
+  else:
+    frStop
 
 method nativeObjectOptions(p: ChatObjectScript, name, description: string,
                            schema: JsonNode): JsonNode =
@@ -999,6 +1056,11 @@ method nativeObjectOptions(p: ChatObjectScript, name, description: string,
 
 method forceToolOptions(p: ChatObjectScript, toolName: string): JsonNode =
   chatForceToolOptions(toolName)
+
+method nativeObjectOptions(p: GoogleObjectScript, name, description: string,
+                           schema: JsonNode): JsonNode =
+  %*{"generationConfig": {"responseMimeType": "application/json",
+    "responseJsonSchema": schema}}
 
 suite "json schema":
   test "extracts raw, fenced, and prose-wrapped JSON":
@@ -1065,7 +1127,112 @@ suite "json schema":
       "x": {"type": "string"}}})
     check wire["additionalProperties"].getBool == false
 
+  test "jsonSchema preserves typed-schema metadata and object shapes":
+    let annotated = jsonSchema(AnnotatedRecipe)
+    check annotated["properties"]["title"]["description"].getStr == "Display title"
+    check annotated["properties"]["servings"]["minimum"].getInt == 1
+    var annotatedRequired: seq[string]
+    for key in annotated["required"]:
+      annotatedRequired.add key.getStr
+    check "notes" notin annotatedRequired
+    let inherited = jsonSchema(RecipeChild)
+    var inheritedRequired: seq[string]
+    for key in inherited["required"]:
+      inheritedRequired.add key.getStr
+    check "id" in inheritedRequired
+    check inherited["properties"]["id"]["type"].getStr == "string"
+    check inherited["properties"]["name"]["type"].getStr == "string"
+    let variant = jsonSchema(VariantRecipe)
+    check validateJsonSchema(variant).len == 0
+    check variant["properties"]["kind"]["enum"].len == 2
+    check variant["properties"]["mild"]["type"].getStr == "string"
+    check variant["properties"]["spicy"]["type"].getStr == "boolean"
+    check validateSchema(%*{"kind": "low", "mild": "gentle"}, variant).len == 0
+    check validateSchema(%*{"kind": "high", "spicy": true}, variant).len == 0
+    check validateSchema(%*{"kind": "low"}, variant).len > 0
+    let fixed = jsonSchema(array[3, string])
+    check fixed["minItems"].getInt == 3
+    check fixed["maxItems"].getInt == 3
+    let containers = jsonSchema(ContainerRecipe)
+    check containers["properties"]["flags"]["uniqueItems"].getBool
+    check containers["properties"]["tags"]["uniqueItems"].getBool
+    check containers["properties"]["counts"]["additionalProperties"]["type"].getStr == "integer"
+    check jsonSchema(Box[int])["properties"]["value"]["type"].getStr == "integer"
+
+  test "jsonSchema omits an empty required keyword":
+    check "required" notin jsonSchema(EmptyRecipe)
+    check "required" notin jsonSchema(OnlyOptionalRecipe)
+    check validateJsonSchema(jsonSchema(EmptyRecipe)).len == 0
+    check validateJsonSchema(jsonSchema(OnlyOptionalRecipe)).len == 0
+
+  test "preflights malformed and unsupported schemas":
+    let issues = validateJsonSchema(%*{
+      "type": "object",
+      "properties": {"name": {"minLength": "one"}},
+      "$ref": "other.json"
+    })
+    check "$.properties.name.minLength" in issues.join(" ")
+    check "$ref: external references are not supported" in issues.join(" ")
+    check "unresolved reference" in validateJsonSchema(%*{
+      "$ref": "#/missing"}).join(" ")
+
+    let p = ObjectScript()
+    var err: ref ObjectError
+    try:
+      discard generateObject(p.model("m"), %*{
+        "type": "object", "properties": {"name": {"minLength": "one"}}
+      }, prompt = "x", maxRetries = 0)
+    except ObjectError as e:
+      err = e
+    check not err.isNil
+    check "minLength" in err.issues.join(" ")
+    check err.issueDetails.len > 0
+    check err.issueDetails[0].path == "$.properties.name.minLength"
+    check p.calls == 0
+
+  test "supports local refs and common schema constraints":
+    let schema = %*{
+      "$defs": {
+        "tag": {"type": "string", "pattern": "^[a-z]+$", "minLength": 2}
+      },
+      "type": "object",
+      "properties": {
+        "tag": {"$ref": "#/$defs/tag"},
+        "values": {"type": "array", "uniqueItems": true,
+          "items": {"type": "integer"}}
+      },
+      "required": ["tag", "values"],
+      "additionalProperties": false
+    }
+    check validateJsonSchema(schema).len == 0
+    check validateSchema(%*{"tag": "nim", "values": [1, 2]}, schema).len == 0
+    check "pattern" in validateSchema(%*{"tag": "Nim", "values": [1, 2]}, schema).join(" ")
+    check "duplicate" in validateSchema(%*{"tag": "nim", "values": [1, 1]}, schema).join(" ")
+    let numeric = %*{"type": "number", "exclusiveMinimum": 0,
+      "exclusiveMaximum": 2, "multipleOf": 0.5}
+    check validateJsonSchema(numeric).len == 0
+    check validateSchema(%*1.5, numeric).len == 0
+    check "exclusiveMaximum" in validateSchema(%*2, numeric).join(" ")
+
+    let p = ObjectScript(replies: @["""{"tag":"nim","values":[1,2]}"""])
+    let r = generateObject(p.model("m"), schema, prompt = "x",
+      mode = omJson, maxRetries = 0)
+    check r.value["tag"].getStr == "nim"
+
 suite "generateObject":
+  test "parses scalar JSON values":
+    let p = ObjectScript(replies: @["42"])
+    let r = generateObject[int](p.model("m"), prompt = "number",
+      mode = omJson, maxRetries = 0)
+    check r.value == 42
+
+  test "typed optional fields decode to their Nim default when omitted":
+    let p = ObjectScript(replies: @["""{"name":"soup"}"""])
+    let r = generateObject[OptionalRecipe](p.model("m"), prompt = "cook",
+      mode = omJson, maxRetries = 0)
+    check r.value.name == "soup"
+    check r.value.notes == ""
+
   test "parses JSON text and returns a typed value":
     let p = ObjectScript(replies: @[
       """{"name":"lasagna","servings":4,"ingredients":["pasta"],"vegetarian":true,"heat":"low"}"""
@@ -1078,6 +1245,8 @@ suite "generateObject":
     check r.value.vegetarian == some(true)
     check r.value.heat == low
     check r.repairs == 0
+    check r.attempts == 1
+    check r.source == osText
 
   test "extracts fenced JSON and sums usage across repairs":
     let p = ObjectScript(
@@ -1092,10 +1261,24 @@ suite "generateObject":
       mode = omJson, maxRetries = 0, maxRepairs = 1)
     check r.value["ok"].getBool
     check r.repairs == 1
+    check r.attempts == 2
     check r.usage.inputTokens == 10
     check r.usage.outputTokens == 4
     check p.calls == 2
     check "did not match" in p.last.messages[^1].content[0].text
+
+  test "JSON fallback preserves the caller schema semantics":
+    let p = ObjectScript(replies: @["""{"ok":true,"extra":1}"""])
+    let schema = %*{
+      "type": "object",
+      "properties": {"ok": {"type": "boolean"}},
+      "required": ["ok"]
+    }
+    let r = generateObject(p.model("m"), schema, prompt = "x",
+      mode = omJson, maxRetries = 0)
+    check r.value == %*{"ok": true, "extra": 1}
+    check r.value["extra"].getInt == 1
+    check r.repairs == 0
 
   test "closes truncated JSON without a model repair":
     let p = ObjectScript(replies: @["{\"ok\": tru"])
@@ -1109,6 +1292,32 @@ suite "generateObject":
     check r.value["ok"].getBool
     check r.repairs == 0
     check p.calls == 1
+    check r.locallyRepaired
+
+  test "rejects max-token truncation unless explicitly enabled":
+    let schema = %*{
+      "type": "object",
+      "properties": {"ok": {"type": "boolean"}},
+      "required": ["ok"]
+    }
+    let rejected = ObjectScript(
+      replies: @["{\"ok\": tru"], finishReasons: @[frMaxTokens])
+    var err: ref ObjectError
+    try:
+      discard generateObject(rejected.model("m"), schema, prompt = "x",
+        mode = omJson, maxRetries = 0)
+    except ObjectError as e:
+      err = e
+    check not err.isNil
+    check "response truncated" in err.msg
+    check rejected.calls == 1
+
+    let repaired = ObjectScript(
+      replies: @["{\"ok\": tru"], finishReasons: @[frMaxTokens])
+    let r = generateObject(repaired.model("m"), schema, prompt = "x",
+      mode = omJson, maxRetries = 0, truncation = otRepair)
+    check r.value["ok"].getBool
+    check r.locallyRepaired
 
   test "reads a forced tool call":
     let p = ChatObjectScript(toolValue: %*{"ok": true})
@@ -1123,6 +1332,75 @@ suite "generateObject":
     check p.last.tools.len == 1
     check p.last.tools[0].name == "submit"
     check p.last.options["tool_choice"]["function"]["name"].getStr == "submit"
+    check r.source == osTool
+
+  test "rejects missing, wrong, and multiple submit calls":
+    let schema = %*{
+      "type": "object",
+      "properties": {"ok": {"type": "boolean"}},
+      "required": ["ok"]
+    }
+    let wrong = ChatObjectScript(toolResponse: @[
+      toolUse("call_1", "other", %*{"ok": true})])
+    var err: ref ObjectError
+    try:
+      discard generateObject(wrong.model("m"), schema, prompt = "x", mode = omTool,
+        maxRetries = 0)
+    except ObjectError as e:
+      err = e
+    check not err.isNil
+    check "expected 'submit'" in err.msg
+
+    let multiple = ChatObjectScript(toolResponse: @[
+      toolUse("call_1", "submit", %*{"ok": true}),
+      toolUse("call_2", "submit", %*{"ok": false})])
+    err = nil
+    try:
+      discard generateObject(multiple.model("m"), schema, prompt = "x", mode = omTool,
+        maxRetries = 0)
+    except ObjectError as e:
+      err = e
+    check not err.isNil
+    check "got 2" in err.msg
+
+  test "tool repairs acknowledge every rejected tool call":
+    let p = ChatObjectScript(toolValues: @[
+      %*{"ok": "wrong"}, %*{"ok": true}])
+    let schema = %*{
+      "type": "object",
+      "properties": {"ok": {"type": "boolean"}},
+      "required": ["ok"]
+    }
+    let r = generateObject(p.model("m"), schema, prompt = "x", mode = omTool,
+      maxRetries = 0, maxRepairs = 1)
+    check r.value["ok"].getBool
+    check p.last.messages[^1].content[0].kind == ckToolResult
+    check p.last.messages[^1].content[0].toolUseId == "call_1"
+    check p.last.messages[^1].content[^1].kind == ckText
+    let chatBody = buildChatBody(p.last, false)
+    check chatBody["messages"][^2]["role"].getStr == "tool"
+    check chatBody["messages"][^1]["role"].getStr == "user"
+    let responsesBody = buildResponsesBody(p.last, false)
+    check responsesBody["input"][^2]["type"].getStr == "function_call_output"
+    check responsesBody["input"][^1]["role"].getStr == "user"
+
+  test "rejects negative maxRepairs before calling the provider":
+    let p = ObjectScript(replies: @["{}"])
+    expect ProviderError:
+      discard generateObject(p.model("m"), %*{"type": "object"}, prompt = "x",
+        maxRetries = 0, maxRepairs = -1)
+    check p.calls == 0
+
+  test "native Google options preserve generation config siblings":
+    let p = GoogleObjectScript(replies: @["""{"ok":true}"""])
+    discard generateObject(p.model("m"),
+      %*{"type": "object", "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"]},
+      prompt = "x", options = %*{"generationConfig": {"temperature": 0.2}},
+      maxRetries = 0)
+    check p.last.options["generationConfig"]["temperature"].getFloat == 0.2
+    check p.last.options["generationConfig"]["responseMimeType"].getStr ==
+      "application/json"
 
   test "omAuto attaches native OpenRouter response_format":
     let p = ChatObjectScript(replies: @["{\"ok\":true}"])
@@ -1131,11 +1409,36 @@ suite "generateObject":
       "properties": {"ok": {"type": "boolean"}},
       "required": ["ok"]
     }
-    discard generateObject(p.model("m"), schema, prompt = "x", maxRetries = 0)
+    let r = generateObject(p.model("m"), schema, prompt = "x", maxRetries = 0)
+    check r.source == osNative
     check p.last.options["response_format"]["type"].getStr == "json_schema"
     check p.last.options["response_format"]["json_schema"]["strict"].getBool
     check p.last.options["response_format"]["json_schema"]["schema"][
       "additionalProperties"].getBool == false
+
+  test "native and tool modes do not duplicate the full schema":
+    let schema = %*{
+      "type": "object",
+      "properties": {"ok": {"type": "boolean"}},
+      "required": ["ok"]
+    }
+    let native = ChatObjectScript(replies: @["""{"ok":true}"""])
+    discard generateObject(native.model("m"), schema, prompt = "x",
+      system = "Be concise", maxRetries = 0)
+    check native.last.system.len == 1
+    check native.last.system[0].startsWith("Be concise\n\n")
+    check "properties" notin native.last.system[0]
+
+    let json = ObjectScript(replies: @["""{"ok":true}"""])
+    discard generateObject(json.model("m"), schema, prompt = "x",
+      mode = omJson, maxRetries = 0)
+    check "properties" in json.last.system[0]
+
+    let tool = ChatObjectScript(toolValue: %*{"ok": true})
+    discard generateObject(tool.model("m"), schema, prompt = "x",
+      mode = omTool, maxRetries = 0)
+    check "properties" notin tool.last.system[0]
+    check "submit" in tool.last.system[0]
 
   test "raises ObjectError after repairs are exhausted":
     let schema = %*{"type": "object", "properties": {"a": {"type": "string"}},
@@ -1195,6 +1498,7 @@ type
     chunks*: seq[string]
     last*: ProviderRequest
     tool*: bool
+    interleaveOther*: bool
 
 method generateStreamAsync(p: ChunkScript, request: ProviderRequest,
                            onEvent: StreamCallback): Future[ProviderResponse] {.async.} =
@@ -1205,6 +1509,9 @@ method generateStreamAsync(p: ChunkScript, request: ProviderRequest,
         toolName: "submit", toolArgs: "")):
       result.finishReason = frStop
       return
+    if p.interleaveOther:
+      discard onEvent(StreamEvent(kind: seToolCallDelta, toolCallId: "call_other",
+        toolName: "other", toolArgs: "{\"bad\":"))
   for c in p.chunks:
     acc.add c
     let ev =
@@ -1271,6 +1578,24 @@ suite "streamObject":
         true)
     check r.value["ok"].getBool
     check true in saw
+
+  test "isolates submit arguments from interleaved tool deltas":
+    let p = ChunkScript(tool: true, interleaveOther: true,
+      chunks: @["{\"ok\":", "true}"])
+    let schema = %*{
+      "type": "object",
+      "properties": {"ok": {"type": "boolean"}},
+      "required": ["ok"]
+    }
+    var partials: seq[string] = @[]
+    let r = streamObject(p.model("m"), schema, prompt = "x", mode = omTool,
+      maxRetries = 0,
+      onPartial = proc (v: JsonNode): bool =
+        partials.add $v
+        true)
+    check r.value["ok"].getBool
+    check partials.len > 0
+    check "bad" notin partials.join(" ")
 
   test "typed streamObject and cancel via onPartial":
     let p = ObjectScript(replies: @[
@@ -1480,6 +1805,7 @@ suite "typed provider options":
     check not p.last.options["store"].getBool
     discard waitFor streamObjectAsync[Answer](model, prompt = "x", providerOptions = scoped)
     check not p.last.options["store"].getBool
-    p.toolValue = %*{"ok": true}
-    discard generateObject(model, schema, prompt = "x", mode = omTool, providerOptions = scoped)
-    check p.last.options["tool_choice"]["function"]["name"].getStr == "submit"
+    let toolP = ChatObjectScript(toolValue: %*{"ok": true})
+    discard generateObject(toolP.model("test"), schema, prompt = "x",
+      mode = omTool, providerOptions = scoped)
+    check toolP.last.options["tool_choice"]["function"]["name"].getStr == "submit"

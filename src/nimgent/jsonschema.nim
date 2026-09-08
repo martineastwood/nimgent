@@ -2,9 +2,25 @@
 ##
 ## ponytail: draft-07 subset used by generateObject — type, properties, required,
 ## items, enum, const, min/max, minLength/maxLength, minItems/maxItems,
-## additionalProperties, anyOf/oneOf/allOf. No $ref; say so if one appears.
+## additionalProperties, anyOf/oneOf/allOf, non-cyclic local refs, patterns,
+## and common bounds.
+## `validateJsonSchema` rejects malformed keywords and unsupported constructs
+## before a request is sent.
 
-import std/[json, macros, math, strutils]
+import std/[json, macros, math, re, strutils, unicode]
+
+## Optional field annotations understood by `jsonSchema`.  They are declared
+## as pragmas so they can be used directly on object fields without generating
+## runtime code.
+template jsonDescription*(value: static[string]) {.pragma.}
+template jsonMinimum*(value: static[int]) {.pragma.}
+template jsonMaximum*(value: static[int]) {.pragma.}
+template jsonMinLength*(value: static[int]) {.pragma.}
+template jsonMaxLength*(value: static[int]) {.pragma.}
+template jsonMinItems*(value: static[int]) {.pragma.}
+template jsonMaxItems*(value: static[int]) {.pragma.}
+template jsonPattern*(value: static[string]) {.pragma.}
+template jsonOptional*() {.pragma.}
 
 proc skipJsonString(s: string, i: var int) =
   inc i
@@ -49,12 +65,12 @@ proc stripFence(s: string): string =
     result = result[0 .. ^4].strip
 
 proc extractJson*(s: string): JsonNode =
-  ## First JSON object or array in `s`. Understands ``` fences and leading prose.
+  ## A complete JSON value, or the first object/array after leading prose.
   let fenced = stripFence(s)
   if fenced.len == 0: return nil
   try:
     let n = parseJson(fenced)
-    if n.kind in {JObject, JArray}: return n
+    return n
   except CatchableError:
     discard
   let slice = sliceJsonValue(fenced)
@@ -282,7 +298,12 @@ proc parsePartialJson*(s: string): tuple[value: JsonNode, state: PartialParse] =
   ## Parse complete JSON, or a repaired prefix (AI SDK `parsePartialJson`).
   if s.len == 0:
     return (nil, ppUndefined)
-  let src = jsonLead(stripFence(s))
+  let fenced = stripFence(s)
+  try:
+    return (parseJson(fenced), ppSuccess)
+  except CatchableError:
+    discard
+  let src = jsonLead(fenced)
   if src.len == 0:
     return (nil, ppUndefined)
   try:
@@ -300,6 +321,193 @@ proc pathField(path, key: string): string =
 
 proc pathIndex(path: string, i: int): string =
   path & "[" & $i & "]"
+
+proc jsonKindName(n: JsonNode): string
+proc resolvePointer(root: JsonNode, refPath: string): JsonNode
+
+proc schemaValueKind(n: JsonNode): string =
+  if n.isNil: return "missing"
+  jsonKindName(n)
+
+proc validSchemaType(name: string): bool =
+  name in ["null", "boolean", "object", "array", "number", "integer", "string"]
+
+proc validateSchemaNode(n: JsonNode, path: string, root: JsonNode): seq[string]
+
+proc validateSchemaArray(n: JsonNode, key, path: string, root: JsonNode): seq[string] =
+  if n.isNil or n.kind != JArray:
+    return @[pathField(path, key) & ": expected array, got " & schemaValueKind(n)]
+  if n.len == 0:
+    result.add pathField(path, key) & ": expected a non-empty array"
+  for i in 0 ..< n.len:
+    result.add validateSchemaNode(n[i], pathIndex(pathField(path, key), i), root)
+
+proc validateSchemaNode(n: JsonNode, path: string, root: JsonNode): seq[string] =
+  if n.isNil:
+    return @[path & ": expected schema object, got " & schemaValueKind(n)]
+  if n.kind == JBool: return
+  if n.kind != JObject:
+    return @[path & ": expected schema object, got " & schemaValueKind(n)]
+
+  if "$ref" in n:
+    let refNode = n["$ref"]
+    if refNode.isNil or refNode.kind != JString:
+      result.add path & ".$ref: expected string, got " & schemaValueKind(refNode)
+    elif not refNode.getStr.startsWith("#"):
+      result.add path & ".$ref: external references are not supported"
+    elif resolvePointer(root, refNode.getStr).isNil:
+      result.add path & ".$ref: unresolved reference " & refNode.getStr
+  for key in ["format", "dependencies", "prefixItems", "dependentRequired",
+              "dependentSchemas", "unevaluatedProperties", "unevaluatedItems"]:
+    if key in n:
+      result.add path & "." & key & ": unsupported"
+
+  for key in ["$defs", "definitions"]:
+    if key in n:
+      let defs = n[key]
+      if defs.isNil or defs.kind != JObject:
+        result.add path & "." & key & ": expected object, got " & schemaValueKind(defs)
+      else:
+        for name, sub in defs:
+          result.add validateSchemaNode(sub, pathField(pathField(path, key), name), root)
+
+  if "type" in n:
+    let t = n["type"]
+    if t.isNil:
+      result.add path & ".type: expected string or array, got missing"
+    else:
+      case t.kind
+      of JString:
+        if not validSchemaType(t.getStr):
+          result.add path & ".type: unknown type " & t.getStr
+      of JArray:
+        if t.len == 0:
+          result.add path & ".type: expected a non-empty array"
+        for item in t:
+          if item.isNil or item.kind != JString:
+            result.add path & ".type: expected strings, got " & schemaValueKind(item)
+          elif not validSchemaType(item.getStr):
+            result.add path & ".type: unknown type " & item.getStr
+      else:
+        result.add path & ".type: expected string or array, got " & jsonKindName(t)
+
+  if "properties" in n:
+    let props = n["properties"]
+    if props.isNil or props.kind != JObject:
+      result.add path & ".properties: expected object, got " & schemaValueKind(props)
+    else:
+      for key, sub in props:
+        result.add validateSchemaNode(sub, pathField(pathField(path, "properties"), key), root)
+
+  if "required" in n:
+    let required = n["required"]
+    if required.isNil or required.kind != JArray:
+      result.add path & ".required: expected array, got " & schemaValueKind(required)
+    else:
+      if required.len == 0:
+        result.add path & ".required: expected a non-empty array"
+      var seen: seq[string] = @[]
+      for item in required:
+        if item.isNil or item.kind != JString:
+          result.add path & ".required: expected strings, got " & schemaValueKind(item)
+        elif item.getStr in seen:
+          result.add path & ".required: duplicate property " & item.getStr
+        else:
+          seen.add item.getStr
+
+  if "additionalProperties" in n:
+    let extra = n["additionalProperties"]
+    if not extra.isNil and extra.kind == JObject:
+      result.add validateSchemaNode(extra, path & ".additionalProperties", root)
+    elif extra.isNil or extra.kind != JBool:
+      result.add path & ".additionalProperties: expected boolean or schema object, got " &
+        schemaValueKind(extra)
+
+  if "items" in n:
+    let items = n["items"]
+    if items.isNil or items.kind notin {JObject, JArray, JBool}:
+      result.add path & ".items: expected schema or schema array, got " & schemaValueKind(items)
+    elif items.kind == JArray:
+      for i in 0 ..< items.len:
+        result.add validateSchemaNode(items[i], pathIndex(path & ".items", i), root)
+    elif items.kind == JObject:
+      result.add validateSchemaNode(items, path & ".items", root)
+
+  for key in ["anyOf", "oneOf", "allOf"]:
+    if key in n:
+      result.add validateSchemaArray(n[key], key, path, root)
+
+  if "additionalItems" in n:
+    let extra = n["additionalItems"]
+    if extra.isNil or extra.kind notin {JObject, JBool}:
+      result.add path & ".additionalItems: expected boolean or schema object, got " &
+        schemaValueKind(extra)
+
+  if "enum" in n:
+    let enumerated = n["enum"]
+    if enumerated.isNil or enumerated.kind != JArray:
+      result.add path & ".enum: expected array, got " & schemaValueKind(enumerated)
+    elif enumerated.len == 0:
+      result.add path & ".enum: expected a non-empty array"
+
+  for key in ["minimum", "maximum"]:
+    if key in n and (n[key].isNil or n[key].kind notin {JInt, JFloat}):
+      result.add path & "." & key & ": expected number, got " & schemaValueKind(n[key])
+
+  for key in ["exclusiveMinimum", "exclusiveMaximum", "multipleOf"]:
+    if key in n:
+      if n[key].isNil or n[key].kind notin {JInt, JFloat}:
+        result.add path & "." & key & ": expected number, got " & schemaValueKind(n[key])
+      elif key == "multipleOf" and n[key].getFloat <= 0:
+        result.add path & ".multipleOf: expected a positive number"
+
+  for key in ["minLength", "maxLength", "minItems", "maxItems"]:
+    if key in n:
+      if n[key].isNil or n[key].kind != JInt:
+        result.add path & "." & key & ": expected integer, got " & schemaValueKind(n[key])
+      elif n[key].getInt < 0:
+        result.add path & "." & key & ": expected non-negative integer"
+
+  if "minProperties" in n or "maxProperties" in n:
+    for key in ["minProperties", "maxProperties"]:
+      if key in n:
+        if n[key].isNil or n[key].kind != JInt:
+          result.add path & "." & key & ": expected integer, got " & schemaValueKind(n[key])
+        elif n[key].getInt < 0:
+          result.add path & "." & key & ": expected non-negative integer"
+
+  if "uniqueItems" in n and (n["uniqueItems"].isNil or n["uniqueItems"].kind != JBool):
+    result.add path & ".uniqueItems: expected boolean, got " & schemaValueKind(n["uniqueItems"])
+
+  if "pattern" in n:
+    let pattern = n["pattern"]
+    if pattern.isNil or pattern.kind != JString:
+      result.add path & ".pattern: expected string, got " & schemaValueKind(pattern)
+    else:
+      try:
+        discard re(pattern.getStr)
+      except CatchableError as e:
+        result.add path & ".pattern: invalid regular expression: " & e.msg
+
+  for key in ["not", "if", "then", "else", "contains", "propertyNames"]:
+    if key in n:
+      result.add validateSchemaNode(n[key], path & "." & key, root)
+
+  if "patternProperties" in n:
+    let patterns = n["patternProperties"]
+    if patterns.isNil or patterns.kind != JObject:
+      result.add path & ".patternProperties: expected object, got " & schemaValueKind(patterns)
+    else:
+      for pattern, sub in patterns:
+        try:
+          discard re(pattern)
+        except CatchableError as e:
+          result.add path & ".patternProperties." & pattern & ": invalid regular expression: " & e.msg
+        result.add validateSchemaNode(sub, pathField(pathField(path, "patternProperties"), pattern), root)
+
+proc validateJsonSchema*(schema: JsonNode, path = "$"): seq[string] =
+  ## Validate the supported draft-07 subset before making a provider request.
+  validateSchemaNode(schema, path, schema)
 
 proc typeNames(schema: JsonNode): seq[string] =
   if schema.isNil or schema.kind != JObject or "type" notin schema:
@@ -357,12 +565,74 @@ proc jsonEqual*(a, b: JsonNode): bool =
       if k notin b or not jsonEqual(v, b[k]): return false
     true
 
-proc validateSchema*(value, schema: JsonNode, path = "$"): seq[string] =
+proc pointerToken(s: string): string =
+  result = s.replace("~1", "/").replace("~0", "~")
+
+proc resolvePointer(root: JsonNode, refPath: string): JsonNode =
+  if refPath == "#": return root
+  if refPath.len < 3 or not refPath.startsWith("#/"): return nil
+  result = root
+  for token in refPath[2 .. ^1].split('/'):
+    if result.isNil: return nil
+    let key = pointerToken(token)
+    case result.kind
+    of JObject:
+      if key notin result: return nil
+      result = result[key]
+    of JArray:
+      try:
+        let i = parseInt(key)
+        if i < 0 or i >= result.len: return nil
+        result = result[i]
+      except ValueError:
+        return nil
+    else:
+      return nil
+
+proc numberValue(n: JsonNode): float =
+  if n.kind == JInt: n.getInt.float else: n.getFloat
+
+proc isMultiple(value, divisor: float): bool =
+  if divisor <= 0: return false
+  let quotient = value / divisor
+  abs(quotient - quotient.round) <= 1e-9
+
+proc matchesPattern(value, pattern: string): bool =
+  value.find(re(pattern)) >= 0
+
+proc schemaRef(schema, root: JsonNode, path: string,
+               refs: seq[string]): tuple[target: JsonNode, issue: string,
+                                          refs: seq[string]] =
+  if "$ref" notin schema: return (schema, "", refs)
+  let refNode = schema["$ref"]
+  if refNode.isNil or refNode.kind != JString:
+    return (nil, path & ".$ref: expected string, got " & schemaValueKind(refNode), refs)
+  let refPath = refNode.getStr
+  if not refPath.startsWith("#"):
+    return (nil, path & ".$ref: external references are not supported", refs)
+  if refPath in refs:
+    return (nil, path & ".$ref: cyclic reference " & refPath, refs)
+  let target = resolvePointer(root, refPath)
+  if target.isNil:
+    return (nil, path & ".$ref: unresolved reference " & refPath, refs)
+  (target, "", refs & refPath)
+
+proc validateSchemaAt(value, schema: JsonNode, path: string,
+                      root: JsonNode, refs: seq[string]): seq[string] =
   ## Empty means `value` satisfies `schema`.
-  if schema.isNil or schema.kind != JObject:
+  if schema.isNil:
+    return @[path & ": missing schema"]
+  if schema.kind == JBool:
+    if not schema.getBool:
+      return @[path & ": schema is false"]
     return
+  if schema.kind != JObject:
+    return @[path & ": expected schema object, got " & jsonKindName(schema)]
+  let resolved = schemaRef(schema, root, path, refs)
+  if resolved.issue.len > 0:
+    return @[resolved.issue]
   if "$ref" in schema:
-    return @[path & ": $ref is not supported"]
+    return validateSchemaAt(value, resolved.target, path, root, resolved.refs)
   if value.isNil:
     return @[path & ": missing value"]
   if "const" in schema and not jsonEqual(value, schema["const"]):
@@ -381,11 +651,11 @@ proc validateSchema*(value, schema: JsonNode, path = "$"): seq[string] =
     return
   if "allOf" in schema:
     for sub in schema["allOf"]:
-      result.add validateSchema(value, sub, path)
+      result.add validateSchemaAt(value, sub, path, root, refs)
   if "anyOf" in schema and schema["anyOf"].kind == JArray:
     var ok = false
     for sub in schema["anyOf"]:
-      if validateSchema(value, sub, path).len == 0:
+      if validateSchemaAt(value, sub, path, root, refs).len == 0:
         ok = true
         break
     if not ok:
@@ -393,29 +663,58 @@ proc validateSchema*(value, schema: JsonNode, path = "$"): seq[string] =
   if "oneOf" in schema and schema["oneOf"].kind == JArray:
     var hits = 0
     for sub in schema["oneOf"]:
-      if validateSchema(value, sub, path).len == 0: inc hits
+      if validateSchemaAt(value, sub, path, root, refs).len == 0: inc hits
     if hits != 1:
       result.add path & ": expected exactly one of oneOf, got " & $hits
   if value.kind == JString:
-    let n = value.getStr.len
+    let n = value.getStr.runeLen
     if "minLength" in schema and n < schema["minLength"].getInt:
       result.add path & ": shorter than minLength " & $schema["minLength"].getInt
     if "maxLength" in schema and n > schema["maxLength"].getInt:
       result.add path & ": longer than maxLength " & $schema["maxLength"].getInt
+    if "pattern" in schema:
+      try:
+        if not matchesPattern(value.getStr, schema["pattern"].getStr):
+          result.add path & ": does not match pattern " & schema["pattern"].getStr
+      except CatchableError:
+        result.add path & ": invalid pattern"
   if value.kind in {JInt, JFloat}:
-    let x = if value.kind == JInt: value.getInt.float else: value.getFloat
+    let x = numberValue(value)
     if "minimum" in schema and x < schema["minimum"].getFloat:
       result.add path & ": below minimum " & $schema["minimum"]
     if "maximum" in schema and x > schema["maximum"].getFloat:
       result.add path & ": above maximum " & $schema["maximum"]
+    if "exclusiveMinimum" in schema and x <= numberValue(schema["exclusiveMinimum"]):
+      result.add path & ": not above exclusiveMinimum " & $schema["exclusiveMinimum"]
+    if "exclusiveMaximum" in schema and x >= numberValue(schema["exclusiveMaximum"]):
+      result.add path & ": not below exclusiveMaximum " & $schema["exclusiveMaximum"]
+    if "multipleOf" in schema and not isMultiple(x, numberValue(schema["multipleOf"])):
+      result.add path & ": not a multiple of " & $schema["multipleOf"]
   if value.kind == JArray:
     if "minItems" in schema and value.len < schema["minItems"].getInt:
       result.add path & ": fewer than minItems " & $schema["minItems"].getInt
     if "maxItems" in schema and value.len > schema["maxItems"].getInt:
       result.add path & ": more than maxItems " & $schema["maxItems"].getInt
     if "items" in schema:
+      let items = schema["items"]
+      if items.kind == JArray:
+        for i in 0 ..< value.len:
+          if i < items.len:
+            result.add validateSchemaAt(value[i], items[i], pathIndex(path, i), root, refs)
+          elif "additionalItems" in schema:
+            let extra = schema["additionalItems"]
+            if extra.kind == JBool and not extra.getBool:
+              result.add pathIndex(path, i) & ": additional item not allowed"
+            elif extra.kind == JObject:
+              result.add validateSchemaAt(value[i], extra, pathIndex(path, i), root, refs)
+      else:
+        for i in 0 ..< value.len:
+          result.add validateSchemaAt(value[i], items, pathIndex(path, i), root, refs)
+    if "uniqueItems" in schema and schema["uniqueItems"].getBool:
       for i in 0 ..< value.len:
-        result.add validateSchema(value[i], schema["items"], pathIndex(path, i))
+        for j in i + 1 ..< value.len:
+          if jsonEqual(value[i], value[j]):
+            result.add path & ": duplicate items at indexes " & $i & " and " & $j
   if value.kind == JObject:
     var props: JsonNode = nil
     if "properties" in schema: props = schema["properties"]
@@ -423,16 +722,52 @@ proc validateSchema*(value, schema: JsonNode, path = "$"): seq[string] =
       for req in schema["required"]:
         if req.kind == JString and req.getStr notin value:
           result.add pathField(path, req.getStr) & ": required"
-    if not props.isNil and props.kind == JObject:
-      for k, v in value:
-        if k in props:
-          result.add validateSchema(v, props[k], pathField(path, k))
-        elif "additionalProperties" in schema:
-          let extra = schema["additionalProperties"]
-          if extra.kind == JBool and not extra.getBool:
-            result.add pathField(path, k) & ": unexpected property"
-          elif extra.kind == JObject:
-            result.add validateSchema(v, extra, pathField(path, k))
+    if "minProperties" in schema and value.len < schema["minProperties"].getInt:
+      result.add path & ": fewer than minProperties " & $schema["minProperties"].getInt
+    if "maxProperties" in schema and value.len > schema["maxProperties"].getInt:
+      result.add path & ": more than maxProperties " & $schema["maxProperties"].getInt
+    for k, v in value:
+      var matched = false
+      if not props.isNil and props.kind == JObject and k in props:
+        matched = true
+        result.add validateSchemaAt(v, props[k], pathField(path, k), root, refs)
+      if "patternProperties" in schema:
+        for pattern, sub in schema["patternProperties"]:
+          try:
+            if matchesPattern(k, pattern):
+              matched = true
+              result.add validateSchemaAt(v, sub, pathField(path, k), root, refs)
+          except CatchableError:
+            discard
+      if not matched and "additionalProperties" in schema:
+        let extra = schema["additionalProperties"]
+        if extra.kind == JBool and not extra.getBool:
+          result.add pathField(path, k) & ": unexpected property"
+        elif extra.kind == JObject:
+          result.add validateSchemaAt(v, extra, pathField(path, k), root, refs)
+      if "propertyNames" in schema:
+        result.add validateSchemaAt(%k, schema["propertyNames"],
+          pathField(path, k), root, refs)
+
+  if "not" in schema and validateSchemaAt(value, schema["not"], path, root, refs).len == 0:
+    result.add path & ": matched forbidden not schema"
+  if value.kind == JArray and "contains" in schema:
+    var found = false
+    for item in value:
+      if validateSchemaAt(item, schema["contains"], path, root, refs).len == 0:
+        found = true
+        break
+    if not found:
+      result.add path & ": contains no matching item"
+  if "if" in schema:
+    let condition = validateSchemaAt(value, schema["if"], path, root, refs).len == 0
+    if condition and "then" in schema:
+      result.add validateSchemaAt(value, schema["then"], path, root, refs)
+    elif not condition and "else" in schema:
+      result.add validateSchemaAt(value, schema["else"], path, root, refs)
+
+proc validateSchema*(value, schema: JsonNode, path = "$"): seq[string] =
+  validateSchemaAt(value, schema, path, schema, @[])
 
 proc prepareWireSchema*(schema: JsonNode): JsonNode =
   ## Copy. Objects without additionalProperties get false (OpenAI/Anthropic strict).
@@ -443,7 +778,22 @@ proc prepareWireSchema*(schema: JsonNode): JsonNode =
         n["additionalProperties"] = %false
     if "properties" in n and n["properties"].kind == JObject:
       for _, v in n["properties"]: walk(v)
-    if "items" in n: walk(n["items"])
+    if "items" in n:
+      if n["items"].kind == JObject:
+        walk(n["items"])
+      elif n["items"].kind == JArray:
+        for v in n["items"]: walk(v)
+    if "additionalProperties" in n and not n["additionalProperties"].isNil and
+        n["additionalProperties"].kind == JObject:
+      walk(n["additionalProperties"])
+    for key in ["$defs", "definitions"]:
+      if key in n and not n[key].isNil and n[key].kind == JObject:
+        for _, v in n[key]: walk(v)
+    for key in ["not", "if", "then", "else", "contains", "propertyNames"]:
+      if key in n: walk(n[key])
+    if "patternProperties" in n and not n["patternProperties"].isNil and
+        n["patternProperties"].kind == JObject:
+      for _, v in n["patternProperties"]: walk(v)
     for key in ["anyOf", "oneOf", "allOf"]:
       if key in n and n[key].kind == JArray:
         for v in n[key]: walk(v)
@@ -465,7 +815,178 @@ proc typeLeafName(n: NimNode): string =
   of nnkSym, nnkIdent: n.strVal
   else: $n
 
-proc schemaFromType(t: NimNode): JsonNode
+type FieldMeta = object
+  optional: bool
+  constraints: JsonNode
+
+type GenericBinding = object
+  name: string
+  value: NimNode
+
+proc schemaFromType(t: NimNode, bindings: seq[GenericBinding]): JsonNode
+proc schemaFromType(t: NimNode): JsonNode = schemaFromType(t, @[])
+
+proc substituteType(n: NimNode, bindings: seq[GenericBinding]): NimNode =
+  if n.isNil: return n
+  if n.kind in {nnkSym, nnkIdent}:
+    for binding in bindings:
+      if n.strVal == binding.name:
+        return binding.value
+  result = copyNimNode(n)
+  for child in n:
+    result.add substituteType(child, bindings)
+
+proc pragmaNumber(n: NimNode): JsonNode =
+  case n.kind
+  of nnkIntLit, nnkUIntLit:
+    %n.intVal
+  of nnkFloatLit:
+    %n.floatVal
+  else:
+    nil
+
+proc fieldMeta(n: NimNode): FieldMeta =
+  result.constraints = newJObject()
+  if n.kind != nnkPragmaExpr or n.len < 2: return
+  let pragmas = n[1]
+  for pragma in pragmas:
+    var name = ""
+    var arg: NimNode = nil
+    if pragma.kind == nnkCall:
+      name = typeLeafName(pragma[0])
+      if pragma.len > 1: arg = pragma[1]
+    else:
+      name = typeLeafName(pragma)
+    case name
+    of "jsonOptional":
+      result.optional = true
+    of "jsonDescription", "jsonPattern":
+      if not arg.isNil and arg.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+        let key = if name == "jsonDescription": "description" else: "pattern"
+        result.constraints[key] = %arg.strVal
+    of "jsonMinimum", "jsonMaximum", "jsonMinLength", "jsonMaxLength",
+       "jsonMinItems", "jsonMaxItems":
+      if not arg.isNil:
+        let value = pragmaNumber(arg)
+        if not value.isNil:
+          let key = case name
+            of "jsonMinimum": "minimum"
+            of "jsonMaximum": "maximum"
+            of "jsonMinLength": "minLength"
+            of "jsonMaxLength": "maxLength"
+            of "jsonMinItems": "minItems"
+            else: "maxItems"
+          result.constraints[key] = value
+
+proc mergeObjectSchema(dest, base: JsonNode) =
+  if base.isNil or base.kind != JObject: return
+  if "properties" in base and base["properties"].kind == JObject:
+    for key, value in base["properties"]:
+      dest["properties"][key] = copy(value)
+  if "required" in base and base["required"].kind == JArray:
+    for key in base["required"]:
+      var present = false
+      for existing in dest["required"]:
+        if jsonEqual(existing, key):
+          present = true
+          break
+      if not present:
+        dest["required"].add copy(key)
+
+proc addRequired(schema: JsonNode, key: string) =
+  for existing in schema["required"]:
+    if existing.kind == JString and existing.getStr == key:
+      return
+  schema["required"].add %key
+
+proc addRecordFields(schema: JsonNode, rec: NimNode, requireFields = true,
+                     bindings: seq[GenericBinding] = @[])
+
+proc addField(schema: JsonNode, identDef: NimNode, requireField = true,
+              bindings: seq[GenericBinding] = @[]) =
+  if identDef.kind != nnkIdentDefs or identDef.len < 3: return
+  let ftype = identDef[^2]
+  for i in 0 ..< identDef.len - 2:
+    let original = identDef[i]
+    var fname = original
+    if fname.kind == nnkPragmaExpr: fname = fname[0]
+    if fname.kind == nnkPostfix: fname = fname[1]
+    let key = $fname
+    var fieldSchema = schemaFromType(substituteType(ftype, bindings))
+    let meta = fieldMeta(original)
+    for constraint, value in meta.constraints:
+      fieldSchema[constraint] = value
+    schema["properties"][key] = fieldSchema
+    if requireField and not meta.optional:
+      addRequired(schema, key)
+
+proc branchLabel(n: NimNode): JsonNode =
+  case n.kind
+  of nnkIntLit, nnkUIntLit:
+    %n.intVal
+  of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
+    %n.strVal
+  else:
+    %($n)
+
+proc addRecordFields(schema: JsonNode, rec: NimNode, requireFields = true,
+                     bindings: seq[GenericBinding] = @[]) =
+  case rec.kind
+  of nnkRecList:
+    for field in rec:
+      if field.kind == nnkIdentDefs:
+        addField(schema, field, requireFields, bindings)
+      elif field.kind == nnkRecCase:
+        addRecordFields(schema, field, requireFields, bindings)
+  of nnkRecCase:
+    var discriminator = ""
+    if rec.len > 0 and rec[0].kind == nnkIdentDefs:
+      addField(schema, rec[0], requireFields, bindings)
+      if rec[0].len >= 3:
+        var discriminatorNode = rec[0][0]
+        if discriminatorNode.kind == nnkPragmaExpr:
+          discriminatorNode = discriminatorNode[0]
+        if discriminatorNode.kind == nnkPostfix:
+          discriminatorNode = discriminatorNode[1]
+        discriminator = $discriminatorNode
+    var variants = newJArray()
+    for i in 1 ..< rec.len:
+      let branch = rec[i]
+      if branch.kind notin {nnkOfBranch, nnkElifBranch, nnkElse} or
+          branch.len == 0:
+        continue
+      let branchRec = branch[^1]
+      ## Keep branch fields in the parent property set, but make their
+      ## conditional requirement explicit in a oneOf branch.
+      addRecordFields(schema, branchRec, false, bindings)
+      if discriminator.len == 0:
+        continue
+      var variant = %*{
+        "type": "object",
+        "additionalProperties": false,
+        "properties": newJObject(),
+        "required": newJArray()
+      }
+      if branch.kind != nnkElse:
+        var labels = newJArray()
+        for labelIndex in 0 ..< branch.len - 1:
+          labels.add branchLabel(branch[labelIndex])
+        if labels.len == 1:
+          variant["properties"][discriminator] = %*{"const": labels[0]}
+        else:
+          variant["properties"][discriminator] = %*{"enum": labels}
+        addRequired(variant, discriminator)
+      addRecordFields(variant, branchRec, true, bindings)
+      if variant["required"].len == 0:
+        variant.delete("required")
+      variants.add variant
+    if requireFields and variants.len > 0:
+      schema["oneOf"] = variants
+  of nnkOfBranch, nnkElifBranch, nnkElse:
+    if rec.len > 0:
+      addRecordFields(schema, rec[^1], requireFields, bindings)
+  else:
+    discard
 
 proc unwrapType(t: NimNode): NimNode =
   result = t
@@ -476,12 +997,29 @@ proc unwrapType(t: NimNode): NimNode =
   if impl.kind == nnkDistinctTy:
     result = impl[0]
 
-proc schemaFromType(t: NimNode): JsonNode =
+proc schemaFromType(t: NimNode, bindings: seq[GenericBinding]): JsonNode =
   let inst = getTypeInst(t)
   if inst.kind == nnkBracketExpr:
     let ctor = typeLeafName(inst[0])
     if ctor in ["seq", "openArray"]:
       return %*{"type": "array", "items": schemaFromType(inst[1])}
+    if ctor == "array" and inst.len >= 3:
+      result = %*{"type": "array", "items": schemaFromType(inst[^1])}
+      let bound = inst[1]
+      if bound.kind == nnkIntLit:
+        result["minItems"] = %bound.intVal
+        result["maxItems"] = %bound.intVal
+      elif bound.kind == nnkInfix and $bound[0] == ".." and bound.len >= 3 and
+          bound[1].kind == nnkIntLit and bound[2].kind == nnkIntLit:
+        let count = bound[2].intVal - bound[1].intVal + 1
+        result["minItems"] = %count
+        result["maxItems"] = %count
+      return
+    if ctor in ["set", "HashSet", "OrderedSet"] and inst.len >= 2:
+      return %*{"type": "array", "items": schemaFromType(inst[1]),
+        "uniqueItems": true}
+    if ctor in ["Table", "OrderedTable", "CountTable"] and inst.len >= 3:
+      return %*{"type": "object", "additionalProperties": schemaFromType(inst[2])}
     if ctor == "Option":
       result = schemaFromType(inst[1])
       var types = newJArray()
@@ -492,6 +1030,17 @@ proc schemaFromType(t: NimNode): JsonNode =
       return
   let core = unwrapType(t)
   let impl = getTypeImpl(core)
+  if impl.kind == nnkBracketExpr and impl.len >= 3:
+    let ctor = typeLeafName(impl[0])
+    if ctor == "array":
+      result = %*{"type": "array", "items": schemaFromType(impl[^1])}
+      let bound = impl[1]
+      if bound.kind == nnkInfix and $bound[0] == ".." and bound.len >= 3 and
+          bound[1].kind == nnkIntLit and bound[2].kind == nnkIntLit:
+        let count = bound[2].intVal - bound[1].intVal + 1
+        result["minItems"] = %count
+        result["maxItems"] = %count
+      return
   case impl.kind
   of nnkObjectTy:
     result = %*{
@@ -500,18 +1049,51 @@ proc schemaFromType(t: NimNode): JsonNode =
       "properties": newJObject(),
       "required": newJArray()
     }
-    var rec = impl[2]
-    if rec.kind == nnkEmpty: return
-    if rec.kind == nnkRecList:
-      for identDef in rec:
-        let ftype = identDef[^2]
-        for i in 0 ..< identDef.len - 2:
-          var fname = identDef[i]
-          if fname.kind == nnkPragmaExpr: fname = fname[0]
-          if fname.kind == nnkPostfix: fname = fname[1]
-          let key = $fname
-          result["properties"][key] = schemaFromType(ftype)
-          result["required"].add %key
+    var source = impl
+    var activeBindings = bindings
+    if activeBindings.len == 0 and inst.kind == nnkBracketExpr and inst.len > 1:
+      try:
+        let genericDef = getImpl(inst[0])
+        if genericDef.kind == nnkTypeDef and genericDef.len > 1 and
+            genericDef[1].kind == nnkGenericParams:
+          let params = genericDef[1]
+          for i in 0 ..< min(params.len, inst.len - 1):
+            activeBindings.add GenericBinding(name: $params[i], value: inst[i + 1])
+      except CatchableError:
+        discard
+    try:
+      let definition = getImpl(core)
+      if definition.kind == nnkTypeDef and definition.len > 0:
+        source = definition[^1]
+    except CatchableError:
+      discard
+    if source.kind == nnkObjectTy and source.len > 1 and
+        source[1].kind == nnkOfInherit and source[1].len > 0:
+      let base = source[1][0]
+      let baseName = if base.kind == nnkBracketExpr: typeLeafName(base[0])
+                     else: typeLeafName(base)
+      if baseName notin ["RootObj", "RootRef"]:
+        var baseType = base
+        var baseBindings: seq[GenericBinding] = activeBindings
+        if base.kind == nnkBracketExpr and base.len > 1:
+          baseType = base[0]
+          try:
+            let genericDef = getImpl(base[0])
+            if genericDef.kind == nnkTypeDef and genericDef.len > 1 and
+                genericDef[1].kind == nnkGenericParams:
+              let params = genericDef[1]
+              baseBindings = @[]
+              for i in 0 ..< min(params.len, base.len - 1):
+                baseBindings.add GenericBinding(name: $params[i],
+                  value: substituteType(base[i + 1], activeBindings))
+          except CatchableError:
+            discard
+        mergeObjectSchema(result, schemaFromType(baseType, baseBindings))
+    let rec = if source.kind == nnkObjectTy and source.len > 2: source[2] else: impl[2]
+    if rec.kind != nnkEmpty:
+      addRecordFields(result, rec, true, activeBindings)
+    if result["required"].len == 0:
+      result.delete("required")
   of nnkEnumTy:
     var vals = newJArray()
     for i in 1 ..< impl.len:
@@ -539,7 +1121,8 @@ proc schemaFromType(t: NimNode): JsonNode =
       error("jsonSchema: unsupported type " & name, t)
 
 macro jsonSchema*(T: typedesc): JsonNode =
-  ## JSON Schema for a Nim type (objects, seq, Option, enums, primitives).
+  ## JSON Schema for Nim objects, variants, containers, generics, enums, and
+  ## primitives. Field pragmas add constraints or make a property optional.
   ## Option fields stay in `required` as `[T, null]` (OpenAI strict).
   let impl = T.getType
   let t = if impl.kind == nnkBracketExpr and impl.len >= 2: impl[1] else: T

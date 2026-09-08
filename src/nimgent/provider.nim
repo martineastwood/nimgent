@@ -150,9 +150,16 @@ type
     status*: int       ## HTTP status, or 0 when there was no response
     retryAfterMs*: int ## from Retry-After; 0 if the server did not send one
 
+  ObjectIssue* = object
+    ## Best-effort JSON path and diagnostic message for one validation issue.
+    path*: string
+    message*: string
+
   ObjectError* = object of ProviderError
     ## generateObject could not produce a value that matches the schema.
     issues*: seq[string]
+    ## Machine-readable view of `issues`; `issues` remains for compatibility.
+    issueDetails*: seq[ObjectIssue]
     raw*: string
 
   CancelledError* = object of ProviderError
@@ -568,6 +575,13 @@ proc raiseCancelledError*(msg = "aborted") {.noreturn.} =
 proc raiseObjectError*(msg: string, issues: seq[string], raw = "") =
   let e = newException(ObjectError, msg)
   e.issues = issues
+  for issue in issues:
+    let sep = issue.find(": ")
+    if sep > 0:
+      e.issueDetails.add ObjectIssue(path: issue[0 ..< sep],
+        message: issue[sep + 2 .. ^1])
+    else:
+      e.issueDetails.add ObjectIssue(path: "$", message: issue)
   e.raw = raw
   raise e
 
