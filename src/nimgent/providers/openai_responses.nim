@@ -126,6 +126,7 @@ proc addResponsesItems(input: var JsonNode, message: Message) =
 
 proc buildResponsesBody*(request: ProviderRequest, stream: bool): JsonNode =
   ## Native OpenAI Responses body. Stateless: store=false, full input each turn.
+  validateToolChoice(request.toolChoice, request.tools)
   result = %*{
     "model": request.model,
     "input": newJArray(),
@@ -141,7 +142,7 @@ proc buildResponsesBody*(request: ProviderRequest, stream: bool): JsonNode =
   for message in request.messages:
     addResponsesItems(input, message)
   result["input"] = input
-  if request.tools.len > 0:
+  if request.tools.len > 0 and request.toolChoice.kind != tckNone:
     result["tools"] = newJArray()
     for tool in request.tools:
       if tool.hosted.len > 0:
@@ -154,6 +155,15 @@ proc buildResponsesBody*(request: ProviderRequest, stream: bool): JsonNode =
           "parameters": tool.inputSchema
         }
   mergeRequestOptions(result, request.options)
+  case request.toolChoice.kind
+  of tckAuto:
+    discard
+  of tckRequired:
+    result["tool_choice"] = %"required"
+  of tckNone:
+    result["tool_choice"] = %"none"
+  of tckSpecific:
+    result["tool_choice"] = %*{"type": "function", "name": request.toolChoice.name}
   if "reasoning_effort" in result:
     if "reasoning" notin result:
       result["reasoning"] = %*{"effort": result["reasoning_effort"]}
@@ -171,9 +181,6 @@ proc responsesObjectOptions*(name, description: string, schema: JsonNode): JsonN
   if description.len > 0:
     fmt["description"] = %description
   %*{"text": {"format": fmt}}
-
-proc responsesForceToolOptions*(toolName: string): JsonNode =
-  %*{"tool_choice": {"type": "function", "name": toolName}}
 
 proc outputTextFrom(item: JsonNode): string =
   let c = item.getOrDefault("content")

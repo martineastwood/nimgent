@@ -22,11 +22,8 @@ method nativeObjectOptions*(p: GoogleProvider, name, description: string,
   %*{"generationConfig": {"responseMimeType": "application/json",
     "responseJsonSchema": schema}}
 
-method forceToolOptions*(p: GoogleProvider, toolName: string): JsonNode =
-  %*{"toolConfig": {"functionCallingConfig": {"mode": "ANY",
-    "allowedFunctionNames": [toolName]}}}
-
 proc buildGoogleBody*(request: ProviderRequest): JsonNode =
+  validateToolChoice(request.toolChoice, request.tools)
   result = %*{"contents": []}
   var names = initTable[string, string]()
   var ids = initTable[string, string]()
@@ -84,9 +81,21 @@ proc buildGoogleBody*(request: ProviderRequest): JsonNode =
       var entry = newJObject()
       entry[key] = if tool.hostedOptions.isNil: newJObject() else: copy(tool.hostedOptions)
       hosted.add entry
-  if declarations.len > 0: hosted.add %*{"functionDeclarations": declarations}
-  if hosted.len > 0: result["tools"] = hosted
+  if declarations.len > 0 and request.toolChoice.kind != tckNone:
+    hosted.add %*{"functionDeclarations": declarations}
+  if hosted.len > 0 and request.toolChoice.kind != tckNone:
+    result["tools"] = hosted
   if not request.options.isNil: mergeRequestOptions(result, copy(request.options))
+  case request.toolChoice.kind
+  of tckAuto:
+    discard
+  of tckRequired:
+    result["toolConfig"] = %*{"functionCallingConfig": {"mode": "ANY"}}
+  of tckNone:
+    result["toolConfig"] = %*{"functionCallingConfig": {"mode": "NONE"}}
+  of tckSpecific:
+    result["toolConfig"] = %*{"functionCallingConfig": {"mode": "ANY",
+      "allowedFunctionNames": [request.toolChoice.name]}}
   if not result.hasKey("generationConfig"): result["generationConfig"] = newJObject()
   let config = result["generationConfig"]
   if config.kind != JObject: raiseProviderError("generationConfig must be an object")

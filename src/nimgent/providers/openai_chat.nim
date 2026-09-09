@@ -125,6 +125,7 @@ proc encodeMessage(result: var JsonNode, message: Message) =
 proc buildChatBody*(request: ProviderRequest, stream: bool,
                     includeSessionId = false, applyCache = false,
                     maxTokensField = "max_completion_tokens"): JsonNode =
+  validateToolChoice(request.toolChoice, request.tools)
   for tool in request.tools:
     if tool.hosted.len > 0:
       raiseProviderError("Chat Completions does not support hosted tool '" &
@@ -149,7 +150,7 @@ proc buildChatBody*(request: ProviderRequest, stream: bool,
   for message in request.messages:
     encodeMessage(messages, message)
   result["messages"] = messages
-  if request.tools.len > 0:
+  if request.tools.len > 0 and request.toolChoice.kind != tckNone:
     result["tools"] = newJArray()
     for tool in request.tools:
       result["tools"].add %*{
@@ -163,6 +164,16 @@ proc buildChatBody*(request: ProviderRequest, stream: bool,
     if result["tools"].len == 0:
       delete(result, "tools")
   mergeRequestOptions(result, request.options)
+  case request.toolChoice.kind
+  of tckAuto:
+    discard
+  of tckRequired:
+    result["tool_choice"] = %"required"
+  of tckNone:
+    result["tool_choice"] = %"none"
+  of tckSpecific:
+    result["tool_choice"] = %*{"type": "function",
+      "function": {"name": request.toolChoice.name}}
   if applyCache:
     applyCacheBreakpoints(result)
 
@@ -175,9 +186,6 @@ proc chatObjectOptions*(name, description: string, schema: JsonNode): JsonNode =
   if description.len > 0:
     spec["description"] = %description
   %*{"response_format": {"type": "json_schema", "json_schema": spec}}
-
-proc chatForceToolOptions*(toolName: string): JsonNode =
-  %*{"tool_choice": {"type": "function", "function": {"name": toolName}}}
 
 proc finishFrom(reason: string): FinishReason =
   case reason

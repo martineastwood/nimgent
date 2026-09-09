@@ -83,6 +83,20 @@ suite "native Gemini":
     expect ProviderError:
       discard buildGoogleBody(ProviderRequest(tools: @[ToolDefinition(hosted: "unknown")]))
 
+  test "tool choice maps to Gemini function calling config":
+    let definition = ToolDefinition(name: "lookup",
+      inputSchema: %*{"type": "object"})
+    let required = buildGoogleBody(ProviderRequest(tools: @[definition],
+      toolChoice: toolChoiceRequired()))
+    check required{"toolConfig", "functionCallingConfig", "mode"}.getStr == "ANY"
+    let specific = buildGoogleBody(ProviderRequest(tools: @[definition],
+      toolChoice: toolChoiceSpecific("lookup")))
+    check specific{"toolConfig", "functionCallingConfig", "allowedFunctionNames"}[0].getStr == "lookup"
+    let none = buildGoogleBody(ProviderRequest(tools: @[definition],
+      toolChoice: toolChoiceNone()))
+    check none{"toolConfig", "functionCallingConfig", "mode"}.getStr == "NONE"
+    check "tools" notin none
+
   test "signed parts, grounding supports and tool results survive a round trip":
     let rawPart = %*{"functionCall": {"name": "lookup", "args": {}}, "thoughtSignature": "opaque"}
     let grounding = %*{"webSearchQueries": ["Nim"],

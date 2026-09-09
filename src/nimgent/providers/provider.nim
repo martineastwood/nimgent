@@ -91,6 +91,19 @@ type
     hosted*: string
     hostedOptions*: JsonNode
 
+  ToolChoiceKind* = enum
+    tckAuto
+    tckRequired
+    tckNone
+    tckSpecific
+
+  ToolChoice* = object
+    case kind*: ToolChoiceKind
+    of tckSpecific:
+      name*: string
+    else:
+      discard
+
   FinishReason* = enum
     frUnknown
     frEndTurn
@@ -126,6 +139,8 @@ type
     system*: seq[string]
     messages*: seq[Message]
     tools*: seq[ToolDefinition]
+    ## Provider-neutral tool selection. The default is automatic selection.
+    toolChoice*: ToolChoice
     maxTokens*: int
     ## Escape hatch for provider-specific knobs (thinking, routing, TTL, ...).
     options*: JsonNode
@@ -272,6 +287,10 @@ type
 
   StreamCallback* = proc (ev: StreamEvent): bool {.closure.}
     ## Return false to cancel the stream early.
+
+proc raiseProviderError*(msg: string, overflow = false, retryable = false,
+                         aborted = false, status = 0, retryAfterMs = 0,
+                         requestId = "")
 
 proc addUsage*(a: var Usage, b: Usage) =
   a.inputTokens += b.inputTokens
@@ -446,9 +465,6 @@ proc toolUse*(id, name: string, input: JsonNode, parseError = "",
 proc toolUseFromArgs*(id, name, raw: string): ContentBlock =
   let parsed = parseToolArguments(raw)
   toolUse(id, name, parsed.input, parsed.parseError)
-
-proc invalidToolCall*(call: ContentBlock): string =
-  if call.kind == ckToolUse: call.parseError else: ""
 
 proc toolResult*(toolUseId, output: string, isError = false,
                  images: seq[ImageContent] = @[], hosted = "",
@@ -636,9 +652,6 @@ method nativeObjectSchemaIssues*(p: Provider, schema: JsonNode): seq[string]
   ## Provider-specific native-schema restrictions. Empty means compatible.
   @[]
 
-method forceToolOptions*(p: Provider, toolName: string): JsonNode {.base.} =
-  nil
-
 proc rawTool*(name, description: string, inputSchema: JsonNode,
               execute: proc (context: ToolContext,
                              input: JsonNode): ToolResult {.closure.} = nil,
@@ -647,6 +660,38 @@ proc rawTool*(name, description: string, inputSchema: JsonNode,
   Tool(name: name, description: description, inputSchema: inputSchema,
        execute: execute, parallel: parallel, hosted: hosted,
        hostedOptions: hostedOptions)
+
+proc toolChoiceAuto*(): ToolChoice =
+  ToolChoice(kind: tckAuto)
+
+proc toolChoiceRequired*(): ToolChoice =
+  ToolChoice(kind: tckRequired)
+
+proc toolChoiceNone*(): ToolChoice =
+  ToolChoice(kind: tckNone)
+
+proc toolChoiceSpecific*(name: string): ToolChoice =
+  ToolChoice(kind: tckSpecific, name: name)
+
+proc validateToolChoice*(choice: ToolChoice,
+                         tools: openArray[ToolDefinition]) =
+  case choice.kind
+  of tckSpecific:
+    if choice.name.strip.len == 0:
+      raiseProviderError("specific tool choice requires a name")
+    var found = false
+    for tool in tools:
+      if tool.name == choice.name:
+        found = true
+        break
+    if not found:
+      raiseProviderError("specific tool choice names an unavailable tool: " &
+        choice.name)
+  of tckRequired:
+    if tools.len == 0:
+      raiseProviderError("required tool choice needs at least one tool")
+  else:
+    discard
 
 proc rawAsyncTool*(name, description: string, inputSchema: JsonNode,
                    execute: proc (context: ToolContext,
@@ -771,6 +816,3 @@ method nativeObjectOptions*(p: WrapProvider, name, description: string,
 method nativeObjectSchemaIssues*(p: WrapProvider,
                                  schema: JsonNode): seq[string] =
   p.inner.nativeObjectSchemaIssues(schema)
-
-method forceToolOptions*(p: WrapProvider, toolName: string): JsonNode =
-  p.inner.forceToolOptions(toolName)

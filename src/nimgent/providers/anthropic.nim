@@ -192,10 +192,8 @@ method nativeObjectOptions*(provider: AnthropicProvider, name, description: stri
                             schema: JsonNode): JsonNode =
   %*{"output_config": {"format": {"type": "json_schema", "schema": schema}}}
 
-method forceToolOptions*(provider: AnthropicProvider, toolName: string): JsonNode =
-  %*{"tool_choice": {"type": "tool", "name": toolName}}
-
 proc buildAnthropicBody*(request: ProviderRequest): JsonNode =
+  validateToolChoice(request.toolChoice, request.tools)
   result = %*{
     "model": request.model,
     "max_tokens": request.maxTokens,
@@ -209,7 +207,7 @@ proc buildAnthropicBody*(request: ProviderRequest): JsonNode =
   for message in request.messages:
     let encoded = encodeMessage(message)
     if encoded["content"].len > 0: result["messages"].add encoded
-  if request.tools.len > 0:
+  if request.tools.len > 0 and request.toolChoice.kind != tckNone:
     result["tools"] = newJArray()
     for tool in request.tools:
       if tool.hosted.len > 0:
@@ -222,6 +220,15 @@ proc buildAnthropicBody*(request: ProviderRequest): JsonNode =
         }
   applyCacheBreakpoints(result)
   mergeRequestOptions(result, request.options)
+  case request.toolChoice.kind
+  of tckAuto:
+    discard
+  of tckRequired:
+    result["tool_choice"] = %*{"type": "any"}
+  of tckNone:
+    delete(result, "tool_choice")
+  of tckSpecific:
+    result["tool_choice"] = %*{"type": "tool", "name": request.toolChoice.name}
   let thinking = result.getOrDefault("thinking")
   if not thinking.isNil and thinking.getOrDefault("type").getStr == "enabled":
     result["max_tokens"] = %max(result["max_tokens"].getInt,

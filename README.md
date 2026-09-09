@@ -268,6 +268,17 @@ model-facing text, and `ToolResult.error` contains machine-readable failure
 metadata. Tool handlers receive a `ToolContext` and return a `ToolResult` or a
 value that is serialized for the model.
 
+Tool selection is provider-neutral:
+
+```nim
+let response = generateText(model, prompt = "…", tools = @[lookup],
+  toolChoice = toolChoiceSpecific("lookup"))
+```
+
+Use `toolChoiceAuto()`, `toolChoiceRequired()`, `toolChoiceNone()`, or
+`toolChoiceSpecific(name)`. The selected choice is mapped to the provider's
+native request format; a specific choice must name one of the supplied tools.
+
 `response.content`, `response.usage`, and `response.finishReason` describe the
 final model call. `response.steps` records every call and its local tool
 results; `response.totalUsage` is accumulated across them.

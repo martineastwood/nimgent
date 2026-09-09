@@ -8,7 +8,7 @@ import nimgent/providers/stream
 from nimgent/providers/openai import openAI, hyper,
   buildResponsesBody, buildChatBody, parseResponsesOutput,
   defaultOpenAiEndpoint, defaultOpenAiChatEndpoint, defaultHyperEndpoint,
-  chatObjectOptions, chatForceToolOptions
+  chatObjectOptions
 
 proc withFixture(script: string, body: proc (port: int)) =
   let fixturePath = getCurrentDir() / "tests" / script
@@ -582,7 +582,7 @@ suite "generateText retries, abort, and tools":
     check parseToolArguments("").parseError.len == 0
     check parseToolArguments("{\"x\":1}").input["x"].getInt == 1
     check parseToolArguments("{nope").parseError.startsWith("invalid tool arguments")
-    check invalidToolCall(toolUseFromArgs("call_1", "echo", "{nope")).len > 0
+    check toolUseFromArgs("call_1", "echo", "{nope").parseError.len > 0
     check not rawTool("echo", "echo", %*{"type": "object"}).parallel
     var ran = 0
     let echoTool = rawTool("echo", "echo", %*{"type": "object"},
@@ -597,6 +597,43 @@ suite "generateText retries, abort, and tools":
     check ran == 0
     check p.calls == 2
     check r.text == "recovered"
+    check r.steps[0].toolResults[0].errorCode == "invalid_arguments"
+    check r.steps[0].toolResults[0].errorDetails["tool"].getStr == "echo"
+
+  test "unknown and thrown tool failures are structured":
+    let unknownProvider = ScriptProvider(toolFirst: true)
+    let other = rawTool("other", "other", %*{"type": "object"},
+      proc (_: ToolContext, _: JsonNode): ToolResult = ToolResult(output: "other"))
+    let unknown = generateText(unknownProvider.model("m"), prompt = "hi",
+      tools = @[other], maxSteps = 2, maxRetries = 0)
+    check unknown.steps[0].toolResults[0].errorCode == "unknown_tool"
+    check unknown.steps[0].toolResults[0].errorDetails["tool"].getStr == "echo"
+    let throwingProvider = ScriptProvider(toolFirst: true)
+    let throwing = rawTool("echo", "echo", %*{"type": "object"},
+      proc (_: ToolContext, _: JsonNode): ToolResult =
+        raise newException(ValueError, "boom"))
+    let thrown = generateText(throwingProvider.model("m"), prompt = "hi",
+      tools = @[throwing], maxSteps = 2, maxRetries = 0)
+    check thrown.steps[0].toolResults[0].errorCode == "exception"
+    check thrown.steps[0].toolResults[0].errorMessage == "boom"
+
+  test "tool choice is structured and provider-facing":
+    let definition = ToolDefinition(name: "echo", inputSchema: %*{"type": "object"})
+    let required = buildResponsesBody(ProviderRequest(tools: @[definition],
+      toolChoice: toolChoiceRequired()), false)
+    check required["tool_choice"].getStr == "required"
+    let specific = buildChatBody(ProviderRequest(tools: @[definition],
+      toolChoice: toolChoiceSpecific("echo")), false)
+    check specific["tool_choice"]["function"]["name"].getStr == "echo"
+    let none = buildResponsesBody(ProviderRequest(tools: @[definition],
+      toolChoice: toolChoiceNone()), false)
+    check none["tool_choice"].getStr == "none"
+    check "tools" notin none
+    expect ProviderError:
+      discard buildResponsesBody(ProviderRequest(tools: @[definition],
+        toolChoice: toolChoiceSpecific("missing")), false)
+    expect ProviderError:
+      discard buildChatBody(ProviderRequest(toolChoice: toolChoiceRequired()), false)
 
   test "parallel execute overlaps":
     let p = ScriptProvider(toolFirst: true, twoTools: true)
@@ -1131,9 +1168,6 @@ method nativeObjectSchemaIssues(p: ChatObjectScript,
                                 schema: JsonNode): seq[string] =
   validateOpenAiStrictSchema(schema)
 
-method forceToolOptions(p: ChatObjectScript, toolName: string): JsonNode =
-  chatForceToolOptions(toolName)
-
 method nativeObjectOptions(p: GoogleObjectScript, name, description: string,
                            schema: JsonNode): JsonNode =
   %*{"generationConfig": {"responseMimeType": "application/json",
@@ -1470,7 +1504,8 @@ suite "generateObject":
     check r.value["ok"].getBool
     check p.last.tools.len == 1
     check p.last.tools[0].name == "submit"
-    check p.last.options["tool_choice"]["function"]["name"].getStr == "submit"
+    check p.last.toolChoice.kind == tckSpecific
+    check p.last.toolChoice.name == "submit"
     check r.source == osTool
 
   test "rejects missing, wrong, and multiple submit calls":
@@ -1616,12 +1651,6 @@ suite "generateObject":
       "o", "d", schema)["response_format"]["json_schema"]["description"].getStr == "d"
     check anthropic("k", "http://x").nativeObjectOptions(
       "o", "", schema)["output_config"]["format"]["type"].getStr == "json_schema"
-    check openAI("k").forceToolOptions("submit")["tool_choice"][
-      "type"].getStr == "function"
-    check openAI("k").forceToolOptions("submit")["tool_choice"][
-      "name"].getStr == "submit"
-    check anthropic("k", "http://x").forceToolOptions("submit")[
-      "tool_choice"]["type"].getStr == "tool"
 
   test "addUsage sums cache flags":
     var u = Usage(inputTokens: 1, cacheReadTokens: 2, cacheReported: true)
@@ -1673,9 +1702,6 @@ method generateStreamAsync(p: ChunkScript, request: ProviderRequest,
     result.content.add text(acc)
     result.finishReason = frStop
   discard onEvent(StreamEvent(kind: seFinished))
-
-method forceToolOptions(p: ChunkScript, toolName: string): JsonNode =
-  chatForceToolOptions(toolName)
 
 suite "streamObject":
   test "emits growing partials then a valid value":
@@ -1780,7 +1806,6 @@ suite "wrapProvider":
     check w.nativeObjectOptions("o", "", %*{"type": "object"})["text"]["format"][
       "type"].getStr == "json_schema"
     check w.nativeObjectSchemaIssues(%*{"type": "integer"}).len > 0
-    check w.forceToolOptions("submit")["tool_choice"]["name"].getStr == "submit"
     check wrapProvider(inner, name = "gate").name == "gate"
     expect ProviderError:
       discard wrapProvider(nil)
@@ -1948,7 +1973,8 @@ suite "typed provider options":
     let toolP = ChatObjectScript(toolValue: %*{"ok": true})
     discard generateObject(toolP.model("test"), schema, prompt = "x",
       mode = omTool, providerOptions = scoped)
-    check toolP.last.options["tool_choice"]["function"]["name"].getStr == "submit"
+    check toolP.last.toolChoice.kind == tckSpecific
+    check toolP.last.toolChoice.name == "submit"
 
 suite "first-class Agent API":
   test "runs a bounded typed-tool agent with configured defaults":

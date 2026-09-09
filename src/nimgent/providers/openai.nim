@@ -8,8 +8,7 @@ import std/[options, asyncdispatch, httpclient, json, net, strutils]
 import nimgent/providers/[provider, stream, http_metadata, openai_chat, openai_responses]
 import nimgent/structured_output/jsonschema_validate
 export popLine, buildChatBody, openAiImagePart, buildResponsesBody,
-  parseResponsesOutput, chatObjectOptions, chatForceToolOptions,
-  responsesObjectOptions, responsesForceToolOptions
+  parseResponsesOutput, chatObjectOptions, responsesObjectOptions
 
 const
   defaultOpenAiEndpoint* = "https://api.openai.com/v1/responses"
@@ -126,12 +125,6 @@ method nativeObjectOptions*(provider: OpenAIProvider, name, description: string,
 method nativeObjectSchemaIssues*(provider: OpenAIProvider,
                                  schema: JsonNode): seq[string] =
   validateOpenAiStrictSchema(schema)
-
-method forceToolOptions*(provider: OpenAIProvider, toolName: string): JsonNode =
-  if provider.useResponses:
-    responsesForceToolOptions(toolName)
-  else:
-    chatForceToolOptions(toolName)
 
 method generateAsync*(provider: OpenAIProvider,
                       request: ProviderRequest): Future[ProviderResponse] {.async.} =

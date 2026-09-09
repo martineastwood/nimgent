@@ -18,12 +18,14 @@ type
     ## Maximum number of model turns. The agent defaults to a small bounded
     ## loop so an accidental tool cycle cannot run forever.
     maxSteps*: int
+    toolChoice*: ToolChoice
     providerOptions*: ProviderOptions
 
 proc newAgent*(model: LanguageModel, instructions = "",
                tools: seq[Tool] = @[], maxTokens = 0, maxRetries = 2,
                maxSteps = 8,
-               providerOptions = ProviderOptions()): Agent =
+               providerOptions = ProviderOptions(),
+               toolChoice = toolChoiceAuto()): Agent =
   ## Create a reusable agent. The returned agent is configuration; each run
   ## receives its own request and response state.
   if model.provider.isNil:
@@ -36,7 +38,7 @@ proc newAgent*(model: LanguageModel, instructions = "",
     raiseProviderError("agent maxSteps must be at least 1")
   Agent(model: model, instructions: instructions, tools: tools,
     maxTokens: maxTokens, maxRetries: maxRetries, maxSteps: maxSteps,
-    providerOptions: providerOptions)
+    toolChoice: toolChoice, providerOptions: providerOptions)
 
 proc runAsync*(agent: Agent, prompt = "", messages: seq[Message] = @[],
                abort: AbortCheck = nil,
@@ -51,7 +53,7 @@ proc runAsync*(agent: Agent, prompt = "", messages: seq[Message] = @[],
     maxTokens = agent.maxTokens, maxRetries = agent.maxRetries,
     maxSteps = agent.maxSteps, abort = abort, callbacks = callbacks,
     providerOptions = agent.providerOptions, sessionId = sessionId,
-    metadata = metadata, turnId = turnId)
+    metadata = metadata, turnId = turnId, toolChoice = agent.toolChoice)
 
 proc run*(agent: Agent, prompt = "", messages: seq[Message] = @[],
           abort: AbortCheck = nil,
@@ -76,7 +78,7 @@ proc streamAsync*(agent: Agent, prompt: string, onEvent: StreamCallback,
     maxTokens = agent.maxTokens, maxRetries = agent.maxRetries,
     maxSteps = agent.maxSteps, abort = abort, callbacks = callbacks,
     providerOptions = agent.providerOptions, sessionId = sessionId,
-    metadata = metadata, turnId = turnId)
+    metadata = metadata, turnId = turnId, toolChoice = agent.toolChoice)
 
 proc stream*(agent: Agent, prompt: string, onEvent: StreamCallback,
              messages: seq[Message] = @[], abort: AbortCheck = nil,

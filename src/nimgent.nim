@@ -106,7 +106,8 @@ proc buildRequest(
   options: JsonNode = nil,
   wakeFd: cint = -1,
   turnId = "",
-  metadata: JsonNode = nil
+  metadata: JsonNode = nil,
+  toolChoice = toolChoiceAuto()
 ): ProviderRequest =
   if model.len == 0:
     raiseProviderError("model must not be empty")
@@ -116,6 +117,7 @@ proc buildRequest(
     raiseProviderError("prompt or messages is required")
   if not options.isNil and options.kind notin {JNull, JObject}:
     raiseProviderError("options must be a JSON object")
+  validateToolChoice(toolChoice, tools)
   result = ProviderRequest(
     model: model,
     sessionId: sessionId,
@@ -123,6 +125,7 @@ proc buildRequest(
     metadata: metadata,
     system: if system.len > 0: @[system] else: @[],
     tools: tools,
+    toolChoice: toolChoice,
     maxTokens: maxTokens,
     options: options,
     wakeFd: wakeFd)
@@ -176,6 +179,9 @@ proc validateRun(tools: openArray[Tool], maxRetries, maxSteps: int) =
     if t.hosted.len == 0 and (t.inputSchema.isNil or t.inputSchema.kind != JObject):
       raiseProviderError("tool '" & t.name & "' requires a JSON Schema object")
 
+proc invalidToolArguments(call: ContentBlock): bool =
+  call.kind == ckToolUse and call.parseError.len > 0
+
 proc toolError*(code, message: string, details: JsonNode = nil,
                 retryable = false): ToolError =
   ## Construct a machine-readable local tool failure.
@@ -205,14 +211,29 @@ proc normalizeToolResult[Output](output: Output): ToolResult =
     result.output = $result.value
 
 proc toolResultBlock(call: ContentBlock, output: ToolResult): ContentBlock =
-  toolResult(call.id, output.output, output.isError, output.images,
-    value = output.value, errorCode = output.error.code,
-    errorMessage = output.error.message,
-    errorDetails = output.error.details,
-    errorRetryable = output.error.retryable)
+  var normalized = output
+  if normalized.isError and normalized.error.code.len == 0:
+    let message = if normalized.output.len > 0: normalized.output else: "tool failed"
+    normalized.error = toolError("tool_error", message)
+    if normalized.output.len == 0:
+      normalized.output = message
+  toolResult(call.id, normalized.output, normalized.isError, normalized.images,
+    value = normalized.value, errorCode = normalized.error.code,
+    errorMessage = normalized.error.message,
+    errorDetails = normalized.error.details,
+    errorRetryable = normalized.error.retryable)
 
 proc exceptionToolResult(e: ref CatchableError): ToolResult =
+  if e of CancelledError:
+    return toolFailure("cancelled", e.msg, retryable = true)
   toolFailure("exception", e.msg)
+
+proc invalidToolResult(call: ContentBlock): ToolResult =
+  if invalidToolArguments(call):
+    return toolFailure("invalid_arguments", call.parseError,
+      %*{"tool": call.name})
+  toolFailure("unknown_tool", "Unknown tool: " & call.name,
+    %*{"tool": call.name})
 
 proc contextAbort(abort: AbortCheck): AbortCheck =
   if not abort.isNil:
@@ -244,12 +265,11 @@ proc findTool(tools: openArray[Tool], name: string): int =
 
 proc execOne(tools: openArray[Tool], call: ContentBlock,
              context: ToolContext): ContentBlock =
-  let bad = invalidToolCall(call)
-  if bad.len > 0:
-    return toolResult(call.id, bad, true)
+  if invalidToolArguments(call):
+    return toolResultBlock(call, invalidToolResult(call))
   let i = findTool(tools, call.name)
   if i < 0 or tools[i].execute.isNil:
-    return toolResult(call.id, "Unknown tool: " & call.name, true)
+    return toolResultBlock(call, invalidToolResult(call))
   try:
     toolResultBlock(call, tools[i].execute(context, call.input))
   except CatchableError as e:
@@ -257,11 +277,11 @@ proc execOne(tools: openArray[Tool], call: ContentBlock,
 
 proc execOneAsync(tools: seq[Tool], call: ContentBlock,
                   context: ToolContext): Future[ContentBlock] {.async.} =
-  let bad = invalidToolCall(call)
-  if bad.len > 0: return toolResult(call.id, bad, true)
+  if invalidToolArguments(call):
+    return toolResultBlock(call, invalidToolResult(call))
   let i = findTool(tools, call.name)
   if i < 0 or (tools[i].execute.isNil and tools[i].executeAsync.isNil):
-    return toolResult(call.id, "Unknown tool: " & call.name, true)
+    return toolResultBlock(call, invalidToolResult(call))
   try:
     if not tools[i].executeAsync.isNil:
       let output = await tools[i].executeAsync(context, call.input)
@@ -274,7 +294,7 @@ proc batchOverlaps(tools: openArray[Tool], calls: openArray[ContentBlock]): bool
   ## True when at least two calls will run execute and every one of those is parallel.
   var n = 0
   for call in calls:
-    if invalidToolCall(call).len > 0: continue
+    if invalidToolArguments(call): continue
     let i = findTool(tools, call.name)
     if i < 0 or tools[i].execute.isNil: continue
     if not tools[i].parallel: return false
@@ -285,7 +305,7 @@ proc asyncBatchOverlaps(tools: openArray[Tool],
                         calls: openArray[ContentBlock]): bool =
   var n = 0
   for call in calls:
-    if invalidToolCall(call).len > 0: continue
+    if invalidToolArguments(call): continue
     let i = findTool(tools, call.name)
     if i < 0 or (tools[i].execute.isNil and tools[i].executeAsync.isNil): continue
     if not tools[i].parallel: return false
@@ -319,13 +339,12 @@ when compileOption("threads"):
     var jobs = newSeq[ParallelJob](calls.len)
     var runnable: seq[int]
     for i, call in calls:
-      let bad = invalidToolCall(call)
-      if bad.len > 0:
-        result[i] = toolResult(call.id, bad, true)
+      if invalidToolArguments(call):
+        result[i] = toolResultBlock(call, invalidToolResult(call))
         continue
       let t = findTool(tools, call.name)
       if t < 0 or tools[t].execute.isNil:
-        result[i] = toolResult(call.id, "Unknown tool: " & call.name, true)
+        result[i] = toolResultBlock(call, invalidToolResult(call))
         continue
       jobs[i].execute = tools[t].execute
       jobs[i].context = ToolContext(callId: call.id, sessionId: request.sessionId,
@@ -432,6 +451,7 @@ proc runLoop(provider: Provider, request: ProviderRequest,
              onEvent: StreamCallback,
              callbacks: RunCallbacks): Future[ProviderResponse] {.async.} =
   var request = request
+  validateToolChoice(request.toolChoice, request.tools)
   var cancelled = false
   var completedSteps: seq[StepResult]
   var totalUsage: Usage
@@ -452,7 +472,7 @@ proc runLoop(provider: Provider, request: ProviderRequest,
     var stepResult = StepResult(model: result.model, content: result.content,
       usage: result.usage, finishReason: result.finishReason)
     totalUsage.addUsage(result.usage)
-    if calls.len == 0 or not canExecute(tools):
+    if calls.len == 0 or not canExecute(tools) or request.toolChoice.kind == tckNone:
       completedSteps.add stepResult
       if not callbacks.onStepFinish.isNil:
         callbacks.onStepFinish(step, stepResult)
@@ -491,7 +511,8 @@ proc generateTextAsync(
   abort: AbortCheck = nil,
   callbacks = RunCallbacks(),
   turnId = "",
-  metadata: JsonNode = nil
+  metadata: JsonNode = nil,
+  toolChoice = toolChoiceAuto()
 ): Future[ProviderResponse] {.async.} =
   ## One-shot completion. `prompt` becomes a user message when `messages` is empty.
   ## `maxRetries` retries 429/5xx/transport (default 2) with jitter and
@@ -500,7 +521,7 @@ proc generateTextAsync(
   validateRun(tools, maxRetries, maxSteps)
   let request = buildRequest(model, prompt, messages, system,
     toDefinitions(tools), maxTokens, sessionId, options,
-    turnId = turnId, metadata = metadata)
+    turnId = turnId, metadata = metadata, toolChoice = toolChoice)
   return await runLoop(provider, request, tools, maxRetries, maxSteps, abort, nil,
     callbacks)
 
@@ -519,12 +540,13 @@ proc generateTextAsync*(
   callbacks = RunCallbacks(),
   providerOptions = ProviderOptions(),
   metadata: JsonNode = nil,
-  turnId = ""
+  turnId = "",
+  toolChoice = toolChoiceAuto()
 ): Future[ProviderResponse] {.async.} =
   let resolved = resolveOptions(options, providerOptions, model.provider.name)
   return await generateTextAsync(model.provider, model.id, prompt, messages, system, tools,
     maxTokens, sessionId, resolved, maxRetries, maxSteps, abort, callbacks,
-    turnId, metadata)
+    turnId, metadata, toolChoice)
 
 proc generateText*(model: LanguageModel, prompt = "",
                    messages: seq[Message] = @[], system = "",
@@ -533,10 +555,11 @@ proc generateText*(model: LanguageModel, prompt = "",
                    abort: AbortCheck = nil,
                    callbacks = RunCallbacks(),
                    providerOptions = ProviderOptions(),
-                   metadata: JsonNode = nil, turnId = ""): ProviderResponse =
+                   metadata: JsonNode = nil, turnId = "",
+                   toolChoice = toolChoiceAuto()): ProviderResponse =
   waitFor generateTextAsync(model, prompt, messages, system, tools, maxTokens,
     sessionId, options, maxRetries, maxSteps, abort, callbacks, providerOptions,
-    metadata, turnId)
+    metadata, turnId, toolChoice)
 
 proc generateTextAsync*(
   provider: Provider,
@@ -578,13 +601,14 @@ proc streamTextAsync(
   abort: AbortCheck = nil,
   callbacks = RunCallbacks(),
   turnId = "",
-  metadata: JsonNode = nil
+  metadata: JsonNode = nil,
+  toolChoice = toolChoiceAuto()
 ): Future[ProviderResponse] {.async.} =
   ## Streaming completion; `onEvent` receives deltas. Return false to cancel.
   validateRun(tools, maxRetries, maxSteps)
   let request = buildRequest(model, prompt, messages, system,
     toDefinitions(tools), maxTokens, sessionId, options, wakeFd,
-    turnId, metadata)
+    turnId, metadata, toolChoice)
   return await runLoop(provider, request, tools, maxRetries, maxSteps, abort,
     onEvent, callbacks)
 
@@ -605,13 +629,14 @@ proc streamTextAsync*(
   callbacks = RunCallbacks(),
   providerOptions = ProviderOptions(),
   metadata: JsonNode = nil,
-  turnId = ""
+  turnId = "",
+  toolChoice = toolChoiceAuto()
 ): Future[ProviderResponse] {.async.} =
   let resolved = resolveOptions(options, providerOptions, model.provider.name)
   return await streamTextAsync(model.provider, model.id, onEvent, prompt,
     messages, system, tools,
     maxTokens, sessionId, resolved, wakeFd, maxRetries, maxSteps, abort, callbacks,
-    turnId, metadata)
+    turnId, metadata, toolChoice)
 
 proc streamText*(model: LanguageModel, onEvent: StreamCallback, prompt = "",
                  messages: seq[Message] = @[], system = "",
@@ -620,10 +645,11 @@ proc streamText*(model: LanguageModel, onEvent: StreamCallback, prompt = "",
                  maxSteps = 1, abort: AbortCheck = nil,
                  callbacks = RunCallbacks(),
                  providerOptions = ProviderOptions(),
-                 metadata: JsonNode = nil, turnId = ""): ProviderResponse =
+                 metadata: JsonNode = nil, turnId = "",
+                 toolChoice = toolChoiceAuto()): ProviderResponse =
   waitFor streamTextAsync(model, onEvent, prompt, messages, system, tools,
     maxTokens, sessionId, options, wakeFd, maxRetries, maxSteps, abort,
-    callbacks, providerOptions, metadata, turnId)
+    callbacks, providerOptions, metadata, turnId, toolChoice)
 
 proc streamTextAsync*(
   provider: Provider,
@@ -719,9 +745,8 @@ proc toolObjectValue(resp: ProviderResponse): tuple[value: JsonNode, issue: stri
   if call.name != objectToolName:
     return (nil, "expected '" & objectToolName & "' tool call, got '" &
       call.name & "'", false)
-  let bad = invalidToolCall(call)
-  if bad.len > 0:
-    return (nil, bad, false)
+  if call.parseError.len > 0:
+    return (nil, call.parseError, false)
   if call.input.isNil:
     return (nil, "'" & objectToolName & "' tool call has no arguments", false)
   (call.input, "", false)
@@ -839,9 +864,7 @@ proc startObjectSession(
     result.useTool = true
     result.req.tools = @[ToolDefinition(name: objectToolName,
       description: "Submit the structured result.", inputSchema: wire)]
-    let forced = provider.forceToolOptions(objectToolName)
-    if not forced.isNil:
-      result.req.options = mergeOptions(result.req.options, forced)
+    result.req.toolChoice = toolChoiceSpecific(objectToolName)
     result.source = osTool
   of omJson:
     appendSystemInstruction(result.req, objectInstruction(schema, mode, true))
