@@ -4,7 +4,7 @@ description: Runnable examples shipped with the nimgent repository.
 ---
 
 The repository keeps complete examples in
-[`examples/`](https://github.com/martinrusev/nimgent/tree/main/examples).
+[`examples/`](https://github.com/martineastwood/nimgent/tree/main/examples).
 
 | Example | Demonstrates |
 | --- | --- |

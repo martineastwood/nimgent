@@ -9,7 +9,7 @@ export default defineConfig({
 			title: 'nimgent',
 			description: 'A lightweight Nim client for provider-native LLM applications.',
 			customCss: ['./src/styles/sidebar.css'],
-			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/martinrusev/nimgent' }],
+			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/martineastwood/nimgent' }],
 			sidebar: [
 				{
 					label: 'Start here',
@@ -39,7 +39,7 @@ export default defineConfig({
 			plugins: [
 				starlightThemeBlack({
 					navLinks: [
-						{ label: 'GitHub', link: 'https://github.com/martinrusev/nimgent' },
+						{ label: 'GitHub', link: 'https://github.com/martineastwood/nimgent' },
 					],
 					docs: { showMarkdownActions: false },
 				}),
