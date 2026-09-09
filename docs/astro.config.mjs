@@ -8,6 +8,7 @@ export default defineConfig({
 		starlight({
 			title: 'nimgent',
 			description: 'A lightweight Nim client for provider-native LLM applications.',
+			customCss: ['./src/styles/sidebar.css'],
 			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/martinrusev/nimgent' }],
 			sidebar: [
 				{
