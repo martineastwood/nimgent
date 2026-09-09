@@ -125,6 +125,10 @@ proc encodeMessage(result: var JsonNode, message: Message) =
 proc buildChatBody*(request: ProviderRequest, stream: bool,
                     includeSessionId = false, applyCache = false,
                     maxTokensField = "max_completion_tokens"): JsonNode =
+  for tool in request.tools:
+    if tool.hosted.len > 0:
+      raiseProviderError("Chat Completions does not support hosted tool '" &
+        tool.hosted & "'; use a provider with native hosted-tool support")
   result = %*{
     "model": request.model,
     "messages": newJArray()
@@ -148,7 +152,6 @@ proc buildChatBody*(request: ProviderRequest, stream: bool,
   if request.tools.len > 0:
     result["tools"] = newJArray()
     for tool in request.tools:
-      if tool.hosted.len > 0: continue
       result["tools"].add %*{
         "type": "function",
         "function": {

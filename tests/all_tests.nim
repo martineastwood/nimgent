@@ -959,14 +959,13 @@ suite "files, sources, hosted tools":
     check parsed.content[1].text == "Nim is compiled."
     check parsed.content[2].source.url == "https://nim-lang.org"
 
-  test "Chat Completions omits hosted tools":
-    let chat = buildChatBody(ProviderRequest(model: "m",
-      messages: @[userMessage("hi")],
-      tools: toDefinitions(@[hostedTool("web_search"),
-        rawTool("read", "d", %*{"type": "object"})]),
-      maxTokens: 10), false)
-    check chat["tools"].len == 1
-    check chat["tools"][0]["function"]["name"].getStr == "read"
+  test "Chat Completions rejects hosted tools":
+    expect ProviderError:
+      discard buildChatBody(ProviderRequest(model: "m",
+        messages: @[userMessage("hi")],
+        tools: toDefinitions(@[hostedTool("web_search"),
+          rawTool("read", "d", %*{"type": "object"})]),
+        maxTokens: 10), false)
 
   test "generateText does not execute hosted tool calls":
     var ran = false

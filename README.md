@@ -321,8 +321,9 @@ live model-output deltas and cancellation. A full example lives in
 
 `hostedTool("web_search")` runs on the provider (OpenAI Responses, Anthropic,
 native Gemini).
-Chat Completions skips it. Hosted calls and results stay on the assistant
-message for replay; `toolCalls` / the execute loop ignore them.
+Chat Completions rejects hosted tools because it has no provider-hosted tool
+wire format. Hosted calls and results stay on the assistant message for replay;
+`toolCalls` / the execute loop ignore them.
 
 ```nim
 let response = generateText(
@@ -330,7 +331,9 @@ let response = generateText(
   tools = @[hostedTool("web_search")])
 ```
 
-For Gemini hosted tools, use the native adapter:
+For Gemini, use the native adapter. This is the single Google provider path in
+nimgent; the OpenAI-compatible Google endpoint is not used by `google(...)` and
+does not provide the full Gemini hosted-tool surface:
 
 ```nim
 import nimgent/google
