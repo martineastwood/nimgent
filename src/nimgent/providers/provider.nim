@@ -249,6 +249,71 @@ type
   EmbeddingUsage* = object
     tokens*: int
 
+  AgentEventKind* = enum
+    aeRunStart
+    aeStepStart
+    aeTextDelta
+    aeThinkingDelta
+    aeToolCall
+    aeToolApprovalRequired
+    aeToolResult
+    aeStepFinish
+    aeRunFinish
+    aeError
+
+  ToolApprovalMode* = enum
+    tamAllow
+    tamAsk
+    tamDeny
+
+  ToolApproval* = object
+    mode*: ToolApprovalMode
+    reason*: string
+
+  ToolApprovalDecision* = enum
+    tadApprove
+    tadDeny
+
+  ToolApprovalRequest* = ref object
+    callId*: string
+    toolName*: string
+    input*: JsonNode
+    reason*: string
+    decision: Future[ToolApprovalDecision]
+    resolved: bool
+
+  AgentEvent* = object
+    runId*: string
+    sessionId*: string
+    turnId*: string
+    step*: int
+    case kind*: AgentEventKind
+    of aeRunStart:
+      prompt*: string
+      model*: string
+    of aeStepStart:
+      stepModel*: string
+    of aeTextDelta, aeThinkingDelta:
+      text*: string
+    of aeToolCall:
+      call*: ContentBlock
+    of aeToolApprovalRequired:
+      approval*: ToolApprovalRequest
+    of aeToolResult:
+      toolResult*: ContentBlock
+      durationMs*: int
+    of aeStepFinish:
+      stepResult*: StepResult
+    of aeRunFinish:
+      response*: ProviderResponse
+    of aeError:
+      error*: ref CatchableError
+
+  AgentEventCallback* = proc (event: AgentEvent): bool {.closure.}
+
+  ToolApprovalPolicy* = proc (step: int, call: ContentBlock,
+                              tool: Tool): ToolApproval {.closure.}
+
   EmbeddingRequest* = object
     model*: string
     values*: seq[string]
@@ -287,6 +352,28 @@ type
 
   StreamCallback* = proc (ev: StreamEvent): bool {.closure.}
     ## Return false to cancel the stream early.
+
+proc newToolApprovalRequest*(call: ContentBlock,
+                             reason: string): ToolApprovalRequest =
+  ToolApprovalRequest(callId: call.id, toolName: call.name,
+    input: if call.input.isNil: newJNull() else: copy(call.input),
+    reason: reason, decision: newFuture[ToolApprovalDecision]("toolApproval"),
+    resolved: false)
+
+proc approve*(request: ToolApprovalRequest) =
+  if request.isNil or request.resolved: return
+  request.resolved = true
+  request.decision.complete(tadApprove)
+
+proc deny*(request: ToolApprovalRequest) =
+  if request.isNil or request.resolved: return
+  request.resolved = true
+  request.decision.complete(tadDeny)
+
+proc waitDecision*(request: ToolApprovalRequest): Future[ToolApprovalDecision] =
+  if request.isNil:
+    return newFuture[ToolApprovalDecision]("nilToolApproval")
+  request.decision
 
 proc raiseProviderError*(msg: string, overflow = false, retryable = false,
                          aborted = false, status = 0, retryAfterMs = 0,

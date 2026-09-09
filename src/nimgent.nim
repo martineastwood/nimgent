@@ -9,8 +9,8 @@ export provider_options
 import nimgent/structured_output/jsonschema
 export jsonschema
 
-import std/[asyncdispatch, json, jsonutils, math, options, os, random, strutils,
-  times]
+import std/[asyncdispatch, asyncstreams, json, jsonutils, math, options, os,
+  random, strutils, times]
 export fromJsonHook
 when compileOption("threads"):
   import std/typedthreads
@@ -23,6 +23,25 @@ type RunCallbacks* = object
                        durationMs: int) {.closure.}
   onStepFinish*: proc (step: int, result: StepResult) {.closure.}
   onFinish*: proc (response: ProviderResponse) {.closure.}
+
+type
+  AgentEventStream* = ref object
+    ## Pull-based event stream. `result` completes with the run response or
+    ## fails with the same exception that terminated the event stream.
+    queue*: FutureStream[AgentEvent]
+    result*: Future[ProviderResponse]
+    closed: bool
+
+proc read*(stream: AgentEventStream): Future[(bool, AgentEvent)] =
+  if stream.isNil:
+    raise newException(ValueError, "agent event stream must not be nil")
+  stream.queue.read()
+
+proc close*(stream: AgentEventStream) =
+  if stream.isNil or stream.closed: return
+  stream.closed = true
+  if not stream.queue.finished:
+    stream.queue.complete()
 
 type
   EmbedResult* = object
@@ -286,6 +305,12 @@ proc findTool(tools: openArray[Tool], name: string): int =
     if t.name == name: return i
   -1
 
+proc toolContext(call: ContentBlock, request: ProviderRequest,
+                 step: int, abort: AbortCheck): ToolContext =
+  ToolContext(callId: call.id, sessionId: request.sessionId,
+    turnId: if request.turnId.len > 0: request.turnId else: "step:" & $step,
+    abort: contextAbort(abort), metadata: request.metadata)
+
 proc execOne(tools: openArray[Tool], call: ContentBlock,
              context: ToolContext): ContentBlock =
   if invalidToolArguments(call):
@@ -380,9 +405,7 @@ when compileOption("threads"):
         result[i] = toolResultBlock(call, inputFailure)
         continue
       jobs[i].execute = tools[t].execute
-      jobs[i].context = ToolContext(callId: call.id, sessionId: request.sessionId,
-        turnId: if request.turnId.len > 0: request.turnId else: "step:" & $step,
-        abort: contextAbort(abort), metadata: request.metadata)
+      jobs[i].context = toolContext(call, request, step, abort)
       jobs[i].input = if call.input.isNil: nil else: copy(call.input)
       jobs[i].call = call
       runnable.add i
@@ -403,14 +426,65 @@ proc execTools(tools: openArray[Tool], calls: openArray[ContentBlock],
       return execToolsParallel(tools, calls, abort, request, step)
   for call in calls:
     checkAbort(abort)
-    let context = ToolContext(callId: call.id, sessionId: request.sessionId,
-      turnId: if request.turnId.len > 0: request.turnId else: "step:" & $step,
-      abort: contextAbort(abort), metadata: request.metadata)
-    result.add execOne(tools, call, context)
+    result.add execOne(tools, call, toolContext(call, request, step, abort))
+
+proc emitAgentEvent(callback: AgentEventCallback, event: AgentEvent): bool =
+  if callback.isNil: return true
+  callback(event)
 
 proc execToolsAsync(tools: seq[Tool], calls: seq[ContentBlock],
                     abort: AbortCheck, step: int, request: ProviderRequest,
-                    callbacks: RunCallbacks): Future[seq[ContentBlock]] {.async.} =
+                    callbacks: RunCallbacks,
+                    agentEvents: AgentEventCallback = nil,
+                    runId = "",
+                    approvalPolicy: ToolApprovalPolicy = nil): Future[seq[ContentBlock]] {.async.} =
+  if not agentEvents.isNil or not approvalPolicy.isNil:
+    ## The normalized event path performs approval before execution and emits
+    ## one result per call. Keep this path sequential so an approval can pause
+    ## one call without starting sibling side effects.
+    for call in calls:
+      checkAbort(abort)
+      let toolIndex = findTool(tools, call.name)
+      var output: ContentBlock
+      var started = epochTime()
+      var allowed = true
+      if not approvalPolicy.isNil and toolIndex >= 0:
+        let approval = approvalPolicy(step, call, tools[toolIndex])
+        if approval.mode == tamDeny:
+          allowed = false
+          output = toolResultBlock(call, toolFailure("approval_denied",
+            if approval.reason.len > 0: approval.reason else:
+              "Tool execution was denied: " & call.name))
+        elif approval.mode == tamAsk:
+          if agentEvents.isNil:
+            raiseProviderError("tool approval requires an AgentEvent consumer")
+          let reason = if approval.reason.len > 0: approval.reason else:
+            "Tool execution requires approval: " & call.name
+          let approvalRequest = newToolApprovalRequest(call, reason)
+          if not emitAgentEvent(agentEvents, AgentEvent(
+              kind: aeToolApprovalRequired, runId: runId,
+              sessionId: request.sessionId, turnId: request.turnId,
+              step: step, approval: approvalRequest)):
+            raiseCancelledError()
+          let decision = await approvalRequest.waitDecision()
+          if decision == tadDeny:
+            allowed = false
+            output = toolResultBlock(call, toolFailure("approval_denied", reason))
+      if allowed:
+        if not callbacks.onToolStart.isNil: callbacks.onToolStart(step, call)
+        started = epochTime()
+        output = await execOneAsync(tools, call,
+          toolContext(call, request, step, abort))
+        if not callbacks.onToolFinish.isNil:
+          callbacks.onToolFinish(step, call, output,
+            int((epochTime() - started) * 1000))
+      result.add output
+      if not emitAgentEvent(agentEvents, AgentEvent(kind: aeToolResult,
+          runId: runId, sessionId: request.sessionId, turnId: request.turnId,
+          step: step, toolResult: output,
+          durationMs: int((epochTime() - started) * 1000))):
+        raiseCancelledError()
+    return
   when compileOption("threads"):
     if batchOverlaps(tools, calls):
       checkAbort(abort)
@@ -429,10 +503,7 @@ proc execToolsAsync(tools: seq[Tool], calls: seq[ContentBlock],
     var pending: seq[Future[ContentBlock]]
     for call in calls:
       if not callbacks.onToolStart.isNil: callbacks.onToolStart(step, call)
-      let context = ToolContext(callId: call.id, sessionId: request.sessionId,
-        turnId: if request.turnId.len > 0: request.turnId else: "step:" & $step,
-        abort: contextAbort(abort), metadata: request.metadata)
-      pending.add execOneAsync(tools, call, context)
+      pending.add execOneAsync(tools, call, toolContext(call, request, step, abort))
     for i, future in pending:
       let output = await future
       result.add output
@@ -444,10 +515,8 @@ proc execToolsAsync(tools: seq[Tool], calls: seq[ContentBlock],
     checkAbort(abort)
     if not callbacks.onToolStart.isNil: callbacks.onToolStart(step, call)
     let started = epochTime()
-    let context = ToolContext(callId: call.id, sessionId: request.sessionId,
-      turnId: if request.turnId.len > 0: request.turnId else: "step:" & $step,
-      abort: contextAbort(abort), metadata: request.metadata)
-    let output = await execOneAsync(tools, call, context)
+    let output = await execOneAsync(tools, call,
+      toolContext(call, request, step, abort))
     result.add output
     if not callbacks.onToolFinish.isNil:
       callbacks.onToolFinish(step, call, output,
@@ -482,52 +551,109 @@ proc runLoop(provider: Provider, request: ProviderRequest,
              tools: seq[Tool], maxRetries, maxSteps: int,
              abort: AbortCheck,
              onEvent: StreamCallback,
-             callbacks: RunCallbacks): Future[ProviderResponse] {.async.} =
+             callbacks: RunCallbacks,
+             agentEvents: AgentEventCallback = nil,
+             approvalPolicy: ToolApprovalPolicy = nil,
+             prompt = ""): Future[ProviderResponse] {.async.} =
   var request = request
   validateToolChoice(request.toolChoice, request.tools)
   var cancelled = false
   var completedSteps: seq[StepResult]
   var totalUsage: Usage
-  let cb = if onEvent.isNil: nil else:
-    proc (ev: StreamEvent): bool =
-      if not abort.isNil and abort():
-        cancelled = true
-        return false
-      if not onEvent(ev):
-        cancelled = true
-        return false
-      true
-  for step in 0 ..< maxSteps:
-    result = await retryingCall(provider, request, maxRetries, abort, cb, callbacks)
-    if cancelled:
+  let runId = if request.turnId.len > 0: request.turnId else:
+    "run:" & $epochTime()
+  var currentStep = -1
+  try:
+    if not emitAgentEvent(agentEvents, AgentEvent(kind: aeRunStart,
+        runId: runId, sessionId: request.sessionId, turnId: request.turnId,
+        step: -1, prompt: prompt, model: request.model)):
       raiseCancelledError()
-    let calls = result.toolCalls
-    var stepResult = StepResult(model: result.model, content: result.content,
-      usage: result.usage, finishReason: result.finishReason)
-    totalUsage.addUsage(result.usage)
-    if calls.len == 0 or not canExecute(tools) or request.toolChoice.kind == tckNone:
+    let cb = if onEvent.isNil and agentEvents.isNil: nil else:
+      proc (ev: StreamEvent): bool =
+        if not abort.isNil and abort():
+          cancelled = true
+          return false
+        if not onEvent.isNil and ev.kind != seFinished:
+          if not onEvent(ev):
+            cancelled = true
+            return false
+        if not agentEvents.isNil:
+          case ev.kind
+          of seTextDelta:
+            if not emitAgentEvent(agentEvents, AgentEvent(kind: aeTextDelta,
+                runId: runId, sessionId: request.sessionId,
+                turnId: request.turnId, step: currentStep, text: ev.text)):
+              cancelled = true
+              return false
+          of seThinkingDelta:
+            if not emitAgentEvent(agentEvents, AgentEvent(kind: aeThinkingDelta,
+                runId: runId, sessionId: request.sessionId,
+                turnId: request.turnId, step: currentStep, text: ev.text)):
+              cancelled = true
+              return false
+          else:
+            discard
+        true
+    for step in 0 ..< maxSteps:
+      currentStep = step
+      if not emitAgentEvent(agentEvents, AgentEvent(kind: aeStepStart,
+          runId: runId, sessionId: request.sessionId, turnId: request.turnId,
+          step: step, stepModel: request.model)):
+        raiseCancelledError()
+      result = await retryingCall(provider, request, maxRetries, abort, cb,
+        callbacks)
+      if cancelled:
+        raiseCancelledError()
+      let calls = result.toolCalls
+      for call in calls:
+        if not emitAgentEvent(agentEvents, AgentEvent(kind: aeToolCall,
+            runId: runId, sessionId: request.sessionId, turnId: request.turnId,
+            step: step, call: call)):
+          raiseCancelledError()
+      var stepResult = StepResult(model: result.model, content: result.content,
+        usage: result.usage, finishReason: result.finishReason)
+      totalUsage.addUsage(result.usage)
+      let stop = calls.len == 0 or not canExecute(tools) or
+        request.toolChoice.kind == tckNone
+      if stop or step == maxSteps - 1:
+        if not stop:
+          result.finishReason = frStepLimit
+          stepResult.finishReason = frStepLimit
+        completedSteps.add stepResult
+        if not callbacks.onStepFinish.isNil:
+          callbacks.onStepFinish(step, stepResult)
+        if not emitAgentEvent(agentEvents, AgentEvent(kind: aeStepFinish,
+            runId: runId, sessionId: request.sessionId, turnId: request.turnId,
+            step: step, stepResult: stepResult)):
+          raiseCancelledError()
+        break
+      let parts = await execToolsAsync(tools, calls, abort, step, request,
+        callbacks, agentEvents, runId, approvalPolicy)
+      stepResult.toolResults = parts
       completedSteps.add stepResult
       if not callbacks.onStepFinish.isNil:
         callbacks.onStepFinish(step, stepResult)
-      break
-    if step == maxSteps - 1:
-      completedSteps.add stepResult
-      result.finishReason = frStepLimit
-      if not callbacks.onStepFinish.isNil:
-        callbacks.onStepFinish(step, stepResult)
-      break
-    let parts = await execToolsAsync(tools, calls, abort, step, request, callbacks)
-    stepResult.toolResults = parts
-    completedSteps.add stepResult
-    if not callbacks.onStepFinish.isNil:
-      callbacks.onStepFinish(step, stepResult)
-    request.messages.add Message(role: roleAssistant, content: result.content)
-    request.messages.add userMessage(parts)
-  result.steps = completedSteps
-  result.totalUsage = totalUsage
-  if not onEvent.isNil and not cancelled:
-    discard onEvent(StreamEvent(kind: seFinished))
-  if not callbacks.onFinish.isNil: callbacks.onFinish(result)
+      if not emitAgentEvent(agentEvents, AgentEvent(kind: aeStepFinish,
+          runId: runId, sessionId: request.sessionId, turnId: request.turnId,
+          step: step, stepResult: stepResult)):
+        raiseCancelledError()
+      request.messages.add Message(role: roleAssistant, content: result.content)
+      request.messages.add userMessage(parts)
+    result.steps = completedSteps
+    result.totalUsage = totalUsage
+    if not onEvent.isNil and not cancelled:
+      discard onEvent(StreamEvent(kind: seFinished))
+    if not callbacks.onFinish.isNil: callbacks.onFinish(result)
+    if not emitAgentEvent(agentEvents, AgentEvent(kind: aeRunFinish,
+        runId: runId, sessionId: request.sessionId, turnId: request.turnId,
+        step: currentStep, response: result)):
+      raiseCancelledError()
+  except CatchableError as e:
+    if not emitAgentEvent(agentEvents, AgentEvent(kind: aeError,
+        runId: runId, sessionId: request.sessionId, turnId: request.turnId,
+        step: currentStep, error: e)):
+      discard
+    raise
 
 proc generateTextAsync(
   provider: Provider,
@@ -707,6 +833,198 @@ proc streamText*(provider: Provider, request: ProviderRequest,
                  providerOptions = ProviderOptions()): ProviderResponse =
   waitFor streamTextAsync(provider, request, onEvent, maxRetries, abort,
     callbacks, providerOptions)
+
+proc generateAgentTextAsync*(model: LanguageModel,
+                             prompt = "",
+                             messages: seq[Message] = @[],
+                             system = "",
+                             tools: seq[Tool] = @[],
+                             maxTokens = 0,
+                             sessionId = "",
+                             options: JsonNode = nil,
+                             maxRetries = 2,
+                             maxSteps = 1,
+                             abort: AbortCheck = nil,
+                             callbacks = RunCallbacks(),
+                             providerOptions = ProviderOptions(),
+                             metadata: JsonNode = nil,
+                             turnId = "",
+                             toolChoice = toolChoiceAuto(),
+                             onEvent: AgentEventCallback = nil,
+                             approvalPolicy: ToolApprovalPolicy = nil
+                             ): Future[ProviderResponse] {.async.} =
+  let resolved = resolveOptions(options, providerOptions, model.provider.name)
+  validateRun(tools, maxRetries, maxSteps)
+  let request = buildRequest(model.id, prompt, messages, system,
+    toDefinitions(tools), maxTokens, sessionId, resolved,
+    turnId = turnId, metadata = metadata, toolChoice = toolChoice)
+  return await runLoop(model.provider, request, tools, maxRetries, maxSteps,
+    abort, nil, callbacks, onEvent, approvalPolicy, prompt)
+
+proc streamAgentTextAsync*(model: LanguageModel,
+                           prompt = "",
+                           messages: seq[Message] = @[],
+                           system = "",
+                           tools: seq[Tool] = @[],
+                           maxTokens = 0,
+                           sessionId = "",
+                           options: JsonNode = nil,
+                           wakeFd: cint = -1,
+                           maxRetries = 2,
+                           maxSteps = 1,
+                           abort: AbortCheck = nil,
+                           callbacks = RunCallbacks(),
+                           providerOptions = ProviderOptions(),
+                           metadata: JsonNode = nil,
+                           turnId = "",
+                           toolChoice = toolChoiceAuto(),
+                           onEvent: AgentEventCallback = nil,
+                           approvalPolicy: ToolApprovalPolicy = nil
+                           ): Future[ProviderResponse] {.async.} =
+  let resolved = resolveOptions(options, providerOptions, model.provider.name)
+  validateRun(tools, maxRetries, maxSteps)
+  let request = buildRequest(model.id, prompt, messages, system,
+    toDefinitions(tools), maxTokens, sessionId, resolved, wakeFd,
+    turnId, metadata, toolChoice)
+  return await runLoop(model.provider, request, tools, maxRetries, maxSteps,
+    abort, nil, callbacks, onEvent, approvalPolicy, prompt)
+
+proc eventStream*(run: proc (callback: AgentEventCallback): Future[ProviderResponse]
+                  {.closure.}): AgentEventStream =
+  result = AgentEventStream(queue: newFutureStream[AgentEvent]("agentEvents"))
+  let stream = result
+  proc pump(): Future[ProviderResponse] {.async.} =
+    try:
+      return await run(proc (event: AgentEvent): bool =
+        if stream.closed: false
+        else:
+          discard stream.queue.write(event)
+          true)
+    finally:
+      if not stream.queue.finished:
+        stream.queue.complete()
+  result.result = pump()
+
+proc generateTextAsync*(model: LanguageModel,
+                        onEvent: AgentEventCallback,
+                        prompt = "",
+                        messages: seq[Message] = @[],
+                        system = "",
+                        tools: seq[Tool] = @[],
+                        maxTokens = 0,
+                        sessionId = "",
+                        options: JsonNode = nil,
+                        maxRetries = 2,
+                        maxSteps = 1,
+                        abort: AbortCheck = nil,
+                        callbacks = RunCallbacks(),
+                        providerOptions = ProviderOptions(),
+                        metadata: JsonNode = nil,
+                        turnId = "",
+                        toolChoice = toolChoiceAuto(),
+                        approvalPolicy: ToolApprovalPolicy = nil
+                        ): Future[ProviderResponse] {.async.} =
+  return await generateAgentTextAsync(model, prompt, messages, system, tools,
+    maxTokens, sessionId, options, maxRetries, maxSteps, abort, callbacks,
+    providerOptions, metadata, turnId, toolChoice, onEvent, approvalPolicy)
+
+proc generateText*(model: LanguageModel, onEvent: AgentEventCallback,
+                   prompt = "", messages: seq[Message] = @[], system = "",
+                   tools: seq[Tool] = @[], maxTokens = 0, sessionId = "",
+                   options: JsonNode = nil, maxRetries = 2, maxSteps = 1,
+                   abort: AbortCheck = nil, callbacks = RunCallbacks(),
+                   providerOptions = ProviderOptions(),
+                   metadata: JsonNode = nil, turnId = "",
+                   toolChoice = toolChoiceAuto(),
+                   approvalPolicy: ToolApprovalPolicy = nil): ProviderResponse =
+  waitFor generateTextAsync(model, onEvent, prompt, messages, system, tools,
+    maxTokens, sessionId, options, maxRetries, maxSteps, abort, callbacks,
+    providerOptions, metadata, turnId, toolChoice, approvalPolicy)
+
+proc streamTextAsync*(model: LanguageModel, onEvent: AgentEventCallback,
+                      prompt = "", messages: seq[Message] = @[], system = "",
+                      tools: seq[Tool] = @[], maxTokens = 0, sessionId = "",
+                      options: JsonNode = nil, wakeFd: cint = -1,
+                      maxRetries = 2, maxSteps = 1,
+                      abort: AbortCheck = nil,
+                      callbacks = RunCallbacks(),
+                      providerOptions = ProviderOptions(),
+                      metadata: JsonNode = nil, turnId = "",
+                      toolChoice = toolChoiceAuto(),
+                      approvalPolicy: ToolApprovalPolicy = nil
+                      ): Future[ProviderResponse] {.async.} =
+  return await streamAgentTextAsync(model, prompt, messages, system, tools,
+    maxTokens, sessionId, options, wakeFd, maxRetries, maxSteps, abort,
+    callbacks, providerOptions, metadata, turnId, toolChoice, onEvent,
+    approvalPolicy)
+
+proc streamText*(model: LanguageModel, onEvent: AgentEventCallback,
+                 prompt = "", messages: seq[Message] = @[], system = "",
+                 tools: seq[Tool] = @[], maxTokens = 0, sessionId = "",
+                 options: JsonNode = nil, wakeFd: cint = -1,
+                 maxRetries = 2, maxSteps = 1,
+                 abort: AbortCheck = nil, callbacks = RunCallbacks(),
+                 providerOptions = ProviderOptions(),
+                 metadata: JsonNode = nil, turnId = "",
+                 toolChoice = toolChoiceAuto(),
+                 approvalPolicy: ToolApprovalPolicy = nil): ProviderResponse =
+  waitFor streamTextAsync(model, onEvent, prompt, messages, system, tools,
+    maxTokens, sessionId, options, wakeFd, maxRetries, maxSteps, abort,
+    callbacks, providerOptions, metadata, turnId, toolChoice, approvalPolicy)
+
+proc generateTextAsync*(provider: Provider, request: ProviderRequest,
+                        onEvent: AgentEventCallback,
+                        maxRetries = 2, abort: AbortCheck = nil,
+                        callbacks = RunCallbacks(),
+                        providerOptions = ProviderOptions()
+                        ): Future[ProviderResponse] {.async.} =
+  validateRun(@[], maxRetries, 1)
+  var resolved = request
+  resolved.options = resolveOptions(request.options, providerOptions, provider.name)
+  return await runLoop(provider, resolved, @[], maxRetries, 1, abort, nil,
+    callbacks, onEvent, nil)
+
+proc generateText*(provider: Provider, request: ProviderRequest,
+                   onEvent: AgentEventCallback,
+                   maxRetries = 2, abort: AbortCheck = nil,
+                   callbacks = RunCallbacks(),
+                   providerOptions = ProviderOptions()): ProviderResponse =
+  waitFor generateTextAsync(provider, request, onEvent, maxRetries, abort,
+    callbacks, providerOptions)
+
+proc streamTextAsync*(provider: Provider, request: ProviderRequest,
+                      onEvent: AgentEventCallback,
+                      maxRetries = 2, abort: AbortCheck = nil,
+                      callbacks = RunCallbacks(),
+                      providerOptions = ProviderOptions()
+                      ): Future[ProviderResponse] {.async.} =
+  validateRun(@[], maxRetries, 1)
+  var resolved = request
+  resolved.options = resolveOptions(request.options, providerOptions, provider.name)
+  return await runLoop(provider, resolved, @[], maxRetries, 1, abort, nil,
+    callbacks, onEvent, nil)
+
+proc streamText*(provider: Provider, request: ProviderRequest,
+                 onEvent: AgentEventCallback, maxRetries = 2,
+                 abort: AbortCheck = nil,
+                 callbacks = RunCallbacks(),
+                 providerOptions = ProviderOptions()): ProviderResponse =
+  waitFor streamTextAsync(provider, request, onEvent, maxRetries, abort,
+    callbacks, providerOptions)
+
+proc events*(model: LanguageModel, prompt = "",
+             messages: seq[Message] = @[], system = "",
+             tools: seq[Tool] = @[], maxTokens = 0, sessionId = "",
+             options: JsonNode = nil, maxRetries = 2, maxSteps = 1,
+             abort: AbortCheck = nil, callbacks = RunCallbacks(),
+             providerOptions = ProviderOptions(), metadata: JsonNode = nil,
+             turnId = "", toolChoice = toolChoiceAuto(),
+             approvalPolicy: ToolApprovalPolicy = nil): AgentEventStream =
+  eventStream(proc (callback: AgentEventCallback): Future[ProviderResponse]
+              {.closure.} =
+    streamAgentTextAsync(model, prompt, messages, system, tools, maxTokens,
+      sessionId, options, -1, maxRetries, maxSteps, abort, callbacks,
+      providerOptions, metadata, turnId, toolChoice, callback, approvalPolicy))
 
 type
   ObjectMode* = enum

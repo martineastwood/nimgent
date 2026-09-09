@@ -183,17 +183,33 @@ proc requestMessages(session: Session, prompt: string): seq[Message] =
 proc nextTurnId(session: Session): string =
   session.id & ":turn:" & $(session.events.len + 1)
 
-proc runAsync*(session: Session, prompt: string,
-               abort: AbortCheck = nil,
-               callbacks = RunCallbacks()): Future[ProviderResponse] {.async.} =
-  ## Run one user turn and append its complete model/tool transcript.
+proc validateTurn(session: Session, prompt: string) =
   if session.isNil:
     raiseProviderError("session must not be nil")
   if prompt.len == 0:
     raiseProviderError("session prompt must not be empty")
-  let turnId = session.nextTurnId
-  session.appendEvent SessionEvent(kind: sekTurnStarted, turnId: turnId,
+
+proc startTurn(session: Session, prompt: string): string =
+  result = session.nextTurnId
+  session.appendEvent SessionEvent(kind: sekTurnStarted, turnId: result,
     prompt: prompt)
+
+proc beginTurn(session: Session, prompt: string): string =
+  session.validateTurn(prompt)
+  session.startTurn(prompt)
+
+proc recordTurnFailure(session: Session, turnId: string, error: ref CatchableError) =
+  var aborted = false
+  if error of ProviderError:
+    aborted = cast[ref ProviderError](error).aborted
+  session.appendEvent SessionEvent(kind: sekTurnFailed, turnId: turnId,
+    error: error.msg, aborted: aborted)
+
+proc runAsync*(session: Session, prompt: string,
+               abort: AbortCheck = nil,
+               callbacks = RunCallbacks()): Future[ProviderResponse] {.async.} =
+  ## Run one user turn and append its complete model/tool transcript.
+  let turnId = session.beginTurn(prompt)
   try:
     let response = await session.agent.runAsync(
       messages = session.requestMessages(prompt), abort = abort,
@@ -201,11 +217,7 @@ proc runAsync*(session: Session, prompt: string,
     session.commit(turnId, prompt, response)
     return response
   except CatchableError as e:
-    var aborted = false
-    if e of ProviderError:
-      aborted = cast[ref ProviderError](e).aborted
-    session.appendEvent SessionEvent(kind: sekTurnFailed, turnId: turnId,
-      error: e.msg, aborted: aborted)
+    session.recordTurnFailure(turnId, e)
     raise
 
 proc run*(session: Session, prompt: string,
@@ -218,15 +230,10 @@ proc streamAsync*(session: Session, prompt: string, onEvent: StreamCallback,
                   abort: AbortCheck = nil,
                   callbacks = RunCallbacks()): Future[ProviderResponse] {.async.} =
   ## Stream one user turn and append its transcript after successful completion.
-  if session.isNil:
-    raiseProviderError("session must not be nil")
-  if prompt.len == 0:
-    raiseProviderError("session prompt must not be empty")
+  session.validateTurn(prompt)
   if onEvent.isNil:
     raiseProviderError("session stream callback must not be nil")
-  let turnId = session.nextTurnId
-  session.appendEvent SessionEvent(kind: sekTurnStarted, turnId: turnId,
-    prompt: prompt)
+  let turnId = session.startTurn(prompt)
   try:
     let response = await session.agent.streamAsync("", onEvent,
       messages = session.requestMessages(prompt), abort = abort,
@@ -234,11 +241,7 @@ proc streamAsync*(session: Session, prompt: string, onEvent: StreamCallback,
     session.commit(turnId, prompt, response)
     return response
   except CatchableError as e:
-    var aborted = false
-    if e of ProviderError:
-      aborted = cast[ref ProviderError](e).aborted
-    session.appendEvent SessionEvent(kind: sekTurnFailed, turnId: turnId,
-      error: e.msg, aborted: aborted)
+    session.recordTurnFailure(turnId, e)
     raise
 
 proc stream*(session: Session, prompt: string, onEvent: StreamCallback,
@@ -246,6 +249,67 @@ proc stream*(session: Session, prompt: string, onEvent: StreamCallback,
              callbacks = RunCallbacks()): ProviderResponse =
   ## Blocking convenience wrapper around `streamAsync`.
   waitFor session.streamAsync(prompt, onEvent, abort, callbacks)
+
+proc runEventsAsync*(session: Session, prompt: string,
+                     abort: AbortCheck = nil,
+                     callbacks = RunCallbacks(),
+                     onEvent: AgentEventCallback = nil
+                     ): Future[ProviderResponse] {.async.} =
+  let turnId = session.beginTurn(prompt)
+  try:
+    let response = await session.agent.runEventsAsync("",
+      messages = session.requestMessages(prompt), abort = abort,
+      callbacks = callbacks, sessionId = session.id, turnId = turnId,
+      onEvent = onEvent)
+    session.commit(turnId, prompt, response)
+    return response
+  except CatchableError as e:
+    session.recordTurnFailure(turnId, e)
+    raise
+
+proc streamAsync*(session: Session, prompt: string,
+                  onEvent: AgentEventCallback,
+                  abort: AbortCheck = nil,
+                  callbacks = RunCallbacks()): Future[ProviderResponse] {.async.} =
+  session.validateTurn(prompt)
+  if onEvent.isNil:
+    raiseProviderError("session stream callback must not be nil")
+  let turnId = session.startTurn(prompt)
+  try:
+    let response = await session.agent.streamAsync("", onEvent,
+      messages = session.requestMessages(prompt), abort = abort,
+      callbacks = callbacks, sessionId = session.id, turnId = turnId)
+    session.commit(turnId, prompt, response)
+    return response
+  except CatchableError as e:
+    session.recordTurnFailure(turnId, e)
+    raise
+
+proc stream*(session: Session, prompt: string,
+             onEvent: AgentEventCallback,
+             abort: AbortCheck = nil,
+             callbacks = RunCallbacks()): ProviderResponse =
+  waitFor session.streamAsync(prompt, onEvent, abort, callbacks)
+
+proc events*(session: Session, prompt: string,
+             abort: AbortCheck = nil,
+             callbacks = RunCallbacks()): AgentEventStream =
+  let turnId = session.beginTurn(prompt)
+  let stream = eventStream(proc (callback: AgentEventCallback): Future[ProviderResponse]
+                           {.closure.} =
+    session.agent.streamAsync("", callback,
+      messages = session.requestMessages(prompt), abort = abort,
+      callbacks = callbacks, sessionId = session.id, turnId = turnId))
+  ## Persist the transcript independently of the consumer's event-draining
+  ## loop, while keeping the stream's result Future authoritative.
+  proc commitWhenDone() {.async.} =
+    try:
+      let response = await stream.result
+      session.commit(turnId, prompt, response)
+    except CatchableError as e:
+      session.recordTurnFailure(turnId, e)
+  asyncCheck commitWhenDone()
+  stream
 
 proc usageJson(usage: Usage): JsonNode =
   %*{

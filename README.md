@@ -435,6 +435,44 @@ The agent defaults to a bounded eight-model-turn tool loop. niminal keeps its
 own loop because its coding-agent behavior also owns workspace tools, hooks,
 permissions, compaction, persistence, and TUI presentation.
 
+## Normalized agent events
+
+Applications that need the complete model → tool → model lifecycle can use the
+typed `AgentEvent` callback overloads. Events include run and step boundaries,
+text and thinking deltas, complete tool calls, tool results, approval requests,
+terminal responses, and errors:
+
+```nim
+let response = await researcher.streamAsync("What should I deploy?",
+  proc (event: AgentEvent): bool =
+    case event.kind
+    of aeTextDelta:
+      stdout.write event.text
+    of aeToolApprovalRequired:
+      echo "Approve ", event.approval.toolName, "?"
+      event.approval.approve()
+    else:
+      discard
+    true)
+```
+
+The pull-based form is available through `events`, backed by Nim's
+`FutureStream`:
+
+```nim
+let events = researcher.events("Hello")
+while true:
+  let (available, event) = await events.read()
+  if not available: break
+  handle(event)
+let response = await events.result
+```
+
+Approval is opt-in. An `approvalPolicy` returns `tamAllow`, `tamAsk`, or
+`tamDeny`; `tamAsk` pauses execution until the event consumer calls
+`approve()` or `deny()`. A denial is sent back to the model as a structured
+`approval_denied` tool result.
+
 ## Agent sessions
 
 Use `nimgent/session` when an agent needs to remember previous turns:

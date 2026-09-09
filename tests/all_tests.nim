@@ -2025,6 +2025,92 @@ suite "first-class Agent API":
     check deltas == @["ok"]
     check response.text == "ok"
 
+  test "emits normalized lifecycle events":
+    let agent = newAgent(ScriptProvider().model("m"), maxRetries = 0)
+    var kinds: seq[AgentEventKind]
+    var textDeltas: seq[string]
+    let response = waitFor agent.streamAsync("hi", proc (ev: AgentEvent): bool =
+      kinds.add ev.kind
+      if ev.kind == aeTextDelta: textDeltas.add ev.text
+      true)
+    check response.text == "ok"
+    check textDeltas == @["ok"]
+    check kinds == @[aeRunStart, aeStepStart, aeTextDelta, aeStepFinish,
+      aeRunFinish]
+
+  test "approval pauses a tool until the event consumer approves":
+    let p = ScriptProvider(toolFirst: true)
+    type EchoInput = object
+      x: int
+    let echoTool = tool[EchoInput, string]("echo", "echo",
+      proc (_: ToolContext, _: EchoInput): string = "pong")
+    let agent = newAgent(p.model("m"), tools = @[echoTool], maxSteps = 2,
+      maxRetries = 0, approvalPolicy = proc (_: int, _: ContentBlock,
+          _: Tool): ToolApproval = ToolApproval(mode: tamAsk, reason: "confirm"))
+    var kinds: seq[AgentEventKind]
+    let response = waitFor agent.streamAsync("hi", proc (ev: AgentEvent): bool =
+      kinds.add ev.kind
+      if ev.kind == aeToolApprovalRequired:
+        ev.approval.approve()
+      true)
+    check response.text == "ok"
+    check aeToolApprovalRequired in kinds
+    check aeToolResult in kinds
+    check kinds[^1] == aeRunFinish
+
+  test "approval denial becomes a structured tool failure":
+    let p = ScriptProvider(toolFirst: true)
+    type EchoInput = object
+      x: int
+    let echoTool = tool[EchoInput, string]("echo", "echo",
+      proc (_: ToolContext, _: EchoInput): string = "should not run")
+    let agent = newAgent(p.model("m"), tools = @[echoTool], maxSteps = 2,
+      maxRetries = 0, approvalPolicy = proc (_: int, _: ContentBlock,
+          _: Tool): ToolApproval = ToolApproval(mode: tamAsk, reason: "no"))
+    var denied = false
+    let response = waitFor agent.streamAsync("hi", proc (ev: AgentEvent): bool =
+      if ev.kind == aeToolApprovalRequired:
+        ev.approval.deny()
+      if ev.kind == aeToolResult and ev.toolResult.isError:
+        denied = ev.toolResult.errorCode == "approval_denied"
+      true)
+    check response.text == "ok"
+    check denied
+
+  test "low-level model event callbacks use the normalized type":
+    let p = ScriptProvider()
+    var seenStart = false
+    var seenFinish = false
+    let response = waitFor streamTextAsync(p.model("m"),
+      proc (ev: AgentEvent): bool =
+        if ev.kind == aeRunStart: seenStart = true
+        if ev.kind == aeRunFinish: seenFinish = true
+        true, prompt = "hi", maxRetries = 0)
+    check response.text == "ok"
+    check seenStart
+    check seenFinish
+
+  test "pull event streams complete with the run response":
+    let agent = newAgent(ScriptProvider().model("m"), maxRetries = 0)
+    let stream = agent.events("hi")
+    var kinds: seq[AgentEventKind]
+    while true:
+      let item = waitFor stream.read()
+      if not item[0]: break
+      kinds.add item[1].kind
+    let response = waitFor stream.result
+    check response.text == "ok"
+    check kinds[^1] == aeRunFinish
+
+  test "terminal failures are represented by aeError":
+    let agent = newAgent(BoomProvider().model("m"), maxRetries = 0)
+    var errorSeen = false
+    expect ProviderError:
+      discard waitFor agent.streamAsync("hi", proc (ev: AgentEvent): bool =
+        if ev.kind == aeError: errorSeen = true
+        true)
+    check errorSeen
+
   test "rejects invalid agent configuration":
     let p = ScriptProvider()
     expect ProviderError:
@@ -2138,6 +2224,19 @@ suite "agent sessions":
     check deltas == @["ok"]
     check conversation.events.len == 4
     check conversation.events[2].message.content[0].text == "ok"
+
+  test "session forwards normalized events and commits after completion":
+    let conversation = newSession(newAgent(ScriptProvider().model("m"),
+      maxRetries = 0), id = "event-session")
+    var kinds: seq[AgentEventKind]
+    let response = waitFor conversation.streamAsync("hello",
+      proc (ev: AgentEvent): bool =
+        kinds.add ev.kind
+        true)
+    check response.text == "ok"
+    check kinds[0] == aeRunStart
+    check kinds[^1] == aeRunFinish
+    check conversation.events[^1].kind == sekTurnFinished
 
   test "reset clears state but keeps the agent":
     let conversation = newSession(newAgent(ScriptProvider().model("m"),
