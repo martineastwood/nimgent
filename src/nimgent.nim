@@ -235,6 +235,17 @@ proc invalidToolResult(call: ContentBlock): ToolResult =
   toolFailure("unknown_tool", "Unknown tool: " & call.name,
     %*{"tool": call.name})
 
+proc toolInputFailure(call: ContentBlock, tool: Tool): ToolResult =
+  let input = if call.input.isNil: newJNull() else: call.input
+  let issues = validateSchema(input, tool.inputSchema)
+  if issues.len == 0:
+    return ToolResult()
+  var details = %*{"tool": call.name}
+  details["issues"] = newJArray()
+  for issue in issues:
+    details["issues"].add %issue
+  toolFailure("invalid_arguments", issues.join("; "), details)
+
 proc contextAbort(abort: AbortCheck): AbortCheck =
   if not abort.isNil:
     return abort
@@ -247,7 +258,13 @@ proc tool*[Input, Output](name, description: string,
   ## Typed tool with access to per-call identity, cancellation and metadata.
   rawTool(name, description, jsonSchema(Input),
     proc (context: ToolContext, input: JsonNode): ToolResult =
-      normalizeToolResult(execute(context, input.to(Input))), parallel)
+      var typedInput: Input
+      try:
+        typedInput = input.to(Input)
+      except CatchableError as e:
+        return toolFailure("invalid_arguments", e.msg,
+          %*{"tool": name})
+      normalizeToolResult(execute(context, typedInput)), parallel)
 
 proc tool*[Input, Output](name, description: string,
                           execute: proc (context: ToolContext,
@@ -256,7 +273,13 @@ proc tool*[Input, Output](name, description: string,
   ## Typed async tool with access to per-call identity, cancellation and metadata.
   rawAsyncTool(name, description, jsonSchema(Input),
     proc (context: ToolContext, input: JsonNode): Future[ToolResult] {.async.} =
-      return normalizeToolResult(await execute(context, input.to(Input))), parallel)
+      var typedInput: Input
+      try:
+        typedInput = input.to(Input)
+      except CatchableError as e:
+        return toolFailure("invalid_arguments", e.msg,
+          %*{"tool": name})
+      return normalizeToolResult(await execute(context, typedInput)), parallel)
 
 proc findTool(tools: openArray[Tool], name: string): int =
   for i, t in tools:
@@ -270,6 +293,9 @@ proc execOne(tools: openArray[Tool], call: ContentBlock,
   let i = findTool(tools, call.name)
   if i < 0 or tools[i].execute.isNil:
     return toolResultBlock(call, invalidToolResult(call))
+  let inputFailure = toolInputFailure(call, tools[i])
+  if inputFailure.isError:
+    return toolResultBlock(call, inputFailure)
   try:
     toolResultBlock(call, tools[i].execute(context, call.input))
   except CatchableError as e:
@@ -282,6 +308,9 @@ proc execOneAsync(tools: seq[Tool], call: ContentBlock,
   let i = findTool(tools, call.name)
   if i < 0 or (tools[i].execute.isNil and tools[i].executeAsync.isNil):
     return toolResultBlock(call, invalidToolResult(call))
+  let inputFailure = toolInputFailure(call, tools[i])
+  if inputFailure.isError:
+    return toolResultBlock(call, inputFailure)
   try:
     if not tools[i].executeAsync.isNil:
       let output = await tools[i].executeAsync(context, call.input)
@@ -345,6 +374,10 @@ when compileOption("threads"):
       let t = findTool(tools, call.name)
       if t < 0 or tools[t].execute.isNil:
         result[i] = toolResultBlock(call, invalidToolResult(call))
+        continue
+      let inputFailure = toolInputFailure(call, tools[t])
+      if inputFailure.isError:
+        result[i] = toolResultBlock(call, inputFailure)
         continue
       jobs[i].execute = tools[t].execute
       jobs[i].context = ToolContext(callId: call.id, sessionId: request.sessionId,

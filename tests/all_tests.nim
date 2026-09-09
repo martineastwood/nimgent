@@ -526,6 +526,9 @@ suite "generateText retries, abort, and tools":
     check typed.inputSchema["properties"]["x"]["type"].getStr == "integer"
     check typed.execute(ToolContext(), %*{"x": 3}).value[
       "doubled"].getInt == 6
+    let invalid = typed.execute(ToolContext(), %*{"x": "three"})
+    check invalid.isError
+    check invalid.error.code == "invalid_arguments"
     let asyncTyped = tool("double_async", "Double asynchronously",
       proc (_: ToolContext, input: EchoInput): Future[EchoOutput] {.async.} =
         await sleepAsync(1)
@@ -599,6 +602,25 @@ suite "generateText retries, abort, and tools":
     check r.text == "recovered"
     check r.steps[0].toolResults[0].errorCode == "invalid_arguments"
     check r.steps[0].toolResults[0].errorDetails["tool"].getStr == "echo"
+
+  test "tool input is schema-validated before execution":
+    var ran = 0
+    let echoTool = rawTool("echo", "echo", %*{
+      "type": "object",
+      "properties": {"x": {"type": "string"}},
+      "required": ["x"]
+    }, proc (_: ToolContext, _: JsonNode): ToolResult =
+      inc ran
+      ToolResult(output: "should not run"))
+    let p = ScriptProvider(toolFirst: true)
+    let response = generateText(p.model("m"), prompt = "hi",
+      tools = @[echoTool], maxSteps = 2, maxRetries = 0)
+    let result = response.steps[0].toolResults[0]
+    check ran == 0
+    check result.errorCode == "invalid_arguments"
+    check result.errorDetails["tool"].getStr == "echo"
+    check result.errorDetails["issues"].kind == JArray
+    check result.errorDetails["issues"].len > 0
 
   test "unknown and thrown tool failures are structured":
     let unknownProvider = ScriptProvider(toolFirst: true)
