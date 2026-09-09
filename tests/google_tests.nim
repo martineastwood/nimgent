@@ -1,6 +1,6 @@
 import std/[json, osproc, streams, strutils, unittest]
 import nimgent
-import nimgent/google
+import nimgent/providers/google
 
 proc fixture(mode: string, body: proc (p: GoogleProvider)) =
   let child = startProcess("python3", args = @["tests/google_fixture.py", mode],

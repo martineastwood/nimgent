@@ -4,7 +4,7 @@
 
 import std/[json, os]
 import nimgent
-import nimgent/openai
+import nimgent/providers/openai
 
 type WeatherInput = object
   city: string
@@ -12,7 +12,7 @@ type WeatherInput = object
 let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
 
 let weather = tool("get_weather", "Get the current weather for a city",
-  proc (input: WeatherInput): string = input.city & ": 16C and cloudy")
+  proc (_: ToolContext, input: WeatherInput): string = input.city & ": 16C and cloudy")
 
 echo "calling the model..."
 let response = generateText(

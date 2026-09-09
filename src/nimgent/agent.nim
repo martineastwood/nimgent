@@ -1,10 +1,10 @@
-## Reusable agent configuration and execution facade.
+## Reusable agent configuration and execution API.
 ##
 ## This layer owns the generic model -> tool -> model run. Applications that
 ## need persistence, compaction, permissions, or presentation can keep those
 ## concerns outside the agent and use the lower-level nimgent APIs directly.
 
-import std/asyncdispatch
+import std/[asyncdispatch, json]
 import nimgent
 
 type
@@ -40,7 +40,8 @@ proc newAgent*(model: LanguageModel, instructions = "",
 
 proc runAsync*(agent: Agent, prompt = "", messages: seq[Message] = @[],
                abort: AbortCheck = nil,
-               callbacks = RunCallbacks(), sessionId = ""): Future[ProviderResponse] {.async.} =
+               callbacks = RunCallbacks(), sessionId = "",
+               metadata: JsonNode = nil, turnId = ""): Future[ProviderResponse] {.async.} =
   ## Run until the model finishes, no executable tool calls remain, or
   ## `maxSteps` is reached.
   if agent.isNil:
@@ -49,17 +50,21 @@ proc runAsync*(agent: Agent, prompt = "", messages: seq[Message] = @[],
     messages = messages, system = agent.instructions, tools = agent.tools,
     maxTokens = agent.maxTokens, maxRetries = agent.maxRetries,
     maxSteps = agent.maxSteps, abort = abort, callbacks = callbacks,
-    providerOptions = agent.providerOptions, sessionId = sessionId)
+    providerOptions = agent.providerOptions, sessionId = sessionId,
+    metadata = metadata, turnId = turnId)
 
 proc run*(agent: Agent, prompt = "", messages: seq[Message] = @[],
           abort: AbortCheck = nil,
-          callbacks = RunCallbacks(), sessionId = ""): ProviderResponse =
+          callbacks = RunCallbacks(), sessionId = "",
+          metadata: JsonNode = nil, turnId = ""): ProviderResponse =
   ## Blocking convenience wrapper around `runAsync`.
-  waitFor agent.runAsync(prompt, messages, abort, callbacks, sessionId)
+  waitFor agent.runAsync(prompt, messages, abort, callbacks, sessionId,
+    metadata, turnId)
 
 proc streamAsync*(agent: Agent, prompt: string, onEvent: StreamCallback,
                   messages: seq[Message] = @[], abort: AbortCheck = nil,
-                  callbacks = RunCallbacks(), sessionId = ""): Future[ProviderResponse] {.async.} =
+                  callbacks = RunCallbacks(), sessionId = "",
+                  metadata: JsonNode = nil, turnId = ""): Future[ProviderResponse] {.async.} =
   ## Stream an agent run. `onEvent` receives normalized model deltas and may
   ## return false to cancel the run.
   if agent.isNil:
@@ -70,10 +75,13 @@ proc streamAsync*(agent: Agent, prompt: string, onEvent: StreamCallback,
     messages = messages, system = agent.instructions, tools = agent.tools,
     maxTokens = agent.maxTokens, maxRetries = agent.maxRetries,
     maxSteps = agent.maxSteps, abort = abort, callbacks = callbacks,
-    providerOptions = agent.providerOptions, sessionId = sessionId)
+    providerOptions = agent.providerOptions, sessionId = sessionId,
+    metadata = metadata, turnId = turnId)
 
 proc stream*(agent: Agent, prompt: string, onEvent: StreamCallback,
              messages: seq[Message] = @[], abort: AbortCheck = nil,
-             callbacks = RunCallbacks(), sessionId = ""): ProviderResponse =
+             callbacks = RunCallbacks(), sessionId = "",
+             metadata: JsonNode = nil, turnId = ""): ProviderResponse =
   ## Blocking convenience wrapper around `streamAsync`.
-  waitFor agent.streamAsync(prompt, onEvent, messages, abort, callbacks, sessionId)
+  waitFor agent.streamAsync(prompt, onEvent, messages, abort, callbacks,
+    sessionId, metadata, turnId)

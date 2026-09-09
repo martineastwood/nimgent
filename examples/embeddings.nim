@@ -4,7 +4,7 @@
 
 import std/[os, strformat]
 import nimgent
-import nimgent/openai
+import nimgent/providers/openai
 
 let model: EmbeddingModel = openAI(getEnv("OPENAI_API_KEY")).embeddingModel(
   "text-embedding-3-small")

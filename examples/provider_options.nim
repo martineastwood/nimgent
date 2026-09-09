@@ -1,7 +1,7 @@
 ## Typed settings are selected by the model's provider; other namespaces are ignored.
 import std/[options, os]
 import nimgent
-import nimgent/openai
+import nimgent/providers/openai
 
 let settings = ProviderOptions(
   openai: OpenAIOptions(reasoningEffort: some("high"), store: some(false)),

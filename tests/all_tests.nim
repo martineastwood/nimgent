@@ -1,10 +1,11 @@
 import std/[asyncdispatch, atomics, json, options, os, osproc, sets, streams,
   sequtils, strutils, tables, times, unittest]
 import nimgent
-import nimgent/[agent, session, anthropic, openrouter, google]
+import nimgent/[agent, session]
+import nimgent/providers/[anthropic, openrouter]
 import nimgent/testing
-import nimgent/stream
-from nimgent/openai import openAI, hyper,
+import nimgent/providers/stream
+from nimgent/providers/openai import openAI, hyper,
   buildResponsesBody, buildChatBody, parseResponsesOutput,
   defaultOpenAiEndpoint, defaultOpenAiChatEndpoint, defaultHyperEndpoint,
   chatObjectOptions, chatForceToolOptions
@@ -47,7 +48,7 @@ suite "Anthropic streaming":
       check response.finishReason == frStop
       check response.content.len == 0)
 
-  test "facade surfaces cancellation as CancelledError":
+  test "streaming surfaces cancellation as CancelledError":
     withFixture("anthropic_stream_fixture.py", proc (port: int) =
       expect CancelledError:
         discard streamText(anthropic("fixture-key", "http://127.0.0.1:" & $port),
@@ -286,7 +287,7 @@ suite "OpenRouter provider":
       check second.usage.cacheReadTokens == 1000
       check second.usage.cacheReported
 
-  test "generateText and streamText facade":
+  test "generateText and streamText API":
     withFixture("openrouter_stream_fixture.py") do (port: int):
       let provider = openRouter("fixture-key",
         "http://127.0.0.1:" & $port, timeoutSeconds = 5)
@@ -385,7 +386,7 @@ suite "generateText retries, abort, and tools":
   test "lifecycle callbacks observe tools and completed steps":
     let p = ScriptProvider(toolFirst: true)
     let echoTool = rawTool("echo", "echo", %*{"type": "object"},
-      proc (input: JsonNode): ToolOutput = ToolOutput(output: "pong"))
+      proc (_: ToolContext, _: JsonNode): ToolResult = ToolResult(output: "pong"))
     var events: seq[string]
     let onToolStart = proc (step: int, call: ContentBlock) =
       events.add "tool-start:" & $step & ":" & call.name
@@ -448,10 +449,10 @@ suite "generateText retries, abort, and tools":
     let p = ScriptProvider(toolFirst: true)
     var ran = 0
     let echoTool = rawTool("echo", "echo", %*{"type": "object"},
-      proc (input: JsonNode): ToolOutput =
+      proc (_: ToolContext, input: JsonNode): ToolResult =
         inc ran
         check input["x"].getInt == 1
-        ToolOutput(output: "pong"))
+        ToolResult(output: "pong"))
     let r = generateText(p.model("m"), prompt = "hi",
       tools = @[echoTool], maxSteps = 2, maxRetries = 0)
     check ran == 1
@@ -487,9 +488,9 @@ suite "generateText retries, abort, and tools":
     let p = ScriptProvider(toolFirst: true)
     var ran = 0
     let echoTool = rawTool("echo", "echo", %*{"type": "object"},
-      proc (input: JsonNode): ToolOutput =
+      proc (_: ToolContext, _: JsonNode): ToolResult =
         inc ran
-        ToolOutput(output: "pong"))
+        ToolResult(output: "pong"))
     let r = generateText(p.model("m"), prompt = "hi",
       tools = @[echoTool], maxSteps = 1, maxRetries = 0)
     check ran == 0
@@ -520,19 +521,57 @@ suite "generateText retries, abort, and tools":
     let p = ScriptProvider()
     let bound = p.model("m")
     let typed = tool("double", "Double a number",
-      proc (input: EchoInput): EchoOutput = EchoOutput(doubled: input.x * 2))
+      proc (_: ToolContext, input: EchoInput): EchoOutput =
+        EchoOutput(doubled: input.x * 2))
     check typed.inputSchema["properties"]["x"]["type"].getStr == "integer"
-    check parseJson(typed.execute(%*{"x": 3}).output)["doubled"].getInt == 6
+    check typed.execute(ToolContext(), %*{"x": 3}).value[
+      "doubled"].getInt == 6
     let asyncTyped = tool("double_async", "Double asynchronously",
-      proc (input: EchoInput): Future[EchoOutput] {.async.} =
+      proc (_: ToolContext, input: EchoInput): Future[EchoOutput] {.async.} =
         await sleepAsync(1)
         return EchoOutput(doubled: input.x * 2))
-    check (waitFor asyncTyped.executeAsync(%*{"x": 4})).output.parseJson[
+    check (waitFor asyncTyped.executeAsync(ToolContext(), %*{"x": 4})).value[
       "doubled"].getInt == 8
     let response = waitFor generateTextAsync(bound, prompt = "hi",
       system = "Be concise")
     check response.text == "ok"
     check p.last.system == @["Be concise"]
+
+  test "context tools retain structured values and invocation context":
+    let p = ScriptProvider(toolFirst: true)
+    var seen: ToolContext
+    let contextual = tool("echo", "echo", proc (context: ToolContext,
+        input: EchoInput): EchoOutput =
+      seen = context
+      EchoOutput(doubled: input.x * 2))
+    let metadata = %*{"trace": "abc"}
+    let response = generateText(p.model("m"), prompt = "hi",
+      tools = @[contextual], maxSteps = 2, maxRetries = 0,
+      sessionId = "session-1", turnId = "turn-1", metadata = metadata)
+    check seen.callId == "call_1"
+    check seen.sessionId == "session-1"
+    check seen.turnId == "turn-1"
+    check not seen.abort.isNil
+    check seen.metadata["trace"].getStr == "abc"
+    check response.steps[0].toolResults[0].value["doubled"].getInt == 2
+    check response.steps[0].toolResults[0].output == "{\"doubled\":2}"
+    check p.last.metadata["trace"].getStr == "abc"
+    check p.last.turnId == "turn-1"
+
+  test "structured tool failures survive the model-facing result":
+    let p = ScriptProvider(toolFirst: true)
+    let failed = rawTool("echo", "echo", %*{"type": "object"},
+      proc (_: ToolContext, _: JsonNode): ToolResult =
+        toolFailure("not_found", "record missing", %*{"id": 7}, true))
+    let response = generateText(p.model("m"), prompt = "hi",
+      tools = @[failed], maxSteps = 2, maxRetries = 0)
+    let result = response.steps[0].toolResults[0]
+    check result.isError
+    check result.errorCode == "not_found"
+    check result.errorMessage == "record missing"
+    check result.errorDetails["id"].getInt == 7
+    check result.errorRetryable
+    check result.output == "record missing"
 
   test "scripted model records deterministic requests":
     let fake = scriptedModel(@[textResponse("hello")])
@@ -547,9 +586,9 @@ suite "generateText retries, abort, and tools":
     check not rawTool("echo", "echo", %*{"type": "object"}).parallel
     var ran = 0
     let echoTool = rawTool("echo", "echo", %*{"type": "object"},
-      proc (input: JsonNode): ToolOutput =
+      proc (_: ToolContext, _: JsonNode): ToolResult =
         inc ran
-        ToolOutput(output: "should not run"),
+        ToolResult(output: "should not run"),
       parallel = true)
     check echoTool.parallel
     let p = BadArgsProvider()
@@ -562,7 +601,7 @@ suite "generateText retries, abort, and tools":
   test "parallel execute overlaps":
     let p = ScriptProvider(toolFirst: true, twoTools: true)
     var firstStarted, secondStarted, overlap: Atomic[bool]
-    proc slow(input: JsonNode): ToolOutput {.gcsafe.} =
+    proc slow(_: ToolContext, input: JsonNode): ToolResult {.gcsafe.} =
       if input["x"].getInt == 1:
         firstStarted.store(true)
         if secondStarted.load: overlap.store(true)
@@ -570,7 +609,7 @@ suite "generateText retries, abort, and tools":
         secondStarted.store(true)
         if firstStarted.load: overlap.store(true)
       sleep(120)
-      ToolOutput(output: "pong")
+      ToolResult(output: "pong")
     let echoTool = rawTool("echo", "echo", %*{"type": "object"}, slow, parallel = true)
     let r = generateText(p.model("m"), prompt = "hi",
       tools = @[echoTool], maxSteps = 2, maxRetries = 0)
@@ -970,9 +1009,9 @@ suite "files, sources, hosted tools":
   test "generateText does not execute hosted tool calls":
     var ran = false
     let local = rawTool("web_search", "should not run", %*{"type": "object"},
-      proc (input: JsonNode): ToolOutput =
+      proc (_: ToolContext, _: JsonNode): ToolResult =
         ran = true
-        ToolOutput(output: "nope"))
+        ToolResult(output: "nope"))
     let p = HostedScript()
     let r = generateText(p.model("m"), prompt = "hi",
       tools = @[local, hostedTool("server_search")], maxSteps = 5)
@@ -1248,7 +1287,6 @@ suite "json schema":
     except ObjectError as e:
       err = e
     check not err.isNil
-    check "minLength" in err.issues.join(" ")
     check err.issueDetails.len > 0
     check err.issueDetails[0].path == "$.properties.name.minLength"
     check p.calls == 0
@@ -1558,7 +1596,7 @@ suite "generateObject":
       err = e
     check not err.isNil
     check p.calls == 2
-    check err.issues.len > 0
+    check err.issueDetails.len > 0
 
   test "omNative fails when the provider has no native format":
     let p = ObjectScript()
@@ -1815,15 +1853,15 @@ suite "typed provider options":
     check resolveOptions(nil, scoped, "hyper") == newJObject()
 
   test "shallow precedence and caller JSON ownership":
-    let legacy = %*{"store": true, "metadata": {"old": "value"}}
+    let requestOptions = %*{"store": true, "metadata": {"old": "value"}}
     let extra = %*{"store": true, "metadata": {"new": "value"}}
     let scoped = ProviderOptions(openai: OpenAIOptions(store: some(false), extra: extra),
       extra: %*{"openai": {"user": "test"}, "hyper": {"temperature": 0}})
-    let resolved = resolveOptions(legacy, scoped, "openai")
+    let resolved = resolveOptions(requestOptions, scoped, "openai")
     check resolved == %*{"store": false, "metadata": {"new": "value"}, "user": "test"}
     resolved["metadata"]["new"] = %"changed"
     check extra["metadata"]["new"].getStr == "value"
-    check legacy["store"].getBool
+    check requestOptions["store"].getBool
     check resolveOptions(nil, scoped, "hyper") == %*{"temperature": 0}
     expect ProviderError:
       discard resolveOptions(nil, ProviderOptions(openai: OpenAIOptions(extra: %*[1])), "openai")
@@ -1871,7 +1909,7 @@ suite "typed provider options":
     check p.requests.len == 6
     for request in p.requests: check request.options == %*{"store": false}
 
-  test "embedding facade forwards typed options":
+  test "embedding API forwards typed options":
     withFixture("openai_embeddings_fixture.py", proc (port: int) =
       let model = openAI("test", endpoint = "http://127.0.0.1:" & $port & "/v1/responses").embeddingModel("text-embedding-3-small")
       let response = embedMany(model, @["alpha", "beta"],
@@ -1880,14 +1918,14 @@ suite "typed provider options":
       check embed(model, "single", providerOptions = ProviderOptions()).embedding == @[0.5, 0.5])
 
   test "typed effort overrides native Responses effort without mutation":
-    let legacy = %*{"reasoning": {"effort": "low", "summary": "auto"}}
-    let opts = resolveOptions(legacy, ProviderOptions(openai: OpenAIOptions(
+    let requestOptions = %*{"reasoning": {"effort": "low", "summary": "auto"}}
+    let opts = resolveOptions(requestOptions, ProviderOptions(openai: OpenAIOptions(
       reasoningEffort: some("high"))), "openai")
     let body = buildResponsesBody(ProviderRequest(model: "test", options: opts), false)
     check body["reasoning"] == %*{"effort": "high", "summary": "auto"}
-    check legacy["reasoning"]["effort"].getStr == "low"
+    check requestOptions["reasoning"]["effort"].getStr == "low"
 
-  test "structured output wins over provider extras across object facades":
+  test "structured output wins over provider extras across object modes":
     type Answer = object
       ok: bool
     let p = ChatObjectScript(name: "openai", replies: @["{\"ok\":true}"])
@@ -1918,7 +1956,7 @@ suite "first-class Agent API":
     type EchoInput = object
       x: int
     let echoTool = tool[EchoInput, string]("echo", "echo",
-      proc (input: EchoInput): string = "pong")
+      proc (_: ToolContext, _: EchoInput): string = "pong")
     let agent = newAgent(p.model("m"),
       instructions = "Be concise.", tools = @[echoTool], maxSteps = 2,
       maxRetries = 0)
@@ -1961,7 +1999,7 @@ suite "agent sessions":
     type EchoInput = object
       x: int
     let echoTool = tool[EchoInput, string]("echo", "echo",
-      proc (input: EchoInput): string = "pong")
+      proc (_: ToolContext, _: EchoInput): string = "pong")
     let conversation = newSession(newAgent(p.model("m"), tools = @[echoTool],
       maxSteps = 2, maxRetries = 0), id = "round-trip")
     discard conversation.run("hello")
@@ -1993,21 +2031,20 @@ suite "agent sessions":
       @[userMessage(blocks)], id = "metadata")
     let restored = sessionFromJson(newAgent(ScriptProvider().model("m")),
       conversation.sessionJson)
-    check restored.messages[0].content.len == blocks.len
-    check restored.messages[0].content[1].googlePart["thought"].getBool
-    check restored.messages[0].content[2].thoughtSignature == "tool-signature"
-    check restored.messages[0].content[3].images[0].path == "tile.png"
-    check restored.messages[0].content[3].googlePart["function_response"].getBool
-    check restored.messages[0].content[4].data == "REVG"
-    check restored.messages[0].content[5].file.data == "R0hJ"
-    check restored.messages[0].content[6].source.raw["raw"].getStr == "citation"
+    check restored.events[0].message.content.len == blocks.len
+    check restored.events[0].message.content[1].googlePart["thought"].getBool
+    check restored.events[0].message.content[2].thoughtSignature == "tool-signature"
+    check restored.events[0].message.content[3].images[0].path == "tile.png"
+    check restored.events[0].message.content[3].googlePart["function_response"].getBool
+    check restored.events[0].message.content[4].data == "REVG"
+    check restored.events[0].message.content[5].file.data == "R0hJ"
+    check restored.events[0].message.content[6].source.raw["raw"].getStr == "citation"
 
   test "persists failed turns without adding incomplete messages":
     let conversation = newSession(newAgent(BoomProvider().model("m"),
       maxRetries = 0), id = "failed")
     expect ProviderError:
       discard conversation.run("hello")
-    check conversation.messages.len == 0
     check conversation.events.len == 2
     check conversation.events[0].kind == sekTurnStarted
     check conversation.events[1].kind == sekTurnFailed
@@ -2015,30 +2052,29 @@ suite "agent sessions":
     let restored = sessionFromJson(newAgent(BoomProvider().model("m"),
       maxRetries = 0), conversation.sessionJsonString)
     check restored.sessionJson == conversation.sessionJson
-    check restored.messages.len == 0
 
   test "retains transcript and accumulates usage across turns":
     let p = ScriptProvider(toolFirst: true)
     type EchoInput = object
       x: int
     let echoTool = tool[EchoInput, string]("echo", "echo",
-      proc (input: EchoInput): string = "pong")
+      proc (_: ToolContext, _: EchoInput): string = "pong")
     let conversation = newSession(newAgent(p.model("m"),
       instructions = "Be concise.", tools = @[echoTool], maxSteps = 2,
       maxRetries = 0))
     let first = conversation.run("first")
     check first.text == "ok"
     check conversation.turns == 1
-    check conversation.messages.len == 4
-    check conversation.messages[0].role == roleUser
-    check conversation.messages[1].role == roleAssistant
-    check conversation.messages[1].content[0].kind == ckToolUse
-    check conversation.messages[2].content[0].kind == ckToolResult
-    check conversation.messages[3].content[0].text == "ok"
+    check conversation.events.len == 6
+    check conversation.events[1].message.role == roleUser
+    check conversation.events[2].message.role == roleAssistant
+    check conversation.events[2].message.content[0].kind == ckToolUse
+    check conversation.events[3].toolResults[0].kind == ckToolResult
+    check conversation.events[4].message.content[0].text == "ok"
     let second = conversation.run("second")
     check second.text == "ok"
     check conversation.turns == 2
-    check conversation.messages.len == 6
+    check conversation.events.len == 10
     check conversation.totalUsage.inputTokens == 6
     check conversation.totalUsage.outputTokens == 12
     check conversation.lastResponse.text == "ok"
@@ -2052,14 +2088,13 @@ suite "agent sessions":
       true)
     check response.text == "ok"
     check deltas == @["ok"]
-    check conversation.messages.len == 2
-    check conversation.messages[1].content[0].text == "ok"
+    check conversation.events.len == 4
+    check conversation.events[2].message.content[0].text == "ok"
 
   test "reset clears state but keeps the agent":
     let conversation = newSession(newAgent(ScriptProvider().model("m"),
       maxRetries = 0))
     discard conversation.run("hello")
     conversation.reset()
-    check conversation.messages.len == 0
     check conversation.turns == 0
     check conversation.totalUsage == Usage()

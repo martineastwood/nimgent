@@ -13,7 +13,7 @@ type ProviderOptions* = object
 
 proc resolveOptions*(options: JsonNode, scoped: ProviderOptions,
                      providerName: string): JsonNode =
-  ## Shallow merge: legacy options < namespace extra < typed namespace.
+  ## Shallow merge: request options < namespace extra < typed namespace.
   ## Copy to keep serialization and adapter changes from mutating caller JSON.
   result = newJObject()
   mergeRequestOptions(result, options)
@@ -29,7 +29,7 @@ proc resolveOptions*(options: JsonNode, scoped: ProviderOptions,
   else: discard
   result = result.copy
   # Responses also accepts the native `reasoning` object. Keep an explicit
-  # typed effort authoritative when legacy/extra options already contain it.
+  # typed effort authoritative when request/extra options already contain it.
   if providerName == "openai" and scoped.openai.reasoningEffort.isSome and
       result.hasKey("reasoning") and result["reasoning"].kind == JObject:
     result["reasoning"]["effort"] = %scoped.openai.reasoningEffort.get

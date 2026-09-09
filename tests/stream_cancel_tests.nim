@@ -1,5 +1,5 @@
 import std/[asyncdispatch, posix, unittest]
-import nimgent/[provider, stream]
+import nimgent/providers/[provider, stream]
 
 suite "silent stream cancellation":
   test "cancellation is checked without network or keyboard activity":

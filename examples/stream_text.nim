@@ -4,7 +4,7 @@
 
 import std/os
 import nimgent
-import nimgent/openai
+import nimgent/providers/openai
 
 let model: LanguageModel = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
 

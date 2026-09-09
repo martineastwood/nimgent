@@ -1,4 +1,4 @@
-## JSON Schema facade. The implementation is split into parsing, runtime
+## JSON Schema entry point. The implementation is split into parsing, runtime
 ## validation, and compile-time Nim type derivation modules.
 
 import nimgent/structured_output/jsonschema_parse

@@ -4,7 +4,7 @@
 
 import std/os
 import nimgent
-import nimgent/google
+import nimgent/providers/google
 
 let model = google(getEnv("AI_STUDIO_API_KEY")).model("gemini-3.5-flash-lite")
 let response = generateText(model,

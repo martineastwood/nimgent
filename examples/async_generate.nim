@@ -4,7 +4,7 @@
 
 import std/[asyncdispatch, os]
 import nimgent
-import nimgent/openai
+import nimgent/providers/openai
 
 proc answer(model: LanguageModel, prompt: string): Future[string] {.async.} =
   let response: ProviderResponse = await generateTextAsync(

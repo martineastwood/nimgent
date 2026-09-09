@@ -4,13 +4,14 @@
 
 import std/[asyncdispatch, os]
 import nimgent
-import nimgent/[agent, openai, session]
+import nimgent/[agent, session]
+import nimgent/providers/openai
 
 type WeatherInput = object
   city: string
 
 let weather = tool("get_weather", "Get the current weather for a city",
-  proc (input: WeatherInput): string = input.city & ": 16C and cloudy")
+  proc (_: ToolContext, input: WeatherInput): string = input.city & ": 16C and cloudy")
 
 let researcher = newAgent(
   model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini"),

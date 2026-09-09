@@ -4,14 +4,14 @@
 
 import std/[json, os]
 import nimgent
-import nimgent/openai
+import nimgent/providers/openai
 
 type WeatherInput = object
   city: string
 
 let model: LanguageModel = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
 let weather: Tool = tool("get_weather", "Get the current weather for a city",
-  proc (input: WeatherInput): string = input.city & ": 16C and cloudy")
+  proc (_: ToolContext, input: WeatherInput): string = input.city & ": 16C and cloudy")
 
 proc logRetry(attempt, delayMs: int, error: ref ProviderError) =
   echo "retry ", attempt, " in ", delayMs, "ms: ", error.msg

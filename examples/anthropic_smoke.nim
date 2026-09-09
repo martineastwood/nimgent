@@ -4,7 +4,7 @@
 
 import std/os
 import nimgent
-import nimgent/anthropic
+import nimgent/providers/anthropic
 
 type Answer = object
   answer: string

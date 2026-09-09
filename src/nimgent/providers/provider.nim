@@ -61,6 +61,14 @@ type
       toolUseId*: string
       output*: string
       isError*: bool
+      ## Structured value returned by a local tool. `output` remains the
+      ## provider-facing rendering of this value.
+      value*: JsonNode
+      ## Structured local tool failure, when `isError` is true.
+      errorCode*: string
+      errorMessage*: string
+      errorDetails*: JsonNode
+      errorRetryable*: bool
       images*: seq[ImageContent]
     of ckImage:
       mimeType*: string
@@ -112,6 +120,9 @@ type
   ProviderRequest* = object
     model*: string
     sessionId*: string
+    ## Optional execution identity and metadata for local tool context.
+    turnId*: string
+    metadata*: JsonNode
     system*: seq[string]
     messages*: seq[Message]
     tools*: seq[ToolDefinition]
@@ -160,8 +171,6 @@ type
 
   ObjectError* = object of ProviderError
     ## generateObject could not produce a value that matches the schema.
-    issues*: seq[string]
-    ## Machine-readable view of `issues`; `issues` remains for compatibility.
     issueDetails*: seq[ObjectIssue]
     raw*: string
 
@@ -170,9 +179,28 @@ type
   AbortCheck* = proc (): bool {.closure.}
     ## Return true to cancel. Checked before each attempt and tool call.
 
-  ToolOutput* = object
+  ToolContext* = object
+    ## Per-invocation state supplied to context-aware tool handlers.
+    callId*: string
+    sessionId*: string
+    turnId*: string
+    abort*: AbortCheck
+    metadata*: JsonNode
+
+  ToolError* = object
+    ## Machine-readable failure produced by a local tool.
+    code*: string
+    message*: string
+    details*: JsonNode
+    retryable*: bool
+
+  ToolResult* = object
+    ## Structured result produced by a local tool. `output` is the text sent
+    ## back to the model; `value` is retained for application inspection.
+    value*: JsonNode
     output*: string
     isError*: bool
+    error*: ToolError
     images*: seq[ImageContent]
 
   Tool* = object
@@ -180,8 +208,10 @@ type
     description*: string
     inputSchema*: JsonNode
     ## When set, generateText/streamText can run the tool and continue (maxSteps).
-    execute*: proc (input: JsonNode): ToolOutput {.closure.}
-    executeAsync*: proc (input: JsonNode): Future[ToolOutput] {.closure.}
+    execute*: proc (context: ToolContext,
+                    input: JsonNode): ToolResult {.closure.}
+    executeAsync*: proc (context: ToolContext,
+                         input: JsonNode): Future[ToolResult] {.closure.}
     ## Overlap execute when every runnable tool in the batch sets this and the
     ## program is compiled with `--threads:on`. execute must be safe to run
     ## concurrently (no shared mutation). niminal never sets it.
@@ -421,9 +451,14 @@ proc invalidToolCall*(call: ContentBlock): string =
   if call.kind == ckToolUse: call.parseError else: ""
 
 proc toolResult*(toolUseId, output: string, isError = false,
-                 images: seq[ImageContent] = @[], hosted = ""): ContentBlock =
+                 images: seq[ImageContent] = @[], hosted = "",
+                 value: JsonNode = nil, errorCode = "", errorMessage = "",
+                 errorDetails: JsonNode = nil, errorRetryable = false): ContentBlock =
   ContentBlock(kind: ckToolResult, toolUseId: toolUseId, output: output,
-    isError: isError, images: images, hosted: hosted)
+    isError: isError, value: value, errorCode: errorCode,
+    errorMessage: errorMessage,
+    errorDetails: errorDetails, errorRetryable: errorRetryable,
+    images: images, hosted: hosted)
 
 proc userMessage*(s: string): Message =
   Message(role: roleUser, content: @[text(s)])
@@ -581,7 +616,6 @@ proc raiseCancelledError*(msg = "aborted") {.noreturn.} =
 
 proc raiseObjectError*(msg: string, issues: seq[string], raw = "") =
   let e = newException(ObjectError, msg)
-  e.issues = issues
   for issue in issues:
     let sep = issue.find(": ")
     if sep > 0:
@@ -606,17 +640,19 @@ method forceToolOptions*(p: Provider, toolName: string): JsonNode {.base.} =
   nil
 
 proc rawTool*(name, description: string, inputSchema: JsonNode,
-              execute: proc (input: JsonNode): ToolOutput {.closure.} = nil,
+              execute: proc (context: ToolContext,
+                             input: JsonNode): ToolResult {.closure.} = nil,
               parallel = false, hosted = "", hostedOptions: JsonNode = nil): Tool =
-  ## Untyped escape hatch for adapters and dynamic schemas.
+  ## Escape hatch for runtime-defined schemas.
   Tool(name: name, description: description, inputSchema: inputSchema,
        execute: execute, parallel: parallel, hosted: hosted,
        hostedOptions: hostedOptions)
 
 proc rawAsyncTool*(name, description: string, inputSchema: JsonNode,
-                   execute: proc (input: JsonNode): Future[ToolOutput] {.closure.},
+                   execute: proc (context: ToolContext,
+                                 input: JsonNode): Future[ToolResult] {.closure.},
                    parallel = false): Tool =
-  ## Untyped async escape hatch for dynamic schemas.
+  ## Async escape hatch for runtime-defined schemas.
   Tool(name: name, description: description, inputSchema: inputSchema,
        executeAsync: execute, parallel: parallel)
 

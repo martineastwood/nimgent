@@ -46,16 +46,11 @@ type
     id*: string
     ## Agent configuration used for each turn.
     agent*: Agent
-    ## Canonical append-only transcript. `messages` is retained as a compatible
-    ## projection for callers of the initial in-memory API.
+    ## Canonical append-only transcript.
     events*: seq[SessionEvent]
-    messages*: seq[Message]
     turns*: int
     totalUsage*: Usage
     lastResponse*: ProviderResponse
-
-  ## Conversation is the descriptive alias for Session.
-  Conversation* = Session
 
 proc copyBlock(part: ContentBlock): ContentBlock =
   result = part
@@ -65,6 +60,8 @@ proc copyBlock(part: ContentBlock): ContentBlock =
   of ckToolUse:
     if not part.input.isNil: result.input = copy(part.input)
   of ckToolResult:
+    if not part.value.isNil: result.value = copy(part.value)
+    if not part.errorDetails.isNil: result.errorDetails = copy(part.errorDetails)
     result.images = @[]
     for image in part.images:
       result.images.add image
@@ -131,7 +128,6 @@ proc messagesFromEvents(events: openArray[SessionEvent]): seq[Message] =
       discard
 
 proc rebuildState(session: Session) =
-  session.messages = messagesFromEvents(session.events)
   session.turns = 0
   session.totalUsage = Usage()
   session.lastResponse = ProviderResponse()
@@ -159,10 +155,6 @@ proc newSession*(agent: Agent, messages: seq[Message] = @[], id = ""): Session =
     else:
       result.events.add SessionEvent(kind: sekAssistant, message: copyMessage(message))
   result.rebuildState()
-
-proc newConversation*(agent: Agent, messages: seq[Message] = @[], id = ""): Conversation =
-  ## Descriptive alias for `newSession`.
-  newSession(agent, messages, id)
 
 proc commit(session: Session, turnId, prompt: string, response: ProviderResponse) =
   session.events.add SessionEvent(kind: sekUser, turnId: turnId,
@@ -205,7 +197,7 @@ proc runAsync*(session: Session, prompt: string,
   try:
     let response = await session.agent.runAsync(
       messages = session.requestMessages(prompt), abort = abort,
-      callbacks = callbacks, sessionId = session.id)
+      callbacks = callbacks, sessionId = session.id, turnId = turnId)
     session.commit(turnId, prompt, response)
     return response
   except CatchableError as e:
@@ -298,6 +290,11 @@ proc blockJson(part: ContentBlock): JsonNode =
   of ckToolResult:
     result = %*{"type": "tool_result", "tool_use_id": part.toolUseId,
       "output": part.output, "is_error": part.isError}
+    if not part.value.isNil: result["value"] = copy(part.value)
+    if part.errorCode.len > 0: result["error_code"] = %part.errorCode
+    if part.errorMessage.len > 0: result["error_message"] = %part.errorMessage
+    if not part.errorDetails.isNil: result["error_details"] = copy(part.errorDetails)
+    if part.errorRetryable: result["error_retryable"] = %true
     if part.images.len > 0:
       result["images"] = newJArray()
       for image in part.images:
@@ -345,6 +342,11 @@ proc parseBlock(node: JsonNode): ContentBlock =
       node.getOrDefault("output").getStr,
       node.getOrDefault("is_error").getBool, images,
       node.getOrDefault("hosted").getStr)
+    if "value" in node: result.value = copy(node["value"])
+    result.errorCode = node.getOrDefault("error_code").getStr
+    result.errorMessage = node.getOrDefault("error_message").getStr
+    if "error_details" in node: result.errorDetails = copy(node["error_details"])
+    result.errorRetryable = node.getOrDefault("error_retryable").getBool
   of "image":
     result = image(node.getOrDefault("mime_type").getStr,
       node.getOrDefault("data").getStr, node.getOrDefault("path").getStr)

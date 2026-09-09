@@ -78,7 +78,7 @@ proc buildGoogleBody*(request: ProviderRequest): JsonNode =
     else:
       var key: string
       case tool.hosted
-        of "web_search", "google_search": key = "googleSearch"
+        of "web_search": key = "googleSearch"
         of "url_context": key = "urlContext"
         else: raiseProviderError("Unsupported Google hosted tool: " & tool.hosted)
       var entry = newJObject()

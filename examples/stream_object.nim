@@ -4,7 +4,7 @@
 
 import std/[json, os, strutils]
 import nimgent
-import nimgent/openai
+import nimgent/providers/openai
 
 type Recipe = object
   name: string

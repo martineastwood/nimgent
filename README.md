@@ -20,15 +20,14 @@ Or path-depend during development (sibling checkout):
 
 The implementation is grouped under `src/nimgent/structured_output/` for JSON
 Schema and structured-output support, and `src/nimgent/providers/` for provider
-types, adapters, transports, and streaming helpers. Existing flat imports such
-as `nimgent/openai` remain available as compatibility facades.
+types, adapters, transports, and streaming helpers.
 
 ## Quick start
 
 ```nim
 import std/os
 import nimgent
-import nimgent/openrouter
+import nimgent/providers/openrouter
 
 let model = openRouter(getEnv("OPENROUTER_API_KEY")).model(
   "deepseek/deepseek-v4-flash-0731")
@@ -59,7 +58,7 @@ echo "finish: ", response.finishReason
 ## Providers
 
 ```nim
-import nimgent/[anthropic, google, hyper, openai, openrouter]
+import nimgent/providers/[anthropic, google, hyper, openai, openrouter]
 
 let openaiProvider = openAI(getEnv("OPENAI_API_KEY"))
 # /v1/responses; pass a */chat/completions URL for compat servers
@@ -89,7 +88,7 @@ structured output, and embedding calls (including their async variants):
 ```nim
 import std/options
 import nimgent
-import nimgent/openai
+import nimgent/providers/openai
 
 let answer = generateText(openAI(apiKey).model(modelId), prompt = "Explain this code",
   providerOptions = ProviderOptions(
@@ -114,7 +113,7 @@ For manual Anthropic thinking, use `thinking: some(EnabledThinking)` with
 
 Each provider object has an `extra: JsonNode` escape hatch using native API field
 names. `ProviderOptions.extra` accepts additional namespaces, for example
-`%*{"hyper": {"temperature": 0.5}}`. Merge order is legacy `options`, namespaced
+`%*{"hyper": {"temperature": 0.5}}`. Merge order is request `options`, namespaced
 `extra`, the provider object's `extra`, then its typed fields. Merges are shallow:
 a later nested object replaces the earlier object. Typed OpenAI reasoning effort
 also overrides an effort supplied through the native Responses `reasoning` object.
@@ -128,7 +127,7 @@ provider.name)` is available when building those requests yourself.
 Message/content-block options and explicit cache controls are deferred.
 
 For Claude, `anthropicThinkingOptions(modelId, "high")` selects adaptive thinking
-on known modern models and explicit budgets on legacy models. Supported efforts
+on known modern models and explicit budgets on older models. Supported efforts
 follow [Anthropic's model-specific effort levels](https://platform.claude.com/docs/en/build-with-claude/effort).
 Pass the result as `options`; manual budgets are added once to `maxTokens`,
 while adaptive thinking shares the requested output limit with the answer.
@@ -222,7 +221,7 @@ let response = generateText(
   abort = proc (): bool = stop)
 ```
 
-Tools with an `execute` callback plus `maxSteps` > 1 run a small loop: model →
+Tools with an execution callback plus `maxSteps` > 1 run a small loop: model →
 tools → model, until there are no tool calls or the step cap is hit. `maxSteps`
 defaults to 1 (one model call, no loop), matching AI SDK's explicit opt-in to
 multi-step generation.
@@ -232,7 +231,8 @@ type WeatherInput = object
   city: string
 
 let weather = tool("weather", "Look up weather",
-  proc (input: WeatherInput): string = input.city & ": 16C and cloudy")
+  proc (_: ToolContext, input: WeatherInput): string =
+    input.city & ": 16C and cloudy")
 
 let response = generateText(
   model,
@@ -248,6 +248,25 @@ if response.finishReason == frStepLimit:
 
 Tool callbacks may return a value directly or return `Future[T]`; async tool
 calls marked `parallel = true` overlap without blocking the event loop.
+
+Typed tool results are retained as structured JSON for application code while
+their textual rendering is sent back to the model. Tool handlers receive
+per-call identity, cancellation, session metadata, and structured failures:
+
+```nim
+let lookup = tool("lookup", "Look up a record",
+  proc (ctx: ToolContext, input: LookupInput): LookupResult =
+    if ctx.abort(): return LookupResult(found: false)
+    lookupRecord(input.id))
+
+let failed = toolFailure("not_found", "No record exists",
+  %*{"id": "record-7"}, retryable = false)
+```
+
+`ToolResult.value` is the structured value, `ToolResult.output` is the
+model-facing text, and `ToolResult.error` contains machine-readable failure
+metadata. Tool handlers receive a `ToolContext` and return a `ToolResult` or a
+value that is serialized for the model.
 
 `response.content`, `response.usage`, and `response.finishReason` describe the
 final model call. `response.steps` records every call and its local tool
@@ -336,7 +355,7 @@ nimgent; the OpenAI-compatible Google endpoint is not used by `google(...)` and
 does not provide the full Gemini hosted-tool surface:
 
 ```nim
-import nimgent/google
+import nimgent/providers/google
 
 let model = google(getEnv("AI_STUDIO_API_KEY")).model("gemini-3.5-flash-lite")
 let response = generateText(model,
@@ -344,8 +363,8 @@ let response = generateText(model,
   tools = @[hostedTool("web_search"), hostedTool("url_context")])
 ```
 
-`google_search` is also accepted as an alias for `web_search`. Hosted tool options
-are passed inside the native tool object. Other hosted tools are rejected.
+Hosted tool options are passed inside the native tool object. Other hosted tools
+are rejected.
 `google` supports generation, streaming, embeddings, custom functions, structured
 JSON, images and files. Its endpoint override is an API root (default
 `https://generativelanguage.googleapis.com/v1beta`).
@@ -387,7 +406,7 @@ For applications that want the generic model → tool → model loop, use
 ```nim
 import std/os
 import nimgent/agent
-import nimgent/openai
+import nimgent/providers/openai
 
 let researcher = newAgent(
   model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-5"),
@@ -411,7 +430,8 @@ Use `nimgent/session` when an agent needs to remember previous turns:
 
 ```nim
 import std/os
-import nimgent/[agent, openai, session]
+import nimgent/[agent, session]
+import nimgent/providers/openai
 
 let researcher = newAgent(openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini"),
   instructions = "Remember the conversation.", maxSteps = 5)
@@ -422,11 +442,11 @@ let second = conversation.run("What is my name?")
 echo second.text
 ```
 
-`Session` stores the provider-neutral transcript, including assistant tool
-calls and tool results, and accumulates usage across turns. `newConversation`
-is an equivalent descriptive constructor. `reset` clears the transcript while
-retaining the agent configuration. The current implementation is in-memory;
-serialization, resume, and compaction are planned extensions.
+`Session` stores the provider-neutral event transcript, including assistant
+tool calls and tool results, and accumulates usage across turns. `reset` clears
+the transcript while retaining the agent configuration. Serialization and
+resume use the versioned event log; durable storage and compaction remain
+application concerns.
 
 ## Structured output
 
@@ -442,8 +462,8 @@ The result's `locallyRepaired` flag reports when local JSON completion was used.
 `result.repairs` counts only the latter.
 `result.source` identifies whether the value came from native structured output
 (`osNative`), text extraction (`osText`), or the forced `submit` tool
-(`osTool`). Failed calls expose both the legacy `ObjectError.issues` strings and
-`ObjectError.issueDetails` entries with a JSON path and message.
+(`osTool`). Failed calls expose `ObjectError.issueDetails` entries with a JSON
+path and message.
 The built-in validator supports common draft-07 constraints and local,
 non-cyclic `$ref` references; unsupported schema keywords fail before a provider
 request.

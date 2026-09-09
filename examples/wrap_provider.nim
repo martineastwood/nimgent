@@ -5,7 +5,7 @@
 
 import std/[os, strutils]
 import nimgent
-import nimgent/openai
+import nimgent/providers/openai
 
 let inner: OpenAIProvider = openAI(getEnv("OPENAI_API_KEY"))
 
