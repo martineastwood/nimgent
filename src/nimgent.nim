@@ -615,21 +615,14 @@ proc runLoop(provider: Provider, request: ProviderRequest,
       totalUsage.addUsage(result.usage)
       let stop = calls.len == 0 or not canExecute(tools) or
         request.toolChoice.kind == tckNone
-      if stop or step == maxSteps - 1:
+      let finished = stop or step == maxSteps - 1
+      if finished:
         if not stop:
           result.finishReason = frStepLimit
           stepResult.finishReason = frStepLimit
-        completedSteps.add stepResult
-        if not callbacks.onStepFinish.isNil:
-          callbacks.onStepFinish(step, stepResult)
-        if not emitAgentEvent(agentEvents, AgentEvent(kind: aeStepFinish,
-            runId: runId, sessionId: request.sessionId, turnId: request.turnId,
-            step: step, stepResult: stepResult)):
-          raiseCancelledError()
-        break
-      let parts = await execToolsAsync(tools, calls, abort, step, request,
-        callbacks, agentEvents, runId, approvalPolicy)
-      stepResult.toolResults = parts
+      else:
+        stepResult.toolResults = await execToolsAsync(tools, calls, abort, step,
+          request, callbacks, agentEvents, runId, approvalPolicy)
       completedSteps.add stepResult
       if not callbacks.onStepFinish.isNil:
         callbacks.onStepFinish(step, stepResult)
@@ -637,8 +630,9 @@ proc runLoop(provider: Provider, request: ProviderRequest,
           runId: runId, sessionId: request.sessionId, turnId: request.turnId,
           step: step, stepResult: stepResult)):
         raiseCancelledError()
+      if finished: break
       request.messages.add Message(role: roleAssistant, content: result.content)
-      request.messages.add userMessage(parts)
+      request.messages.add userMessage(stepResult.toolResults)
     result.steps = completedSteps
     result.totalUsage = totalUsage
     if not onEvent.isNil and not cancelled:

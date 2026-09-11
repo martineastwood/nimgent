@@ -65,37 +65,28 @@ proc copyBlock(part: ContentBlock): ContentBlock =
     result.images = @[]
     for image in part.images:
       result.images.add image
-  of ckFile:
-    result.file = part.file
   of ckSource:
     if not part.source.raw.isNil:
       result.source.raw = copy(part.source.raw)
   else:
     discard
 
-proc copyMessage(message: Message): Message =
-  result = Message(role: message.role)
-  for part in message.content:
-    result.content.add copyBlock(part)
-
 proc copyBlocks(parts: openArray[ContentBlock]): seq[ContentBlock] =
   for part in parts:
     result.add copyBlock(part)
 
+proc copyMessage(message: Message): Message =
+  Message(role: message.role, content: copyBlocks(message.content))
+
 proc copyStep(step: StepResult): StepResult =
   result = StepResult(model: step.model, usage: step.usage,
-    finishReason: step.finishReason)
-  for part in step.content:
-    result.content.add copyBlock(part)
-  for part in step.toolResults:
-    result.toolResults.add copyBlock(part)
+    finishReason: step.finishReason, content: copyBlocks(step.content),
+    toolResults: copyBlocks(step.toolResults))
 
 proc copyResponse(response: ProviderResponse): ProviderResponse =
   result = ProviderResponse(model: response.model, usage: response.usage,
     totalUsage: response.totalUsage, finishReason: response.finishReason,
-    requestId: response.requestId)
-  for part in response.content:
-    result.content.add copyBlock(part)
+    requestId: response.requestId, content: copyBlocks(response.content))
   for step in response.steps:
     result.steps.add copyStep(step)
 
@@ -105,9 +96,7 @@ proc copyEvent(event: SessionEvent): SessionEvent =
   of sekUser, sekAssistant:
     result.message = copyMessage(event.message)
   of sekToolResult:
-    result.toolResults = @[]
-    for part in event.toolResults:
-      result.toolResults.add copyBlock(part)
+    result.toolResults = copyBlocks(event.toolResults)
   of sekTurnFinished:
     result.response = copyResponse(event.response)
   else:
@@ -122,8 +111,7 @@ proc messagesFromEvents(events: openArray[SessionEvent]): seq[Message] =
     of sekToolResult:
       if result.len == 0 or result[^1].role != roleUser:
         result.add Message(role: roleUser, content: @[])
-      for part in event.toolResults:
-        result[^1].content.add copyBlock(part)
+      result[^1].content.add copyBlocks(event.toolResults)
     of sekTurnStarted, sekTurnFinished, sekTurnFailed:
       discard
 
@@ -189,21 +177,16 @@ proc validateTurn(session: Session, prompt: string) =
   if prompt.len == 0:
     raiseProviderError("session prompt must not be empty")
 
-proc startTurn(session: Session, prompt: string): string =
+proc beginTurn(session: Session, prompt: string): string =
+  session.validateTurn(prompt)
   result = session.nextTurnId
   session.appendEvent SessionEvent(kind: sekTurnStarted, turnId: result,
     prompt: prompt)
 
-proc beginTurn(session: Session, prompt: string): string =
-  session.validateTurn(prompt)
-  session.startTurn(prompt)
-
 proc recordTurnFailure(session: Session, turnId: string, error: ref CatchableError) =
-  var aborted = false
-  if error of ProviderError:
-    aborted = cast[ref ProviderError](error).aborted
   session.appendEvent SessionEvent(kind: sekTurnFailed, turnId: turnId,
-    error: error.msg, aborted: aborted)
+    error: error.msg, aborted: error of ProviderError and
+      cast[ref ProviderError](error).aborted)
 
 proc runAsync*(session: Session, prompt: string,
                abort: AbortCheck = nil,
@@ -230,10 +213,9 @@ proc streamAsync*(session: Session, prompt: string, onEvent: StreamCallback,
                   abort: AbortCheck = nil,
                   callbacks = RunCallbacks()): Future[ProviderResponse] {.async.} =
   ## Stream one user turn and append its transcript after successful completion.
-  session.validateTurn(prompt)
   if onEvent.isNil:
     raiseProviderError("session stream callback must not be nil")
-  let turnId = session.startTurn(prompt)
+  let turnId = session.beginTurn(prompt)
   try:
     let response = await session.agent.streamAsync("", onEvent,
       messages = session.requestMessages(prompt), abort = abort,
@@ -271,10 +253,9 @@ proc streamAsync*(session: Session, prompt: string,
                   onEvent: AgentEventCallback,
                   abort: AbortCheck = nil,
                   callbacks = RunCallbacks()): Future[ProviderResponse] {.async.} =
-  session.validateTurn(prompt)
   if onEvent.isNil:
     raiseProviderError("session stream callback must not be nil")
-  let turnId = session.startTurn(prompt)
+  let turnId = session.beginTurn(prompt)
   try:
     let response = await session.agent.streamAsync("", onEvent,
       messages = session.requestMessages(prompt), abort = abort,
