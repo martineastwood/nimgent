@@ -229,7 +229,7 @@ type
                          input: JsonNode): Future[ToolResult] {.closure.}
     ## Overlap execute when every runnable tool in the batch sets this and the
     ## program is compiled with `--threads:on`. execute must be safe to run
-    ## concurrently (no shared mutation). niminal never sets it.
+    ## concurrently (no shared mutation). nimlet never sets it.
     parallel*: bool
     hosted*: string
     hostedOptions*: JsonNode

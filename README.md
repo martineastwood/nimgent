@@ -303,7 +303,7 @@ discard resumed.run("Which one should I try first?")
 
 The JSON document is versioned and contains provider-neutral content, tool
 results, usage, response steps, and turn lifecycle events. Applications can
-store it in a file or database; `niminal` can add its own durable storage
+store it in a file or database; `nimlet` can add its own durable storage
 policy around the same event model.
 
 ## Life cycle hooks
@@ -406,7 +406,7 @@ let response = generateText(
 For multi-turn conversations, use `userMessage(...)` and
 `assistantMessage(...)` to construct history.
 
-niminal still owns its own agent loop; this helper is for apps that want the
+nimlet still owns its own agent loop; this helper is for apps that want the
 AI-SDK-style “run my callbacks until the model is done.”
 
 ## First-class agents
@@ -431,7 +431,7 @@ echo response.text
 `Agent` is reusable configuration; each `run` or `stream` call gets fresh
 execution state. `run` and `stream` are blocking convenience wrappers, while
 `runAsync` and `streamAsync` are intended for servers and existing event loops.
-The agent defaults to a bounded eight-model-turn tool loop. niminal keeps its
+The agent defaults to a bounded eight-model-turn tool loop. nimlet keeps its
 own loop because its coding-agent behavior also owns workspace tools, hooks,
 permissions, compaction, persistence, and TUI presentation.
 
@@ -556,7 +556,7 @@ let recipe = streamObject[Recipe](
 ## What this is not
 
 nimgent is not a coding agent. Session persistence, compaction, workspace
-tools, and terminal UI live in [niminal](https://github.com/martin/niminal)
+tools, and terminal UI live in [nimlet](https://github.com/martin/nimlet)
 (or your own app).
 
 ## Release
