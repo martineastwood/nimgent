@@ -2,6 +2,7 @@ import std/[asyncdispatch, atomics, json, options, os, osproc, sets, streams,
   sequtils, strutils, tables, times, unittest]
 import nimgent
 import nimgent/[agent, session]
+import nimgent/mcp
 import nimgent/providers/[anthropic, openrouter]
 import nimgent/testing
 import nimgent/providers/stream
@@ -9,6 +10,10 @@ from nimgent/providers/openai import openAI, hyper,
   buildResponsesBody, buildChatBody, parseResponsesOutput,
   defaultOpenAiEndpoint, defaultOpenAiChatEndpoint, defaultHyperEndpoint,
   chatObjectOptions
+
+suite "MCP client":
+  test "pins the current stateless protocol revision":
+    check mcpProtocolVersion == "2026-07-28"
 
 proc withFixture(script: string, body: proc (port: int)) =
   let fixturePath = getCurrentDir() / "tests" / script

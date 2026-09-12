@@ -553,6 +553,25 @@ let recipe = streamObject[Recipe](
     true)
 ```
 
+## MCP clients
+
+`nimgent/mcp` connects to a current MCP `2026-07-28` server over stdio and
+adapts its tools into ordinary `nimgent.Tool` values:
+
+```nim
+import std/[asyncdispatch, json]
+import nimgent/mcp
+
+let client = waitFor connectMcpStdioAsync(@["./my-mcp-server"])
+defer: client.close()
+
+let remoteTools = waitFor client.asToolsAsync(prefix = "mcp_")
+let result = waitFor client.callToolAsync("lookup", %*{"query": "Nim"})
+```
+
+The client pins the stateless revision, performs `server/discover`, and does
+not fall back to the removed initialize/session handshake.
+
 ## What this is not
 
 nimgent is not a coding agent. Session persistence, compaction, workspace

@@ -6,6 +6,9 @@ export provider
 import nimgent/providers/provider_options
 export provider_options
 
+import nimgent/mcp
+export mcp
+
 import nimgent/structured_output/jsonschema
 export jsonschema
 
