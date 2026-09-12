@@ -1170,7 +1170,7 @@ proc startObjectSession(
     raiseProviderError("maxRepairs must be at least 0")
   if schema.isNil or schema.kind != JObject:
     raiseObjectError("generateObject requires a JSON Schema object", @[])
-  let schemaIssues = validateJsonSchema(schema)
+  let schemaIssues = jsonschema.validateJsonSchema(schema)
   if schemaIssues.len > 0:
     raiseObjectError("generateObject received an invalid JSON Schema: " &
       schemaIssues.join("; "), schemaIssues)
