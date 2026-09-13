@@ -12,7 +12,10 @@ export mcp
 import nimgent/structured_output/jsonschema
 export jsonschema
 
-import std/[asyncdispatch, asyncstreams, json, jsonutils, math, options, os,
+import nimgent/vector_store
+export vector_store
+
+import std/[asyncdispatch, asyncstreams, json, jsonutils, options, os,
   random, strutils, times]
 export fromJsonHook
 when compileOption("threads"):
@@ -103,19 +106,6 @@ proc embed*(model: EmbeddingModel, value: string, options: JsonNode = nil,
             maxRetries = 2, abort: AbortCheck = nil,
             providerOptions = ProviderOptions()): EmbedResult =
   waitFor embedAsync(model, value, options, maxRetries, abort, providerOptions)
-
-proc cosineSimilarity*(a, b: openArray[float]): float =
-  ## Cosine similarity in [-1, 1]. Both vectors must be non-empty and equal-sized.
-  if a.len == 0 or a.len != b.len:
-    raise newException(ValueError, "vectors must be non-empty and the same length")
-  var dot, normA, normB: float
-  for i in 0 ..< a.len:
-    dot += a[i] * b[i]
-    normA += a[i] * a[i]
-    normB += b[i] * b[i]
-  if normA == 0 or normB == 0:
-    raise newException(ValueError, "cosine similarity is undefined for a zero vector")
-  dot / sqrt(normA * normB)
 
 proc buildRequest(
   model: string,

@@ -181,6 +181,19 @@ let result = embedMany(
 
 echo result.usage.tokens
 echo cosineSimilarity(result.embeddings[0], result.embeddings[1])
+
+let store = newInMemoryVectorStore()
+for i, value in @[
+  "sunny day at the beach",
+  "rainy afternoon in the city"]:
+  store.upsert($i, result.embeddings[i], %*{"text": value})
+
+for match in store.search(embed(embeddingModel, "warm beach weather").embedding,
+                          limit = 2):
+  echo match.metadata["text"].getStr, " (", match.score, ")"
+
+store.save("embeddings.json")
+let restored = loadInMemoryVectorStore("embeddings.json")
 ```
 
 ## Wrapping providers

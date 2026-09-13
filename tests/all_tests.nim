@@ -202,6 +202,70 @@ suite "embeddings":
     expect ValueError:
       discard cosineSimilarity(@[1.0], @[1.0, 2.0])
 
+  test "in-memory vector store ranks matches and preserves metadata":
+    let store = newInMemoryVectorStore()
+    store.upsert("alpha", @[1.0, 0.0], %*{"text": "sunny beach"})
+    store.upsert("beta", @[0.0, 1.0], %*{"text": "rainy city"})
+    store.upsert("gamma", @[0.8, 0.2], %*{"text": "warm coast"})
+    let matches = store.search(@[1.0, 0.0], limit = 2)
+    check matches.len == 2
+    check matches[0].id == "alpha"
+    check matches[0].score == 1.0
+    check matches[0].metadata["text"].getStr == "sunny beach"
+    check matches[1].id == "gamma"
+
+  test "in-memory vector store upserts and deletes by ID":
+    let store = newInMemoryVectorStore()
+    store.upsert("item", @[1.0, 0.0], %*{"version": 1})
+    store.upsert("item", @[0.0, 1.0], %*{"version": 2})
+    check store.search(@[0.0, 1.0])[0].metadata["version"].getInt == 2
+    check store.delete("item")
+    check not store.delete("item")
+    check store.search(@[0.0, 1.0]).len == 0
+
+  test "in-memory vector store keeps insertion order for tied scores":
+    let store = newInMemoryVectorStore()
+    store.upsert("first", @[0.0, 1.0])
+    store.upsert("second", @[0.0, -1.0])
+    let matches = store.search(@[1.0, 0.0])
+    check matches[0].id == "first"
+    check matches[1].id == "second"
+
+  test "in-memory vector store validates dimensions and limits":
+    let store = newInMemoryVectorStore()
+    check store.search(@[1.0, 0.0]).len == 0
+    expect ValueError:
+      store.upsert("bad", @[0.0, 0.0])
+    store.upsert("good", @[1.0, 0.0])
+    expect ValueError:
+      store.upsert("wrong", @[1.0, 0.0, 0.0])
+    expect ValueError:
+      discard store.search(@[1.0, 0.0, 0.0])
+    check store.search(@[1.0, 0.0], limit = 0).len == 0
+    expect ValueError:
+      discard store.search(@[1.0, 0.0], limit = -1)
+
+  test "in-memory vector store saves and loads JSON":
+    let path = getTempDir() / ("nimgent-vector-store-" & $getCurrentProcessId() & ".json")
+    defer:
+      if fileExists(path): removeFile(path)
+    let store = newInMemoryVectorStore()
+    store.upsert("alpha", @[1.0, 0.0], %*{"text": "sunny beach"})
+    store.save(path)
+    let restored = loadInMemoryVectorStore(path)
+    let matches = restored.search(@[1.0, 0.0])
+    check matches.len == 1
+    check matches[0].id == "alpha"
+    check matches[0].metadata["text"].getStr == "sunny beach"
+
+  test "in-memory vector store rejects invalid saved JSON":
+    let path = getTempDir() / ("nimgent-vector-store-invalid-" & $getCurrentProcessId() & ".json")
+    defer:
+      if fileExists(path): removeFile(path)
+    writeFile(path, "{}")
+    expect ValueError:
+      discard loadInMemoryVectorStore(path)
+
 suite "OpenRouter provider":
   test "stream line buffer splits on newlines":
     var buf = "data: one\ndata: two\npartial"
