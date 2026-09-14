@@ -8,16 +8,22 @@ type GoogleProvider* = ref object of Provider
   apiKey: string
   endpoint*: string
   timeoutSeconds: int
+  userAgent*: string
 
 proc google*(apiKey: string, endpoint = defaultGoogleEndpoint,
-             timeoutSeconds = 300): GoogleProvider =
+             timeoutSeconds = 300, userAgent = ""): GoogleProvider =
   GoogleProvider(name: "google", apiKey: apiKey,
     endpoint: endpoint.strip(trailing = true, chars = {'/'}),
-    timeoutSeconds: timeoutSeconds,
+    timeoutSeconds: timeoutSeconds, userAgent: userAgent,
     capabilities: {pcStreaming, pcTools, pcStructuredOutput, pcImages, pcFiles,
       pcHostedTools, pcEmbeddings})
 
-method nativeObjectOptions*(p: GoogleProvider, name, description: string,
+proc makeHeaders(p: GoogleProvider): HttpHeaders =
+  result = newHttpHeaders({"x-goog-api-key": p.apiKey,
+    "content-type": "application/json"})
+  if p.userAgent.len > 0: result["User-Agent"] = p.userAgent
+
+method nativeObjectOptions*(p: GoogleProvider, model, name, description: string,
                            schema: JsonNode): JsonNode =
   %*{"generationConfig": {"responseMimeType": "application/json",
     "responseJsonSchema": schema}}
@@ -231,7 +237,7 @@ proc requestNative(p: GoogleProvider, request: ProviderRequest,
   let streaming = not onEvent.isNil
   let body = buildGoogleBody(request)
   let client = newAsyncHttpClient(sslContext = newContext(verifyMode = CVerifyPeer),
-    headers = newHttpHeaders({"x-goog-api-key": p.apiKey, "content-type": "application/json"}))
+    headers = p.makeHeaders())
   client.timeout = p.timeoutSeconds * 1000
   var watch = WakeWatch()
   defer:
@@ -297,8 +303,7 @@ method embedAsync*(p: GoogleProvider,
       mergeRequestOptions(item, copy(request.options))
     requests.add item
   let client = newAsyncHttpClient(sslContext = newContext(verifyMode = CVerifyPeer),
-    headers = newHttpHeaders({"x-goog-api-key": p.apiKey,
-      "content-type": "application/json"}))
+    headers = p.makeHeaders())
   client.timeout = p.timeoutSeconds * 1000
   defer: client.close()
   let url = p.endpoint & "/" & modelPath & ":batchEmbedContents"

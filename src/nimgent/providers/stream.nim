@@ -100,16 +100,25 @@ proc awaitWithWakeAsync*[T](fut: Future[T], watch: ptr WakeWatch, wakeFd: cint,
   while not fut.finished:
     if wakeFd >= 0 and (wake.isNil or wake.finished):
       wake = waitWakeOnce(watch[], wakeFd)
+    let timer = sleepAsync(100)
     if wake.isNil:
-      await fut or sleepAsync(100)
+      await fut or timer
     else:
-      await fut or wake or sleepAsync(100)
+      await (fut or wake) or timer
     if fut.finished:
+      if not wake.isNil and not wake.finished: wake.clearCallbacks()
+      if not timer.finished: timer.clearCallbacks()
       watch[].unregister()
       break
+    fut.clearCallbacks()
+    if not wake.isNil and not wake.finished: wake.clearCallbacks()
+    if not wake.isNil and wake.finished: watch[].unregister()
+    if not timer.finished: timer.clearCallbacks()
     if not onEvent(StreamEvent(kind: seWake)):
       watch[].unregister()
       return false
+  if not wake.isNil and not wake.finished: wake.clearCallbacks()
+  watch[].unregister()
   true
 
 proc drainBodyStreamAsync*(bodyStream: FutureStream[string]): Future[string] {.async.} =

@@ -34,8 +34,23 @@ proc anthropicThinkingOptions*(model, level: string): JsonNode =
 type
   AnthropicProvider* = ref object of Provider
     apiKey: string
-    endpoint: string
+    endpoint*: string
     timeoutSeconds: int
+    userAgent*: string
+    ## Header carrying a stable conversation id; empty sends none. OpenCode Zen's
+    ## gateway requires `x-opencode-session` on its Messages endpoint.
+    sessionHeader*: string
+
+proc makeHeaders(provider: AnthropicProvider, sessionId = ""): HttpHeaders =
+  result = newHttpHeaders({
+    "x-api-key": provider.apiKey,
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json"
+  })
+  if provider.userAgent.len > 0:
+    result["User-Agent"] = provider.userAgent
+  if provider.sessionHeader.len > 0 and sessionId.len > 0:
+    result[provider.sessionHeader] = sessionId
 
 proc anthropicImageBlock*(mimeType, data: string): JsonNode =
   %*{"type": "image", "source": {
@@ -180,16 +195,18 @@ proc parseAnthropicOutput*(data: JsonNode): ProviderResponse =
     else: frUnknown
 
 proc anthropic*(apiKey: string, endpoint = "",
-                timeoutSeconds = 300): AnthropicProvider =
+                timeoutSeconds = 300, sessionHeader = "",
+                userAgent = ""): AnthropicProvider =
   let url = if endpoint.len > 0: endpoint else: defaultAnthropicEndpoint
   AnthropicProvider(name: "anthropic",
                     capabilities: {pcTools, pcStructuredOutput, pcImages,
                       pcFiles, pcHostedTools, pcStreaming},
                     apiKey: apiKey, endpoint: url,
-                    timeoutSeconds: timeoutSeconds)
+                    timeoutSeconds: timeoutSeconds,
+                    sessionHeader: sessionHeader, userAgent: userAgent)
 
-method nativeObjectOptions*(provider: AnthropicProvider, name, description: string,
-                            schema: JsonNode): JsonNode =
+method nativeObjectOptions*(provider: AnthropicProvider, model, name,
+                            description: string, schema: JsonNode): JsonNode =
   %*{"output_config": {"format": {"type": "json_schema", "schema": schema}}}
 
 proc buildAnthropicBody*(request: ProviderRequest): JsonNode =
@@ -245,11 +262,7 @@ method generateAsync*(provider: AnthropicProvider,
     sslContext = newContext(verifyMode = CVerifyPeer))
   client.timeout = provider.timeoutSeconds * 1000
   defer: client.close()
-  let headers = newHttpHeaders({
-    "x-api-key": provider.apiKey,
-    "anthropic-version": "2023-06-01",
-    "content-type": "application/json"
-  })
+  let headers = provider.makeHeaders(request.sessionId)
 
   var response: AsyncResponse
   try:
@@ -334,8 +347,7 @@ method generateStreamAsync*(provider: AnthropicProvider,
     raiseProviderError("ANTHROPIC API key is not configured")
   let client = newAsyncHttpClient(
     sslContext = newContext(verifyMode = CVerifyPeer),
-    headers = newHttpHeaders({"x-api-key": provider.apiKey,
-      "anthropic-version": "2023-06-01", "content-type": "application/json"}))
+    headers = provider.makeHeaders(request.sessionId))
   client.timeout = provider.timeoutSeconds * 1000
   var watch = WakeWatch()
   defer:

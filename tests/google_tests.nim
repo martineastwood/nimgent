@@ -1,6 +1,7 @@
 import std/[json, osproc, streams, strutils, unittest]
 import nimgent
 import nimgent/providers/google
+from nimgent/providers/openai import openCodeGoogle
 
 proc fixture(mode: string, body: proc (p: GoogleProvider)) =
   let child = startProcess("python3", args = @["tests/google_fixture.py", mode],
@@ -134,6 +135,24 @@ suite "native Gemini":
         check response.requestId == "req-google"
         check response.content[^1].hosted == "web_search"
         check response.content[^2].source.url == "https://nim-lang.org")
+
+  test "a gateway Gemini provider reaches the same native paths":
+    let child = startProcess("python3", args = @["tests/google_fixture.py", "sync"],
+      options = {poUsePath, poStdErrToStdOut})
+    defer:
+      if child.running:
+        child.terminate()
+        discard child.waitForExit()
+      child.close()
+    let port = child.outputStream.readLine()
+    ## A bare base has no chat/responses path to strip, so it is used as the root
+    ## the transport appends `/models/<id>:generateContent` to.
+    let p = openCodeGoogle("fixture-key", "http://127.0.0.1:" & port)
+    let response = generateText(p, ProviderRequest(model: "fixture",
+      messages: @[userMessage("hello")], maxTokens: 32), maxRetries = 0)
+    check response.text == "Nim"
+    check response.usage.inputTokens == 10
+    check child.waitForExit() == 0
 
   test "truncation and HTTP errors are surfaced":
     for mode in ["cut", "error"]:

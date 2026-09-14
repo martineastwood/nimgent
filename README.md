@@ -66,6 +66,14 @@ let openaiProvider = openAI(getEnv("OPENAI_API_KEY"))
 let hyperProvider = hyper(getEnv("HYPER_API_KEY"))
 # https://hyper.charm.land/v1/chat/completions
 
+let openCodeProvider = openCode(getEnv("OPENCODE_API_KEY"), protocol = ocChat)
+# OpenCode Go: https://opencode.ai/zen/go/v1/chat/completions
+# ocResponses, ocMessages, and ocGoogle select the other gateway protocols;
+# the last one is Gemini on its native `/models/<id>:generateContent` paths.
+
+let openCodeZenProvider = openCodeZen(getEnv("OPENCODE_API_KEY"), protocol = ocChat)
+# OpenCode Zen: https://opencode.ai/zen/v1/chat/completions
+
 let googleProvider = google(getEnv("AI_STUDIO_API_KEY"))
 # Native Gemini API, including Google Search, URL Context, and embeddings
 
@@ -102,8 +110,8 @@ let answer = generateText(openAI(apiKey).model(modelId), prompt = "Explain this 
     google: GoogleOptions(reasoningEffort: some("high")))))
 ```
 
-Only the selected provider's namespace is used. OpenRouter and Hyper do not
-consume OpenAI settings despite sharing its transport implementation.
+Only the selected provider's namespace is used. OpenRouter, Hyper, and OpenCode
+do not consume OpenAI settings despite sharing its transport implementation.
 `Option[T]` fields omit unset values; `some(false)`, `some(0)`, and empty
 sequences remain explicit. Model-specific supported values are checked by the API.
 
@@ -216,6 +224,23 @@ let wrapped = wrapProvider(model.provider,
 
 `mapResponse(req, resp)` edits the response in place. Streaming calls pass
 through the same hooks; embedding calls forward unchanged.
+
+## Routing providers
+
+`routeProvider` picks the provider that serves each model, for a gateway whose
+models are spread across different wire formats or upstreams:
+
+```nim
+let router = routeProvider(chatProvider,
+  route = proc (model: string): Provider =
+    if usesMessagesWire(model): messagesProvider else: nil)
+```
+
+The router keeps its own name while delegating generation, streaming, embedding,
+and native structured output to the chosen provider — including
+`nativeObjectOptions`, so each model gets its own format's shape. A nil result
+falls back to the default. Capabilities start as the default's; widen the field
+when the routed providers offer more.
 
 ## Retries, cancel, tools
 

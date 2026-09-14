@@ -1375,10 +1375,10 @@ proc startObjectSession(
     raiseObjectError("generateObject received an invalid JSON Schema: " &
       schemaIssues.join("; "), schemaIssues)
   let wire = prepareWireSchema(schema)
-  let nativeOptions = provider.nativeObjectOptions(
+  let nativeOptions = provider.nativeObjectOptions(req.model,
     schemaName(name), description, wire)
   let nativeIssues = if nativeOptions.isNil: @[]
-                     else: provider.nativeObjectSchemaIssues(wire)
+                     else: provider.nativeObjectSchemaIssues(req.model, wire)
   let native = if nativeIssues.len == 0: nativeOptions else: nil
   result.provider = provider
   result.req = req

@@ -3,12 +3,15 @@ import std/[asyncdispatch, atomics, json, options, os, osproc, sets, streams,
 import nimgent
 import nimgent/[agent, session]
 import nimgent/mcp
-import nimgent/providers/[anthropic, mistral, openrouter]
+import nimgent/providers/[anthropic, google, mistral, openrouter]
 import nimgent/testing
 import nimgent/providers/stream
-from nimgent/providers/openai import openAI, hyper,
+from nimgent/providers/openai import openAI, hyper, openCode, openCodeZen,
   buildResponsesBody, buildChatBody, parseResponsesOutput,
   defaultOpenAiEndpoint, defaultOpenAiChatEndpoint, defaultHyperEndpoint,
+  defaultOpenCodeEndpoint, defaultOpenCodeZenEndpoint, openCodeChat,
+  openCodeResponses, openCodeMessages, openCodeGoogle, gatewayBase,
+  ocChat, ocResponses, ocMessages, ocGoogle,
   chatObjectOptions
 from nimgent/providers/openai_chat import parseChatOutput
 
@@ -144,6 +147,13 @@ suite "thinking options":
     check thinkingOptions("openrouter", "high")["reasoning"]["effort"].getStr == "high"
     check thinkingOptions("openai", "low")["reasoning"]["effort"].getStr == "low"
     check thinkingOptions("hyper", "high")["reasoning"]["effort"].getStr == "high"
+    ## opencode uses the standard chat field: GLM upstreams reject `reasoning`.
+    check thinkingOptions("opencode", "high")["reasoning_effort"].getStr == "high"
+    check thinkingOptions("opencode", "high", twToggle)["reasoning_effort"].getStr == "medium"
+    check thinkingOptions("opencode", "low", twMaxTokens)["reasoning_effort"].getStr == "low"
+    check "reasoning" notin thinkingOptions("opencode", "high")
+    check thinkingOptions("opencodezen", "high")["reasoning_effort"].getStr == "high"
+    check "reasoning" notin thinkingOptions("opencodezen", "high")
     check thinkingOptions("mistral", "high")["reasoning_effort"].getStr == "high"
     check thinkingOptions("anthropic", "medium")["thinking"]["budget_tokens"].getInt == 8000
     check thinkingOptions("openai", "none").len == 0
@@ -818,6 +828,197 @@ suite "Hyper provider":
       check response.usage.outputTokens == 1
       check not response.usage.cacheReported
 
+suite "OpenCode provider":
+  test "requires an explicit wire protocol and defaults to Chat Completions":
+    check openCode("k").name == "opencode"
+    let chat = openCodeChat("k")
+    check chat.displayName == "OpenCode"
+    check chat.endpoint == defaultOpenCodeEndpoint
+    check not chat.useResponses
+    check chat.maxTokensField == "max_tokens"
+    check not openCode("k").supports(pcEmbeddings)
+    check OpenAIProvider(openCodeResponses("k")).useResponses
+    check RouteProvider(openCode("k", protocol = ocMessages)).name == "opencode"
+
+  test "missing API key fails before making a request":
+    let provider = openCode("", "http://127.0.0.1:1", protocol = ocChat)
+    expect ProviderError:
+      discard provider.generate(ProviderRequest(model: "deepseek-v4.1-flash",
+        messages: @[userMessage("hello")], maxTokens: 10))
+
+  test "protocol constructors share session and user-agent behavior":
+    check openCodeChat("k").sessionHeader == "x-opencode-session"
+    check openCodeChat("k").userAgent == "nimgent"
+    check openCodeResponses("k").sessionHeader == "x-opencode-session"
+    check openCodeMessages("k").sessionHeader == "x-opencode-session"
+    check openCodeMessages("k").userAgent == "nimgent"
+    check OpenAIProvider(openCodeZen("k")).sessionHeader == "x-opencode-session"
+    check openAI("k", userAgent = "nimlet/0.1.0").userAgent == "nimlet/0.1.0"
+    check openRouter("k", userAgent = "nimlet/0.1.0").userAgent == "nimlet/0.1.0"
+    check hyper("k", userAgent = "nimlet/0.1.0").userAgent == "nimlet/0.1.0"
+    check mistral("k", userAgent = "nimlet/0.1.0").userAgent == "nimlet/0.1.0"
+    check anthropic("k", userAgent = "nimlet/0.1.0").userAgent == "nimlet/0.1.0"
+    check google("k", userAgent = "nimlet/0.1.0").userAgent == "nimlet/0.1.0"
+    check hyper("k").sessionHeader.len == 0
+    check hyper("k").userAgent.len == 0
+
+  test "selects each protocol without model-based routing":
+    let responses = openCodeResponses("k")
+    check responses.endpoint == "https://opencode.ai/zen/go/v1/responses"
+    check responses.useResponses
+    check openCodeMessages("k").endpoint ==
+      "https://opencode.ai/zen/go/v1/messages"
+    check openCodeChat("k", "http://proxy.test/v1/responses").endpoint ==
+      "http://proxy.test/v1/chat/completions"
+    check openCodeResponses("k", "http://proxy.test/v1/chat/completions").endpoint ==
+      "http://proxy.test/v1/responses"
+    check openCodeMessages("k", "http://proxy.test/v1/responses").endpoint ==
+      "http://proxy.test/v1/messages"
+
+  test "Zen shares the protocols on the plain zen gateway":
+    check defaultOpenCodeZenEndpoint ==
+      "https://opencode.ai/zen/v1/chat/completions"
+    check openCodeZen("k").name == "opencode"
+    check OpenAIProvider(openCodeZen("k", protocol = ocChat)).endpoint ==
+      defaultOpenCodeZenEndpoint
+    check OpenAIProvider(openCodeZen("k", protocol = ocResponses)).endpoint ==
+      "https://opencode.ai/zen/v1/responses"
+    check OpenAIProvider(openCodeZen("k", protocol = ocResponses)).useResponses
+    check RouteProvider(openCodeZen("k", protocol = ocMessages)).name == "opencode"
+    ## The Messages wire is the same adapter against the Zen base.
+    check openCodeMessages("k", defaultOpenCodeZenEndpoint).endpoint ==
+      "https://opencode.ai/zen/v1/messages"
+    check not openCodeZen("k").supports(pcEmbeddings)
+    ## An explicit endpoint still wins, so a proxy can serve either catalog.
+    check OpenAIProvider(openCodeZen("k", "http://proxy.test/v1/messages",
+      protocol = ocChat)).endpoint == "http://proxy.test/v1/chat/completions"
+
+  test "each gateway endpoint declares where its siblings and Gemini live":
+    check gatewayBase("https://opencode.ai/zen/v1/chat/completions") ==
+      "https://opencode.ai/zen/v1"
+    check gatewayBase("https://opencode.ai/zen/go/v1/responses") ==
+      "https://opencode.ai/zen/go/v1"
+    check gatewayBase("https://opencode.ai/zen/v1/messages") ==
+      "https://opencode.ai/zen/v1"
+    ## A bare host has no known path, so no sibling can be derived.
+    check gatewayBase("http://127.0.0.1:8080") == ""
+    check siblingEndpoint("http://127.0.0.1:8080", "responses") == ""
+    check siblingEndpoint(defaultOpenCodeEndpoint, "responses") ==
+      "https://opencode.ai/zen/go/v1/responses"
+
+  test "Gemini models reach the native Google surface of the same gateway":
+    let go = openCodeGoogle("k")
+    check go.name == "google"
+    check go.endpoint == "https://opencode.ai/zen/go/v1"
+    check go.userAgent == "nimgent"
+    ## The transport appends `/models/<id>:generateContent` to this base.
+    let zen = RouteProvider(openCodeZen("k", protocol = ocGoogle))
+    check GoogleProvider(zen.default).endpoint == "https://opencode.ai/zen/v1"
+    check zen.name == "opencode"
+    check RouteProvider(openCode("k", protocol = ocGoogle)).name == "opencode"
+    ## Zen documents no embeddings endpoint for Gemini.
+    check not go.supports(pcEmbeddings)
+    for capability in [pcStreaming, pcTools, pcStructuredOutput, pcHostedTools]:
+      check go.supports(capability)
+    ## A bare endpoint is used as-is: a local or proxied gateway root.
+    check openCodeGoogle("k", "http://127.0.0.1:1").endpoint == "http://127.0.0.1:1"
+    check openCodeGoogle("k", "http://proxy.test/v1/responses").endpoint ==
+      "http://proxy.test/v1"
+
+  test "session header, user agent, and explicit format on the wire":
+    withFixture("opencode_fixture.py") do (port: int):
+      let url = "http://127.0.0.1:" & $port & "/chat/completions"
+      let chatProvider = openCode("fixture-key", url, timeoutSeconds = 5,
+        userAgent = "nimlet/0.1.0", protocol = ocChat)
+      let chat = chatProvider.generate(ProviderRequest(
+        model: "deepseek-v4.1-flash", sessionId: "sess-abc",
+        messages: @[userMessage("hi")], maxTokens: 16))
+      check chat.text == "pong"
+      check chat.usage.inputTokens == 12
+      let responsesProvider = openCode("fixture-key", url, timeoutSeconds = 5,
+        userAgent = "nimlet/0.1.0", protocol = ocResponses)
+      let responses = responsesProvider.generate(ProviderRequest(
+        model: "grok-4.6", sessionId: "sess-abc",
+        messages: @[userMessage("hi")], maxTokens: 16))
+      check responses.text == "grok pong"
+      check responses.usage.inputTokens == 20
+      let messagesProvider = openCode("fixture-key", url, timeoutSeconds = 5,
+        userAgent = "nimlet/0.1.0", protocol = ocMessages)
+      let messages = messagesProvider.generate(ProviderRequest(
+        model: "qwen3.8-flash", sessionId: "sess-abc",
+        messages: @[userMessage("hi")], maxTokens: 16))
+      check messages.text == "qwen pong"
+      check messages.usage.inputTokens == 14
+
+type RecordingProvider = ref object of Provider
+  seen: string
+  lastModel: string
+  lastOptions: JsonNode
+
+method generateAsync(p: RecordingProvider,
+                     request: ProviderRequest): Future[ProviderResponse] {.async.} =
+  p.seen = request.model
+  result.model = request.model
+  result.content = @[text("ok")]
+
+method generateStreamAsync(p: RecordingProvider, request: ProviderRequest,
+                           onEvent: StreamCallback): Future[ProviderResponse] {.async.} =
+  p.seen = request.model
+  result.content = @[text("streamed")]
+
+method embedAsync(p: RecordingProvider,
+                  request: EmbeddingRequest): Future[EmbeddingResponse] {.async.} =
+  p.seen = request.model
+  result.model = p.name
+  result.embeddings = @[@[1.0]]
+
+method nativeObjectOptions(p: RecordingProvider, model, name, description: string,
+                           schema: JsonNode): JsonNode =
+  p.lastModel = model
+  p.lastOptions = %*{"native": model}
+  p.lastOptions
+
+method nativeObjectSchemaIssues(p: RecordingProvider, model: string,
+                                schema: JsonNode): seq[string] =
+  @[p.name]
+
+suite "route provider":
+  test "dispatches each model and keeps the caller's name":
+    let fallback = RecordingProvider(name: "chat", capabilities: {pcStreaming})
+    let special = RecordingProvider(name: "messages")
+    let router = routeProvider(fallback, route = proc (model: string): Provider =
+      if model == "special": special else: nil)
+    check router.name == "chat"
+    check router.supports(pcStreaming)
+    check router.servingProvider("special") == special
+    check router.servingProvider("plain") == fallback
+    discard router.generate(ProviderRequest(model: "special",
+      messages: @[userMessage("hi")]))
+    check special.seen == "special"
+    discard router.generate(ProviderRequest(model: "plain",
+      messages: @[userMessage("hi")]))
+    check fallback.seen == "plain"
+    expect ProviderError:
+      discard routeProvider(nil)
+
+  test "delegates structured output and embeddings by model":
+    let fallback = RecordingProvider(name: "chat", capabilities: {pcStreaming})
+    let special = RecordingProvider(name: "messages")
+    let router = routeProvider(fallback, route = proc (model: string): Provider =
+      if model == "special": special else: nil)
+    check router.nativeObjectOptions("special", "o", "", %*{"type": "object"}) ==
+      %*{"native": "special"}
+    check special.lastModel == "special"
+    check router.nativeObjectSchemaIssues("special", %*{"type": "object"}) ==
+      @["messages"]
+    check router.nativeObjectSchemaIssues("plain", %*{"type": "object"}) == @["chat"]
+    check router.embed(EmbeddingRequest(model: "special",
+      values: @["a"])).model == "messages"
+    ## No route: everything lands on the default.
+    let plain = routeProvider(fallback)
+    check plain.servingProvider("anything") == fallback
+    check plain.supports(pcStreaming)
+
 suite "Mistral provider":
   test "defaults to Mistral Chat Completions":
     let provider = mistral("k")
@@ -1297,16 +1498,16 @@ method generateAsync(p: ObjectScript,
   else:
     frStop
 
-method nativeObjectOptions(p: ChatObjectScript, name, description: string,
-                           schema: JsonNode): JsonNode =
+method nativeObjectOptions(p: ChatObjectScript, model, name,
+                           description: string, schema: JsonNode): JsonNode =
   chatObjectOptions(name, description, schema)
 
-method nativeObjectSchemaIssues(p: ChatObjectScript,
+method nativeObjectSchemaIssues(p: ChatObjectScript, model: string,
                                 schema: JsonNode): seq[string] =
   validateOpenAiStrictSchema(schema)
 
-method nativeObjectOptions(p: GoogleObjectScript, name, description: string,
-                           schema: JsonNode): JsonNode =
+method nativeObjectOptions(p: GoogleObjectScript, model, name,
+                           description: string, schema: JsonNode): JsonNode =
   %*{"generationConfig": {"responseMimeType": "application/json",
     "responseJsonSchema": schema}}
 
@@ -1779,16 +1980,25 @@ suite "generateObject":
 
   test "native option helpers match each wire format":
     let schema = %*{"type": "object", "properties": {"a": {"type": "string"}}}
-    check openAI("k").nativeObjectOptions("o", "", schema)[
+    check openAI("k").nativeObjectOptions("m", "o", "", schema)[
       "text"]["format"]["type"].getStr == "json_schema"
     check openAI("k", defaultOpenAiChatEndpoint).nativeObjectOptions(
-      "o", "", schema)["response_format"]["type"].getStr == "json_schema"
-    check hyper("k").nativeObjectOptions("o", "", schema)[
+      "m", "o", "", schema)["response_format"]["type"].getStr == "json_schema"
+    check hyper("k").nativeObjectOptions("m", "o", "", schema)[
       "response_format"]["json_schema"]["name"].getStr == "o"
     check openRouter("k", "http://x").nativeObjectOptions(
-      "o", "d", schema)["response_format"]["json_schema"]["description"].getStr == "d"
+      "m", "o", "d", schema)["response_format"]["json_schema"]["description"].getStr == "d"
     check anthropic("k", "http://x").nativeObjectOptions(
-      "o", "", schema)["output_config"]["format"]["type"].getStr == "json_schema"
+      "m", "o", "", schema)["output_config"]["format"]["type"].getStr == "json_schema"
+    check openCode("k", protocol = ocResponses).nativeObjectOptions(
+      "grok-4.6", "o", "", schema)[
+      "text"]["format"]["type"].getStr == "json_schema"
+    check openCode("k", protocol = ocChat).nativeObjectOptions(
+      "deepseek-v4.1-flash", "o", "",
+      schema)["response_format"]["type"].getStr == "json_schema"
+    check openCode("k", protocol = ocMessages).nativeObjectOptions(
+      "qwen3.8-flash", "o", "", schema)["output_config"]["format"][
+        "type"].getStr == "json_schema"
 
   test "addUsage sums cache flags":
     var u = Usage(inputTokens: 1, cacheReadTokens: 2, cacheReported: true)
@@ -1941,9 +2151,9 @@ suite "wrapProvider":
     check w.name == "openai"
     check w.supports(pcStreaming)
     check w.supports(pcHostedTools)
-    check w.nativeObjectOptions("o", "", %*{"type": "object"})["text"]["format"][
+    check w.nativeObjectOptions("m", "o", "", %*{"type": "object"})["text"]["format"][
       "type"].getStr == "json_schema"
-    check w.nativeObjectSchemaIssues(%*{"type": "integer"}).len > 0
+    check w.nativeObjectSchemaIssues("m", %*{"type": "integer"}).len > 0
     check wrapProvider(inner, name = "gate").name == "gate"
     expect ProviderError:
       discard wrapProvider(nil)

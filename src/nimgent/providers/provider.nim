@@ -740,14 +740,17 @@ proc raiseObjectError*(msg: string, issues: seq[string], raw = "") =
   e.raw = raw
   raise e
 
-method nativeObjectOptions*(p: Provider, name, description: string,
+method nativeObjectOptions*(p: Provider, model, name, description: string,
                             schema: JsonNode): JsonNode {.base.} =
   ## Provider-body knobs for native structured output. nil means none.
+  ## `model` is available because a gateway may serve one model on another wire
+  ## format, which needs a different native shape.
   nil
 
-method nativeObjectSchemaIssues*(p: Provider, schema: JsonNode): seq[string]
-    {.base.} =
+method nativeObjectSchemaIssues*(p: Provider, model: string,
+                                 schema: JsonNode): seq[string] {.base.} =
   ## Provider-specific native-schema restrictions. Empty means compatible.
+  ## `model` is available for gateways whose models use different wire formats.
   @[]
 
 proc rawTool*(name, description: string, inputSchema: JsonNode,
@@ -831,7 +834,9 @@ proc thinkingOptions*(provider, level: string, wire = twEffort): JsonNode =
     case p
     of "openrouter", "openai", "hyper":
       result["reasoning"] = %*{"effort": lv}
-    of "mistral":
+    of "mistral", "opencode", "opencodezen":
+      # Zen's gateway forwards the standard chat field; some of its upstreams
+      # (GLM) reject the `reasoning` object outright.
       result["reasoning_effort"] = %lv
     of "google":
       # OpenAI-compatible surface uses the standard top-level reasoning_effort.
@@ -848,7 +853,7 @@ proc thinkingOptions*(provider, level: string, wire = twEffort): JsonNode =
       result["reasoning"] = %*{"enabled": true}
     of "openai", "hyper":
       result["reasoning"] = %*{"effort": "medium"}
-    of "mistral":
+    of "mistral", "opencode", "opencodezen":
       result["reasoning_effort"] = %"medium"
     of "google":
       result = thinkingOptions(p, "high", twEffort)
@@ -862,7 +867,7 @@ proc thinkingOptions*(provider, level: string, wire = twEffort): JsonNode =
       result["reasoning"] = %*{"max_tokens": thinkingBudgetTokens(lv)}
     of "openai", "hyper":
       result["reasoning"] = %*{"effort": lv}
-    of "mistral":
+    of "mistral", "opencode", "opencodezen":
       result["reasoning_effort"] = %lv
     of "google":
       result = thinkingOptions(p, lv, twEffort)
@@ -913,10 +918,56 @@ method embedAsync*(p: WrapProvider,
   ## Text-generation mappers intentionally do not alter embedding requests.
   return await p.inner.embedAsync(request)
 
-method nativeObjectOptions*(p: WrapProvider, name, description: string,
+method nativeObjectOptions*(p: WrapProvider, model, name, description: string,
                             schema: JsonNode): JsonNode =
-  p.inner.nativeObjectOptions(name, description, schema)
+  p.inner.nativeObjectOptions(model, name, description, schema)
 
-method nativeObjectSchemaIssues*(p: WrapProvider,
+method nativeObjectSchemaIssues*(p: WrapProvider, model: string,
                                  schema: JsonNode): seq[string] =
-  p.inner.nativeObjectSchemaIssues(schema)
+  p.inner.nativeObjectSchemaIssues(model, schema)
+
+type
+  ProviderRouter* = proc (model: string): Provider {.closure.}
+    ## Provider serving `model`, or nil to fall back to the router's default.
+
+  RouteProvider* = ref object of Provider
+    ## Sends each model to whichever provider serves it. Use it when one logical
+    ## provider — a gateway — exposes different models on different wire formats,
+    ## so a model added or retired upstream needs no code change in the caller.
+    default*: Provider
+    route*: ProviderRouter
+
+proc routeProvider*(default: Provider, name = "",
+                    route: ProviderRouter = nil): RouteProvider =
+  ## Capabilities start as the default's; widen the returned field when the
+  ## routed providers offer more than it does.
+  if default.isNil:
+    raise newException(ProviderError, "provider must not be nil")
+  RouteProvider(name: if name.len > 0: name else: default.name,
+    capabilities: default.capabilities, default: default, route: route)
+
+proc servingProvider*(p: RouteProvider, model: string): Provider =
+  ## The provider a request for `model` goes to.
+  if not p.route.isNil:
+    result = p.route(model)
+  if result.isNil: result = p.default
+
+method generateAsync*(p: RouteProvider,
+                      request: ProviderRequest): Future[ProviderResponse] {.async.} =
+  return await p.servingProvider(request.model).generateAsync(request)
+
+method generateStreamAsync*(p: RouteProvider, request: ProviderRequest,
+                            onEvent: StreamCallback): Future[ProviderResponse] {.async.} =
+  return await p.servingProvider(request.model).generateStreamAsync(request, onEvent)
+
+method embedAsync*(p: RouteProvider,
+                   request: EmbeddingRequest): Future[EmbeddingResponse] {.async.} =
+  return await p.servingProvider(request.model).embedAsync(request)
+
+method nativeObjectOptions*(p: RouteProvider, model, name, description: string,
+                            schema: JsonNode): JsonNode =
+  p.servingProvider(model).nativeObjectOptions(model, name, description, schema)
+
+method nativeObjectSchemaIssues*(p: RouteProvider, model: string,
+                                 schema: JsonNode): seq[string] =
+  p.servingProvider(model).nativeObjectSchemaIssues(model, schema)

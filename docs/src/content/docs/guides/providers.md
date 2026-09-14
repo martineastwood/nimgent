@@ -27,10 +27,22 @@ import nimgent/providers/[anthropic, google, hyper, mistral, openai, openrouter]
 | OpenRouter | `openRouter(apiKey)` | OpenAI-compatible routing and models |
 | Hyper | `hyper(apiKey)` | OpenAI-compatible Chat Completions endpoint |
 | Mistral | `mistral(apiKey)` | OpenAI-compatible Chat Completions, tools, and streaming |
+| OpenCode | `openCode(apiKey, protocol)` | OpenCode Go subscription: explicit Chat Completions, Responses, Anthropic Messages, or native Gemini |
+| OpenCode Zen | `openCodeZen(apiKey, protocol)` | OpenCode Zen's full catalog, same protocols on `/zen/v1` |
 
 ```nim
 let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
 let response = generateText(model, prompt = "Explain this function.")
+
+let goModel = openCode(getEnv("OPENCODE_API_KEY"), protocol = ocMessages)
+let goResponse = generateText(goModel.model("qwen3.8-flash"), prompt = "Hello")
+
+let zenModel = openCodeZen(getEnv("OPENCODE_API_KEY"), protocol = ocResponses)
+let zenResponse = generateText(zenModel.model("gpt-5.6-luna"), prompt = "Hello")
+
+# Gemini models live on the same gateway root under Google's own paths.
+let zenGemini = openCodeZen(getEnv("OPENCODE_API_KEY"), protocol = ocGoogle)
+let gemini = generateText(zenGemini.model("gemini-3.8-flash"), prompt = "Hello")
 ```
 
 A `LanguageModel` is just a provider plus a model id — it's a value, so you can
@@ -140,6 +152,10 @@ the key you have. Practical guidance:
 - **OpenRouter** to reach many models — including non-OpenAI ones — through
   one key, with routing controls.
 - **Hyper** for an OpenAI-compatible self-hosted or alternative endpoint.
+- **OpenCode** for the OpenCode Go subscription, **OpenCode Zen** for the
+  pay-per-use catalog. Both gateways serve each model on one wire format;
+  choose `ocChat`, `ocResponses`, `ocMessages`, or `ocGoogle` explicitly when
+  constructing the provider.
 
 Since the surface is shared, testing against OpenRouter and shipping on OpenAI
 (and vice versa) is a supported pattern, not a migration.
