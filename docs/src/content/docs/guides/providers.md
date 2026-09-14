@@ -23,7 +23,7 @@ import nimgent/providers/[anthropic, google, hyper, mistral, openai, openrouter]
 | --- | --- | --- |
 | OpenAI | `openAI(apiKey)` | Responses API and Chat Completions compatibility |
 | Anthropic | `anthropic(apiKey)` | Native Messages API and streaming |
-| Google | `google(apiKey)` | Native Gemini generation, hosted tools, and embeddings |
+| Google | `google(apiKey)` | Gemini API (Google AI Studio): native generation, hosted tools, and embeddings |
 | OpenRouter | `openRouter(apiKey)` | OpenAI-compatible routing and models |
 | Hyper | `hyper(apiKey)` | OpenAI-compatible Chat Completions endpoint |
 | Mistral | `mistral(apiKey)` | OpenAI-compatible Chat Completions, tools, and streaming |
@@ -148,7 +148,9 @@ the key you have. Practical guidance:
 
 - **OpenAI** and **Anthropic** when you want first-class support for that
   vendor's newest features (native structured output, thinking, hosted tools).
-- **Google** for Gemini, including hosted tools and embeddings.
+- **Google** for the Gemini API (Google AI Studio), including hosted tools and
+  embeddings. This is the key-based `generativelanguage` service; Vertex AI is a
+  different endpoint and authentication model and is not this adapter.
 - **OpenRouter** to reach many models — including non-OpenAI ones — through
   one key, with routing controls.
 - **Hyper** for an OpenAI-compatible self-hosted or alternative endpoint.

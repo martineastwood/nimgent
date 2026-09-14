@@ -1,4 +1,9 @@
 ## Native Gemini generateContent transport, including provider-executed tools.
+##
+## This is the Gemini API as served by Google AI Studio: an API key in
+## `x-goog-api-key`, `/v1beta/models/<id>:generateContent`. Vertex AI is a
+## different service — OAuth service accounts, a project and location in the
+## path — and needs its own provider.
 import std/[asyncdispatch, httpclient, json, net, strutils, tables, uri]
 import nimgent/providers/[provider, stream, http_metadata]
 

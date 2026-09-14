@@ -108,7 +108,7 @@ import nimgent/providers/[anthropic, google, hyper, openai, openrouter]
 
 let openaiModel = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
 let claudeModel = anthropic(getEnv("ANTHROPIC_API_KEY")).model("claude-sonnet-4-6")
-let geminiModel = google(getEnv("AI_STUDIO_API_KEY")).model("gemini-3.5-flash-lite")
+let geminiModel = google(getEnv("GEMINI_API_KEY")).model("gemini-3.5-flash-lite")
 ```
 
 All adapters expose the same `LanguageModel`, and responses are normalized to

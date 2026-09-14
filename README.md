@@ -74,8 +74,9 @@ let openCodeProvider = openCode(getEnv("OPENCODE_API_KEY"), protocol = ocChat)
 let openCodeZenProvider = openCodeZen(getEnv("OPENCODE_API_KEY"), protocol = ocChat)
 # OpenCode Zen: https://opencode.ai/zen/v1/chat/completions
 
-let googleProvider = google(getEnv("AI_STUDIO_API_KEY"))
-# Native Gemini API, including Google Search, URL Context, and embeddings
+let googleProvider = google(getEnv("GEMINI_API_KEY"))
+# Gemini API (Google AI Studio), including Google Search and URL Context.
+# Vertex AI is a separate service: project, location, and service-account auth.
 
 let anthropicProvider = anthropic(getEnv("ANTHROPIC_API_KEY"))
 
@@ -404,13 +405,15 @@ let response = generateText(
 ```
 
 For Gemini, use the native adapter. This is the single Google provider path in
-nimgent; the OpenAI-compatible Google endpoint is not used by `google(...)` and
-does not provide the full Gemini hosted-tool surface:
+nimgent: the Gemini API served by Google AI Studio. Vertex AI is a different
+service, with its own host, project/location path, and service-account auth, and
+needs its own provider. The OpenAI-compatible Google endpoint is not used by
+`google(...)` and does not provide the full Gemini hosted-tool surface:
 
 ```nim
 import nimgent/providers/google
 
-let model = google(getEnv("AI_STUDIO_API_KEY")).model("gemini-3.5-flash-lite")
+let model = google(getEnv("GEMINI_API_KEY")).model("gemini-3.5-flash-lite")
 let response = generateText(model,
   prompt = "Search for Nim's official documentation and read https://nim-lang.org.",
   tools = @[hostedTool("web_search"), hostedTool("url_context")])

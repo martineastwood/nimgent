@@ -31,5 +31,5 @@ The provider smoke tests use their corresponding credentials:
 
 ```sh
 ANTHROPIC_API_KEY=... nim c -r examples/anthropic_smoke.nim
-AI_STUDIO_API_KEY=... nim c -r examples/google_smoke.nim
+GEMINI_API_KEY=... nim c -r examples/google_smoke.nim
 ```
