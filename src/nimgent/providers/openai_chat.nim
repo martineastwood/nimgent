@@ -119,6 +119,8 @@ proc encodeMessage(result: var JsonNode, message: Message) =
       }
   if calls.len > 0:
     encoded["tool_calls"] = calls
+  elif content.len == 0:
+    encoded["content"] = %""
   attachChatThinking(encoded, message, calls.len > 0)
   result.add encoded
 

@@ -1290,6 +1290,15 @@ suite "encoding":
     check "reasoning" notin stripped["messages"][1]
     check "reasoning_details" notin stripped["messages"][1]
 
+  test "chat completions keeps textless assistant turns valid":
+    let body = buildChatBody(ProviderRequest(
+      model: "m",
+      messages: @[userMessage("hi"), Message(role: roleAssistant, content: @[
+        ContentBlock(kind: ckThinking, thinking: "plan")])]), stream = false)
+    check body["messages"][1]["content"].kind == JString
+    check body["messages"][1]["content"].getStr == ""
+    check "tool_calls" notin body["messages"][1]
+
 suite "files, sources, hosted tools":
   test "file parts encode on Anthropic, Responses, and Chat":
     let blocks = @[text("see"), file("application/pdf", "QUJD", filename = "spec.pdf")]
