@@ -55,6 +55,9 @@ proc reasoningReplay(part: ContentBlock): JsonNode =
     result = %*{"type": "reasoning", "id": j["id"]}
     if "encrypted_content" in j:
       result["encrypted_content"] = j["encrypted_content"]
+    ## Console Go's Muse Responses adapter requires `summary` even when the
+    ## upstream returned no visible reasoning summary.
+    result["summary"] = newJArray()
     if part.thinking.len > 0:
       result["summary"] = %*[{"type": "summary_text", "text": part.thinking}]
   except CatchableError:

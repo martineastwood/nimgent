@@ -1101,11 +1101,24 @@ suite "OpenAI provider":
     check input[1]["type"].getStr == "reasoning"
     check input[1]["id"].getStr == "rs_1"
     check input[1]["encrypted_content"].getStr == "enc"
+    check input[1]["summary"].kind == JArray
+    check input[1]["summary"].len == 1
     check input[2]["content"][0]["type"].getStr == "output_text"
     check input[3]["type"].getStr == "function_call"
     check input[3]["call_id"].getStr == "call_1"
     check input[4]["type"].getStr == "function_call_output"
     check input[4]["call_id"].getStr == "call_1"
+
+  test "responses reasoning replay includes an empty summary":
+    let sig = $(%*{"id": "rs_empty", "encrypted_content": "enc"})
+    let body = buildResponsesBody(ProviderRequest(
+      model: "muse-spark-1.2-contributor",
+      messages: @[userMessage("hi"), Message(role: roleAssistant, content: @[
+        ContentBlock(kind: ckThinking, signature: sig)])]), stream = false)
+    check body["input"].len == 2
+    check body["input"][1]["type"].getStr == "reasoning"
+    check body["input"][1]["summary"].kind == JArray
+    check body["input"][1]["summary"].len == 0
 
   test "missing API key fails before making a request":
     let provider = openAI("", "http://127.0.0.1:1")
