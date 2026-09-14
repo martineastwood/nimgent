@@ -16,7 +16,7 @@ providers is a two-line change, and the rest of your code doesn't notice.
 ## Supported adapters
 
 ```nim
-import nimgent/providers/[anthropic, google, hyper, openai, openrouter]
+import nimgent/providers/[anthropic, google, hyper, mistral, openai, openrouter]
 ```
 
 | Adapter | Constructor | API surface |
@@ -26,6 +26,7 @@ import nimgent/providers/[anthropic, google, hyper, openai, openrouter]
 | Google | `google(apiKey)` | Native Gemini generation, hosted tools, and embeddings |
 | OpenRouter | `openRouter(apiKey)` | OpenAI-compatible routing and models |
 | Hyper | `hyper(apiKey)` | OpenAI-compatible Chat Completions endpoint |
+| Mistral | `mistral(apiKey)` | OpenAI-compatible Chat Completions, tools, and streaming |
 
 ```nim
 let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")

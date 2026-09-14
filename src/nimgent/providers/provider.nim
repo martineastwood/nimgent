@@ -416,16 +416,27 @@ proc contextTokens*(u: Usage): int =
       return u.inputTokens + cached
   u.inputTokens
 
+proc formatTokens(count: int): string =
+  ## Compact token counts: 999, 1k, 2.5k, 123k, 1.5M.
+  for (suffix, scale) in [("M", 1_000_000), ("k", 1_000)]:
+    if count >= scale:
+      let tenths = count * 10 div scale
+      return if tenths < 100 and tenths mod 10 != 0:
+        $(tenths div 10) & "." & $(tenths mod 10) & suffix
+      else:
+        $(count div scale) & suffix
+  $count
+
 proc formatUsageLabels*(usage: Usage): seq[string] =
   ## Plain usage fragments shared by console, TUI, and status bar.
   if usage.inputTokens == 0 and usage.outputTokens == 0:
     return
-  result.add "↑" & $usage.inputTokens
-  result.add "↓" & $usage.outputTokens
+  result.add "↑" & formatTokens(usage.inputTokens)
+  result.add "↓" & formatTokens(usage.outputTokens)
   if usage.cacheReported:
-    result.add "R" & $usage.cacheReadTokens
+    result.add "R" & formatTokens(usage.cacheReadTokens)
     if usage.cacheWriteTokens > 0:
-      result.add "W" & $usage.cacheWriteTokens
+      result.add "W" & formatTokens(usage.cacheWriteTokens)
     let denom = contextTokens(usage)
     if denom > 0:
       let pct = usage.cacheReadTokens * 100 / denom
@@ -820,6 +831,8 @@ proc thinkingOptions*(provider, level: string, wire = twEffort): JsonNode =
     case p
     of "openrouter", "openai", "hyper":
       result["reasoning"] = %*{"effort": lv}
+    of "mistral":
+      result["reasoning_effort"] = %lv
     of "google":
       # OpenAI-compatible surface uses the standard top-level reasoning_effort.
       result["reasoning_effort"] = %lv
@@ -835,6 +848,8 @@ proc thinkingOptions*(provider, level: string, wire = twEffort): JsonNode =
       result["reasoning"] = %*{"enabled": true}
     of "openai", "hyper":
       result["reasoning"] = %*{"effort": "medium"}
+    of "mistral":
+      result["reasoning_effort"] = %"medium"
     of "google":
       result = thinkingOptions(p, "high", twEffort)
     of "anthropic":
@@ -847,6 +862,8 @@ proc thinkingOptions*(provider, level: string, wire = twEffort): JsonNode =
       result["reasoning"] = %*{"max_tokens": thinkingBudgetTokens(lv)}
     of "openai", "hyper":
       result["reasoning"] = %*{"effort": lv}
+    of "mistral":
+      result["reasoning_effort"] = %lv
     of "google":
       result = thinkingOptions(p, lv, twEffort)
     of "anthropic":

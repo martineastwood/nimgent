@@ -1,7 +1,7 @@
 ## OpenAI-family HTTP provider.
 ##
 ## Native OpenAI uses the Responses API (`store: false`, reasoning replay).
-## OpenRouter, Hyper, and any `*/chat/completions` URL keep Chat Completions.
+## OpenRouter, Hyper, Mistral, and any `*/chat/completions` URL keep Chat Completions.
 ## Session_id, cache_control, and HTTP-Referer stay optional on this type.
 
 import std/[options, asyncdispatch, httpclient, json, net, strutils]
@@ -15,6 +15,7 @@ const
   defaultOpenAiChatEndpoint* = "https://api.openai.com/v1/chat/completions"
   defaultOpenRouterEndpoint* = "https://openrouter.ai/api/v1/chat/completions"
   defaultHyperEndpoint* = "https://hyper.charm.land/v1/chat/completions"
+  defaultMistralEndpoint* = "https://api.mistral.ai/v1/chat/completions"
 
 type
   OpenAIProvider* = ref object of Provider
@@ -27,7 +28,9 @@ type
     includeSessionId*: bool
     ## Anthropic-style cache breakpoints; OpenAI caches stable prefixes itself.
     applyCache*: bool
-    ## "max_tokens" (OpenRouter) or "max_completion_tokens" (Chat Completions).
+    ## Mistral prompt caching key derived from the request session ID.
+    promptCacheKey*: bool
+    ## "max_tokens" (OpenRouter/Mistral) or "max_completion_tokens" (Chat Completions).
     maxTokensField*: string
     displayName*: string
     ## True: POST /v1/responses. False: Chat Completions (OpenRouter / compat).
@@ -36,12 +39,14 @@ type
 
   OpenRouterProvider* = OpenAIProvider
   HyperProvider* = OpenAIProvider
+  MistralProvider* = OpenAIProvider
 
 proc initOpenAIProvider(name, displayName, apiKey, endpoint: string,
                       timeoutSeconds: int, siteUrl = "", siteName = "",
                       includeSessionId = false, applyCache = false,
                       maxTokensField = "max_completion_tokens",
-                      useResponses = false, embeddingsEndpoint = ""): OpenAIProvider =
+                      useResponses = false, embeddingsEndpoint = "",
+                      promptCacheKey = false): OpenAIProvider =
   let capabilities = {pcStreaming, pcTools, pcStructuredOutput, pcImages, pcFiles}
   result = OpenAIProvider(name: name, capabilities:
                    if useResponses: capabilities + {pcHostedTools}
@@ -50,6 +55,7 @@ proc initOpenAIProvider(name, displayName, apiKey, endpoint: string,
                  endpoint: endpoint, timeoutSeconds: timeoutSeconds,
                  siteUrl: siteUrl, siteName: siteName,
                  includeSessionId: includeSessionId, applyCache: applyCache,
+                 promptCacheKey: promptCacheKey,
                  maxTokensField: maxTokensField, useResponses: useResponses)
   result.embeddingsEndpoint = if embeddingsEndpoint.len > 0: embeddingsEndpoint
     elif endpoint.endsWith("/responses"): endpoint[0 ..< endpoint.len - "/responses".len] & "/embeddings"
@@ -79,6 +85,12 @@ proc hyper*(apiKey: string, endpoint = "",
   let url = if endpoint.len > 0: endpoint else: defaultHyperEndpoint
   initOpenAIProvider("hyper", "Hyper", apiKey, url, timeoutSeconds,
     maxTokensField = "max_tokens")
+
+proc mistral*(apiKey: string, endpoint = "",
+              timeoutSeconds = 300): MistralProvider =
+  let url = if endpoint.len > 0: endpoint else: defaultMistralEndpoint
+  initOpenAIProvider("mistral", "Mistral", apiKey, url, timeoutSeconds,
+    maxTokensField = "max_tokens", promptCacheKey = true)
 
 proc label(provider: OpenAIProvider): string =
   if provider.displayName.len > 0: provider.displayName else: provider.name
@@ -110,10 +122,14 @@ proc requestBody(provider: OpenAIProvider, request: ProviderRequest,
                  stream: bool): JsonNode =
   if provider.useResponses:
     return buildResponsesBody(request, stream)
+  let cacheKey = if provider.promptCacheKey and request.sessionId.len > 0:
+                   "nimgent:" & request.sessionId
+                 else: ""
   buildChatBody(request, stream,
     includeSessionId = provider.includeSessionId,
     applyCache = provider.applyCache,
-    maxTokensField = provider.maxTokensField)
+    maxTokensField = provider.maxTokensField,
+    promptCacheKey = cacheKey)
 
 method nativeObjectOptions*(provider: OpenAIProvider, name, description: string,
                             schema: JsonNode): JsonNode =

@@ -124,7 +124,8 @@ proc encodeMessage(result: var JsonNode, message: Message) =
 
 proc buildChatBody*(request: ProviderRequest, stream: bool,
                     includeSessionId = false, applyCache = false,
-                    maxTokensField = "max_completion_tokens"): JsonNode =
+                    maxTokensField = "max_completion_tokens",
+                    promptCacheKey = ""): JsonNode =
   validateToolChoice(request.toolChoice, request.tools)
   for tool in request.tools:
     if tool.hosted.len > 0:
@@ -164,6 +165,8 @@ proc buildChatBody*(request: ProviderRequest, stream: bool,
     if result["tools"].len == 0:
       delete(result, "tools")
   mergeRequestOptions(result, request.options)
+  if promptCacheKey.len > 0 and "prompt_cache_key" notin result:
+    result["prompt_cache_key"] = %promptCacheKey
   case request.toolChoice.kind
   of tckAuto:
     discard
@@ -262,7 +265,7 @@ proc parseChatOutput*(data: JsonNode, failPrefix: string): ProviderResponse =
     result.content.add think
   if "content" in message and message["content"].kind == JString:
     result.content.add text(message["content"].getStr)
-  if "tool_calls" in message:
+  if "tool_calls" in message and message["tool_calls"].kind == JArray:
     for call in message["tool_calls"]:
       let function = call["function"]
       result.content.add toolUseFromArgs(call["id"].getStr,
@@ -301,7 +304,7 @@ proc handleChatEvent*(acc: var StreamAcc, response: var ProviderResponse,
     acc.think.add reason
     if not onEvent(StreamEvent(kind: seThinkingDelta, text: reason)):
       return sseCancel
-  if "tool_calls" in delta:
+  if "tool_calls" in delta and delta["tool_calls"].kind == JArray:
     for tc in delta["tool_calls"]:
       let idx = tc.getOrDefault("index").getInt
       while acc.tools.len <= idx:

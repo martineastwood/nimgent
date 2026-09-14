@@ -58,7 +58,7 @@ echo "finish: ", response.finishReason
 ## Providers
 
 ```nim
-import nimgent/providers/[anthropic, google, hyper, openai, openrouter]
+import nimgent/providers/[anthropic, google, hyper, mistral, openai, openrouter]
 
 let openaiProvider = openAI(getEnv("OPENAI_API_KEY"))
 # /v1/responses; pass a */chat/completions URL for compat servers
@@ -70,6 +70,9 @@ let googleProvider = google(getEnv("AI_STUDIO_API_KEY"))
 # Native Gemini API, including Google Search, URL Context, and embeddings
 
 let anthropicProvider = anthropic(getEnv("ANTHROPIC_API_KEY"))
+
+let mistralProvider = mistral(getEnv("MISTRAL_API_KEY"))
+# Mistral's OpenAI-compatible Chat Completions API; tools and streaming work.
 ```
 
 Anthropic supports native streaming with tool arguments, thinking signatures,
@@ -106,7 +109,8 @@ sequences remain explicit. Model-specific supported values are checked by the AP
 
 The initial types cover OpenAI reasoning effort, parallel tool calls, storage,
 user identifiers and embedding dimensions; Anthropic thinking mode, budget and
-effort; OpenRouter routing; and Google Gemini reasoning effort.
+effort; OpenRouter routing; and Google Gemini reasoning effort. Mistral-specific
+fields can be passed through `ProviderOptions.extra`.
 `dimensions` is for embedding calls only.
 For manual Anthropic thinking, use `thinking: some(EnabledThinking)` with
 `budgetTokens: some(2048)` (at least 1024); adaptive/disabled thinking omit budgets.
@@ -533,7 +537,7 @@ application concerns.
 `generateObject` asks the model for JSON that matches a schema and validates
 it. Truncated JSON is rejected by default; pass `truncation = otRepair` to
 accept locally closed JSON (`fixJson`). OpenAI (Responses and Chat
-Completions), OpenRouter, Hyper, and Anthropic get native structured-output
+Completions), OpenRouter, Hyper, Mistral, and Anthropic get native structured-output
 knobs automatically when the schema fits the provider's strict dialect;
 `omAuto` otherwise falls back to prompt + extract (including ``` fences).
 `omNative` reports incompatible schemas locally instead of sending a request.

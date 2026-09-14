@@ -3,13 +3,14 @@ import std/[asyncdispatch, atomics, json, options, os, osproc, sets, streams,
 import nimgent
 import nimgent/[agent, session]
 import nimgent/mcp
-import nimgent/providers/[anthropic, openrouter]
+import nimgent/providers/[anthropic, mistral, openrouter]
 import nimgent/testing
 import nimgent/providers/stream
 from nimgent/providers/openai import openAI, hyper,
   buildResponsesBody, buildChatBody, parseResponsesOutput,
   defaultOpenAiEndpoint, defaultOpenAiChatEndpoint, defaultHyperEndpoint,
   chatObjectOptions
+from nimgent/providers/openai_chat import parseChatOutput
 
 suite "MCP client":
   test "pins the current stateless protocol revision":
@@ -143,6 +144,7 @@ suite "thinking options":
     check thinkingOptions("openrouter", "high")["reasoning"]["effort"].getStr == "high"
     check thinkingOptions("openai", "low")["reasoning"]["effort"].getStr == "low"
     check thinkingOptions("hyper", "high")["reasoning"]["effort"].getStr == "high"
+    check thinkingOptions("mistral", "high")["reasoning_effort"].getStr == "high"
     check thinkingOptions("anthropic", "medium")["thinking"]["budget_tokens"].getInt == 8000
     check thinkingOptions("openai", "none").len == 0
     check thinkingOptions("openrouter", "high", twToggle)["reasoning"]["enabled"].getBool
@@ -170,6 +172,18 @@ suite "provider types":
     check apiErrorMessage(
       """[{"error":{"code":403,"message":"Gemini API disabled","status":"PERMISSION_DENIED"}}]""") ==
       "Gemini API disabled"
+
+  test "usage labels compact large token counts":
+    let usage = Usage(inputTokens: 123_456, outputTokens: 2_500,
+      cacheReadTokens: 1_500_000, cacheWriteTokens: 1_000,
+      cacheReported: true)
+    let labels = formatUsageLabels(usage)
+    check "↑123k" in labels
+    check "↓2.5k" in labels
+    check "R1.5M" in labels
+    check "W1k" in labels
+    check "↑999" in formatUsageLabels(Usage(inputTokens: 999, outputTokens: 1))
+    check "↑10" in formatUsageLabels(Usage(inputTokens: 10, outputTokens: 4))
 
   test "cache hit percent does not double-count inclusive prompt tokens":
     let openrouter = Usage(inputTokens: 10000, outputTokens: 1,
@@ -803,6 +817,38 @@ suite "Hyper provider":
       check response.usage.inputTokens == 10
       check response.usage.outputTokens == 1
       check not response.usage.cacheReported
+
+suite "Mistral provider":
+  test "defaults to Mistral Chat Completions":
+    let provider = mistral("k")
+    check provider.name == "mistral"
+    check provider.displayName == "Mistral"
+    check provider.endpoint == defaultMistralEndpoint
+    check not provider.useResponses
+    check provider.maxTokensField == "max_tokens"
+    check provider.promptCacheKey
+
+  test "chat body uses Mistral's max_tokens field":
+    let body = mistral.buildBody(ProviderRequest(model: "mistral-vibe-cli-with-tools",
+      sessionId: "session-1", messages: @[userMessage("hi")], maxTokens: 32), stream = false)
+    check body["max_tokens"].getInt == 32
+    check "max_completion_tokens" notin body
+    check body["prompt_cache_key"].getStr == "nimgent:session-1"
+
+  test "explicit prompt cache key wins":
+    let body = mistral.buildBody(ProviderRequest(model: "mistral-vibe-cli-with-tools",
+      sessionId: "session-1", messages: @[userMessage("hi")],
+      options: %*{"prompt_cache_key": "custom-key"}), stream = false)
+    check body["prompt_cache_key"].getStr == "custom-key"
+
+  test "accepts null tool_calls on a text response":
+    let response = parseChatOutput(parseJson("""
+      {"model":"mistral-vibe-cli-with-tools","choices":[
+        {"message":{"content":"ok","tool_calls":null},"finish_reason":"stop"}
+      ]}
+    """), "Mistral")
+    check response.text == "ok"
+    check response.finishReason == frStop
 
 suite "OpenAI provider":
   test "native body uses Responses fields and omits Chat Completions extras":
