@@ -1,4 +1,4 @@
-import std/[asyncdispatch, atomics, json, options, os, osproc, sets, streams,
+import std/[asyncdispatch, json, options, os, osproc, sets, streams,
   sequtils, strutils, tables, times, unittest]
 import nimgent
 import nimgent/[agent, session]
@@ -752,20 +752,21 @@ suite "generateText retries, abort, and tools":
 
   test "parallel execute overlaps":
     let p = ScriptProvider(toolFirst: true, twoTools: true)
-    var firstStarted, secondStarted, overlap: Atomic[bool]
-    proc slow(_: ToolContext, input: JsonNode): ToolResult {.gcsafe.} =
+    var firstStarted, secondStarted, overlap: bool
+    proc slow(_: ToolContext, input: JsonNode): Future[ToolResult] {.async.} =
       if input["x"].getInt == 1:
-        firstStarted.store(true)
-        if secondStarted.load: overlap.store(true)
+        firstStarted = true
+        if secondStarted: overlap = true
       else:
-        secondStarted.store(true)
-        if firstStarted.load: overlap.store(true)
-      sleep(120)
-      ToolResult(output: "pong")
-    let echoTool = rawTool("echo", "echo", %*{"type": "object"}, slow, parallel = true)
+        secondStarted = true
+        if firstStarted: overlap = true
+      await sleepAsync(120)
+      return ToolResult(output: "pong")
+    let echoTool = rawAsyncTool("echo", "echo", %*{"type": "object"}, slow,
+      parallel = true)
     let r = generateText(p.model("m"), prompt = "hi",
       tools = @[echoTool], maxSteps = 2, maxRetries = 0)
-    check overlap.load
+    check overlap
     check r.text == "ok"
     check p.calls == 2
     var results: seq[string]

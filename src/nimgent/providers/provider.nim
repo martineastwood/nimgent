@@ -227,9 +227,7 @@ type
                     input: JsonNode): ToolResult {.closure.}
     executeAsync*: proc (context: ToolContext,
                          input: JsonNode): Future[ToolResult] {.closure.}
-    ## Overlap execute when every runnable tool in the batch sets this and the
-    ## program is compiled with `--threads:on`. execute must be safe to run
-    ## concurrently (no shared mutation). nimlet never sets it.
+    ## Overlap executeAsync when every runnable tool in the batch sets this.
     parallel*: bool
     hosted*: string
     hostedOptions*: JsonNode

@@ -21,8 +21,6 @@ export vector_store
 import std/[asyncdispatch, asyncstreams, json, jsonutils, options, os,
   random, strutils, times]
 export fromJsonHook
-when compileOption("threads"):
-  import std/typedthreads
 
 type RunCallbacks* = object
   ## Optional observers for work owned by the high-level generation loop.
@@ -460,104 +458,16 @@ proc execOneTracedAsync(tools: seq[Tool], call: ContentBlock,
     finishSpan(state, span, failure.status, error = failure.message)
     raise
 
-proc batchOverlaps(tools: openArray[Tool], calls: openArray[ContentBlock]): bool =
-  ## True when at least two calls will run execute and every one of those is parallel.
-  var n = 0
-  for call in calls:
-    if invalidToolArguments(call): continue
-    let i = findTool(tools, call.name)
-    if i < 0 or tools[i].execute.isNil: continue
-    if not tools[i].parallel: return false
-    inc n
-  n >= 2
-
 proc asyncBatchOverlaps(tools: openArray[Tool],
                         calls: openArray[ContentBlock]): bool =
   var n = 0
   for call in calls:
     if invalidToolArguments(call): continue
     let i = findTool(tools, call.name)
-    if i < 0 or (tools[i].execute.isNil and tools[i].executeAsync.isNil): continue
+    if i < 0 or tools[i].executeAsync.isNil: continue
     if not tools[i].parallel: return false
     inc n
   n >= 2
-
-when compileOption("threads"):
-  type
-    ParallelJob = object
-      execute: proc (context: ToolContext,
-                    input: JsonNode): ToolResult {.closure.}
-      context: ToolContext
-      input: JsonNode
-      call: ContentBlock
-      output: ContentBlock
-
-  proc parallelWorker(job: ptr ParallelJob) {.thread.} =
-    # ponytail: execute stays a closure so sequential tools can capture.
-    # parallel=true is the user's concurrency promise; the type cannot say gcsafe.
-    try:
-      let fn = cast[proc (context: ToolContext,
-                          input: JsonNode): ToolResult {.closure, gcsafe.}](job.execute)
-      job.output = toolResultBlock(job.call, fn(job.context, job.input))
-    except CatchableError as e:
-      job.output = toolResultBlock(job.call, exceptionToolResult(e))
-
-when compileOption("threads"):
-  proc execToolsParallel(tools: openArray[Tool],
-                         calls: openArray[ContentBlock], abort: AbortCheck,
-                         request: ProviderRequest, step: int,
-                         trace: TraceState = nil,
-                         parent: TraceSpan = nil): seq[ContentBlock] =
-    result.setLen(calls.len)
-    var spans: seq[TraceSpan]
-    if not trace.isNil:
-      spans.setLen(calls.len)
-      for i, call in calls:
-        spans[i] = startToolSpan(trace, parent, call)
-    var jobs = newSeq[ParallelJob](calls.len)
-    var runnable: seq[int]
-    for i, call in calls:
-      if invalidToolArguments(call):
-        result[i] = toolResultBlock(call, invalidToolResult(call))
-        continue
-      let t = findTool(tools, call.name)
-      if t < 0 or tools[t].execute.isNil:
-        result[i] = toolResultBlock(call, invalidToolResult(call))
-        continue
-      let inputFailure = toolInputFailure(call, tools[t])
-      if inputFailure.isError:
-        result[i] = toolResultBlock(call, inputFailure)
-        continue
-      jobs[i].execute = tools[t].execute
-      jobs[i].context = toolContext(call, request, step, abort)
-      jobs[i].input = if call.input.isNil: nil else: copy(call.input)
-      jobs[i].call = call
-      runnable.add i
-    var threads = newSeq[Thread[ptr ParallelJob]](runnable.len)
-    for j, i in runnable:
-      createThread(threads[j], parallelWorker, addr jobs[i])
-    for th in threads.mitems:
-      joinThread(th)
-    for i in runnable:
-      result[i] = jobs[i].output
-    if not trace.isNil:
-      for i, call in calls:
-        finishToolSpan(trace, spans[i], call, result[i])
-
-proc execTools(tools: openArray[Tool], calls: openArray[ContentBlock],
-               abort: AbortCheck, request: ProviderRequest,
-               step: int, trace: TraceState = nil,
-               parent: TraceSpan = nil): seq[ContentBlock] =
-  when compileOption("threads"):
-    if batchOverlaps(tools, calls):
-      checkAbort(abort)
-      return execToolsParallel(tools, calls, abort, request, step, trace, parent)
-  for call in calls:
-    checkAbort(abort)
-    let span = startToolSpan(trace, parent, call)
-    let output = execOne(tools, call, toolContext(call, request, step, abort))
-    result.add output
-    finishToolSpan(trace, span, call, output)
 
 proc emitAgentEvent(callback: AgentEventCallback, event: AgentEvent): bool =
   if callback.isNil: return true
@@ -625,18 +535,6 @@ proc execToolsAsync(tools: seq[Tool], calls: seq[ContentBlock],
         finishSpan(trace, span, failure.status, error = failure.message)
         raise
     return
-  when compileOption("threads"):
-    if batchOverlaps(tools, calls):
-      checkAbort(abort)
-      let started = epochTime()
-      if not callbacks.onToolStart.isNil:
-        for call in calls: callbacks.onToolStart(step, call)
-      result = execTools(tools, calls, abort, request, step, trace, parent)
-      let durationMs = int((epochTime() - started) * 1000)
-      if not callbacks.onToolFinish.isNil:
-        for i, call in calls:
-          callbacks.onToolFinish(step, call, result[i], durationMs)
-      return
   if asyncBatchOverlaps(tools, calls):
     checkAbort(abort)
     let started = epochTime()
