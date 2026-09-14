@@ -6,6 +6,9 @@ export provider
 import nimgent/providers/provider_options
 export provider_options
 
+import nimgent/tracing
+export tracing
+
 import nimgent/mcp
 export mcp
 
@@ -29,6 +32,7 @@ type RunCallbacks* = object
                        durationMs: int) {.closure.}
   onStepFinish*: proc (step: int, result: StepResult) {.closure.}
   onFinish*: proc (response: ProviderResponse) {.closure.}
+  trace*: TraceSink
 
 type
   AgentEventStream* = ref object
@@ -64,48 +68,139 @@ proc checkAbort(abort: AbortCheck)
 proc retryDelayMs*(attempt: int, retryAfterMs = 0): int
 proc sleepAbort(ms: int, abort: AbortCheck): Future[void]
 
+type TraceState = ref object
+  sink: TraceSink
+  traceId: string
+  nextSpanId: int
+
+proc traceNowNs(): int64 =
+  int64(epochTime() * 1_000_000_000)
+
+proc newTraceState(sink: TraceSink, traceId: string): TraceState =
+  if sink.isNil: return
+  TraceState(sink: sink, traceId: traceId, nextSpanId: 0)
+
+proc startSpan(state: TraceState, parent: TraceSpan, name: string,
+               kind: SpanKind, attributes: JsonNode = nil): TraceSpan =
+  if state.isNil: return
+  inc state.nextSpanId
+  result = TraceSpan(traceId: state.traceId, spanId: "span:" & $state.nextSpanId,
+    parentSpanId: if parent.isNil: "" else: parent.spanId,
+    name: name, kind: kind, startNs: traceNowNs(), status: ssOk,
+    attributes: if attributes.isNil: newJObject() else: attributes)
+
+proc finishSpan(state: TraceState, span: TraceSpan, status: SpanStatus,
+                attributes: JsonNode = nil, error = "") =
+  if state.isNil or span.isNil or span.endNs != 0: return
+  span.endNs = traceNowNs()
+  span.status = status
+  span.error = error
+  if not attributes.isNil and attributes.kind == JObject:
+    if span.attributes.isNil or span.attributes.kind != JObject:
+      span.attributes = newJObject()
+    for key, value in attributes:
+      span.attributes[key] = value
+  try:
+    state.sink(span)
+  except CatchableError:
+    discard
+
+proc finishError(e: ref CatchableError): tuple[status: SpanStatus, message: string] =
+  result.status = if e of CancelledError or
+      (e of ProviderError and cast[ref ProviderError](e).aborted):
+        ssCancelled else: ssError
+  result.message = e.msg
+
 proc embedManyAsync*(model: EmbeddingModel, values: seq[string],
                      options: JsonNode = nil, maxRetries = 2,
                      abort: AbortCheck = nil,
-                     providerOptions = ProviderOptions()): Future[EmbedManyResult] {.async.} =
+                     providerOptions = ProviderOptions(),
+                     trace: TraceSink = nil): Future[EmbedManyResult] {.async.} =
   ## Embed strings in one provider batch, preserving input order.
   if values.len == 0: raiseProviderError("values must not be empty")
   if maxRetries < 0: raiseProviderError("maxRetries must be at least 0")
   let resolved = resolveOptions(options, providerOptions, model.provider.name)
+  let traceState = newTraceState(trace,
+    if trace.isNil: "" else: "embedding:" & $traceNowNs())
+  var operationSpan: TraceSpan
+  if not traceState.isNil:
+    operationSpan = startSpan(traceState, nil, "nimgent.embedding", skEmbedding,
+      %*{"provider": model.provider.name, "model": model.id,
+        "value_count": values.len})
   var attempt = 0
-  while true:
-    checkAbort(abort)
-    try:
-      let response = await model.provider.embedAsync(EmbeddingRequest(
-        model: model.id, values: values, options: resolved))
-      if response.embeddings.len != values.len:
-        raiseProviderError("provider returned " & $response.embeddings.len &
-          " embeddings for " & $values.len & " values")
-      return EmbedManyResult(values: values, embeddings: response.embeddings,
-        usage: response.usage)
-    except ProviderError as e:
-      if not e.retryable or attempt >= maxRetries: raise
-      await sleepAbort(retryDelayMs(attempt, e.retryAfterMs), abort)
-      inc attempt
+  try:
+    while true:
+      checkAbort(abort)
+      var attemptSpan: TraceSpan
+      if not traceState.isNil:
+        attemptSpan = startSpan(traceState, operationSpan,
+          "nimgent.embedding.attempt", skEmbedding, %*{"attempt": attempt})
+      try:
+        let response = await model.provider.embedAsync(EmbeddingRequest(
+          model: model.id, values: values, options: resolved))
+        if response.embeddings.len != values.len:
+          raiseProviderError("provider returned " & $response.embeddings.len &
+            " embeddings for " & $values.len & " values")
+        if not traceState.isNil:
+          finishSpan(traceState, attemptSpan, ssOk, %*{
+            "input_tokens": response.usage.tokens,
+            "request_id": response.requestId})
+          finishSpan(traceState, operationSpan, ssOk, %*{
+            "input_tokens": response.usage.tokens,
+            "request_id": response.requestId, "attempts": attempt + 1})
+        return EmbedManyResult(values: values, embeddings: response.embeddings,
+          usage: response.usage)
+      except ProviderError as e:
+        let retry = e.retryable and attempt < maxRetries
+        let delayMs = if retry: retryDelayMs(attempt, e.retryAfterMs) else: 0
+        if not traceState.isNil:
+          finishSpan(traceState, attemptSpan,
+            if e of CancelledError: ssCancelled else: ssError,
+            %*{"http_status": e.status, "retryable": e.retryable,
+              "will_retry": retry, "retry_delay_ms": delayMs,
+              "request_id": e.requestId}, e.msg)
+          if not retry:
+            finishSpan(traceState, operationSpan,
+              if e of CancelledError: ssCancelled else: ssError,
+              %*{"attempts": attempt + 1}, e.msg)
+        if not retry: raise
+        await sleepAbort(delayMs, abort)
+        inc attempt
+      except CatchableError as e:
+        if not traceState.isNil:
+          finishSpan(traceState, attemptSpan, ssError, error = e.msg)
+          finishSpan(traceState, operationSpan, ssError,
+            %*{"attempts": attempt + 1}, e.msg)
+        raise
+  except CatchableError as e:
+    finishSpan(traceState, operationSpan, finishError(e).status,
+      error = e.msg)
+    raise
 
 proc embedMany*(model: EmbeddingModel, values: seq[string],
                 options: JsonNode = nil, maxRetries = 2,
                 abort: AbortCheck = nil,
-                providerOptions = ProviderOptions()): EmbedManyResult =
-  waitFor embedManyAsync(model, values, options, maxRetries, abort, providerOptions)
+                providerOptions = ProviderOptions(),
+                trace: TraceSink = nil): EmbedManyResult =
+  waitFor embedManyAsync(model, values, options, maxRetries, abort, providerOptions,
+    trace)
 
 proc embedAsync*(model: EmbeddingModel, value: string,
                  options: JsonNode = nil, maxRetries = 2,
                  abort: AbortCheck = nil,
-                 providerOptions = ProviderOptions()): Future[EmbedResult] {.async.} =
-  let response = await embedManyAsync(model, @[value], options, maxRetries, abort, providerOptions)
+                 providerOptions = ProviderOptions(),
+                 trace: TraceSink = nil): Future[EmbedResult] {.async.} =
+  let response = await embedManyAsync(model, @[value], options, maxRetries, abort,
+    providerOptions, trace)
   return EmbedResult(value: value, embedding: response.embeddings[0],
     usage: response.usage)
 
 proc embed*(model: EmbeddingModel, value: string, options: JsonNode = nil,
             maxRetries = 2, abort: AbortCheck = nil,
-            providerOptions = ProviderOptions()): EmbedResult =
-  waitFor embedAsync(model, value, options, maxRetries, abort, providerOptions)
+            providerOptions = ProviderOptions(),
+            trace: TraceSink = nil): EmbedResult =
+  waitFor embedAsync(model, value, options, maxRetries, abort, providerOptions,
+    trace)
 
 proc buildRequest(
   model: string,
@@ -337,6 +432,34 @@ proc execOneAsync(tools: seq[Tool], call: ContentBlock,
   except CatchableError as e:
     return toolResultBlock(call, exceptionToolResult(e))
 
+proc startToolSpan(state: TraceState, parent: TraceSpan,
+                   call: ContentBlock): TraceSpan =
+  if state.isNil: return
+  startSpan(state, parent, "nimgent.tool", skTool,
+    %*{"tool_name": call.name, "tool_call_id": call.id})
+
+proc finishToolSpan(state: TraceState, span: TraceSpan,
+                    call, output: ContentBlock) =
+  if state.isNil: return
+  var attributes = %*{"tool_name": call.name, "tool_call_id": call.id,
+    "is_error": output.isError}
+  if output.errorCode.len > 0:
+    attributes["error_code"] = %output.errorCode
+  finishSpan(state, span, if output.isError: ssError else: ssOk, attributes,
+    if output.isError: output.errorMessage else: "")
+
+proc execOneTracedAsync(tools: seq[Tool], call: ContentBlock,
+                        context: ToolContext, state: TraceState,
+                        parent: TraceSpan): Future[ContentBlock] {.async.} =
+  let span = startToolSpan(state, parent, call)
+  try:
+    result = await execOneAsync(tools, call, context)
+    finishToolSpan(state, span, call, result)
+  except CatchableError as e:
+    let failure = finishError(e)
+    finishSpan(state, span, failure.status, error = failure.message)
+    raise
+
 proc batchOverlaps(tools: openArray[Tool], calls: openArray[ContentBlock]): bool =
   ## True when at least two calls will run execute and every one of those is parallel.
   var n = 0
@@ -379,10 +502,18 @@ when compileOption("threads"):
     except CatchableError as e:
       job.output = toolResultBlock(job.call, exceptionToolResult(e))
 
+when compileOption("threads"):
   proc execToolsParallel(tools: openArray[Tool],
                          calls: openArray[ContentBlock], abort: AbortCheck,
-                         request: ProviderRequest, step: int): seq[ContentBlock] =
+                         request: ProviderRequest, step: int,
+                         trace: TraceState = nil,
+                         parent: TraceSpan = nil): seq[ContentBlock] =
     result.setLen(calls.len)
+    var spans: seq[TraceSpan]
+    if not trace.isNil:
+      spans.setLen(calls.len)
+      for i, call in calls:
+        spans[i] = startToolSpan(trace, parent, call)
     var jobs = newSeq[ParallelJob](calls.len)
     var runnable: seq[int]
     for i, call in calls:
@@ -409,17 +540,24 @@ when compileOption("threads"):
       joinThread(th)
     for i in runnable:
       result[i] = jobs[i].output
+    if not trace.isNil:
+      for i, call in calls:
+        finishToolSpan(trace, spans[i], call, result[i])
 
 proc execTools(tools: openArray[Tool], calls: openArray[ContentBlock],
                abort: AbortCheck, request: ProviderRequest,
-               step: int): seq[ContentBlock] =
+               step: int, trace: TraceState = nil,
+               parent: TraceSpan = nil): seq[ContentBlock] =
   when compileOption("threads"):
     if batchOverlaps(tools, calls):
       checkAbort(abort)
-      return execToolsParallel(tools, calls, abort, request, step)
+      return execToolsParallel(tools, calls, abort, request, step, trace, parent)
   for call in calls:
     checkAbort(abort)
-    result.add execOne(tools, call, toolContext(call, request, step, abort))
+    let span = startToolSpan(trace, parent, call)
+    let output = execOne(tools, call, toolContext(call, request, step, abort))
+    result.add output
+    finishToolSpan(trace, span, call, output)
 
 proc emitAgentEvent(callback: AgentEventCallback, event: AgentEvent): bool =
   if callback.isNil: return true
@@ -430,7 +568,9 @@ proc execToolsAsync(tools: seq[Tool], calls: seq[ContentBlock],
                     callbacks: RunCallbacks,
                     agentEvents: AgentEventCallback = nil,
                     runId = "",
-                    approvalPolicy: ToolApprovalPolicy = nil): Future[seq[ContentBlock]] {.async.} =
+                    approvalPolicy: ToolApprovalPolicy = nil,
+                    trace: TraceState = nil,
+                    parent: TraceSpan = nil): Future[seq[ContentBlock]] {.async.} =
   if not agentEvents.isNil or not approvalPolicy.isNil:
     ## The normalized event path performs approval before execution and emits
     ## one result per call. Keep this path sequential so an approval can pause
@@ -438,45 +578,52 @@ proc execToolsAsync(tools: seq[Tool], calls: seq[ContentBlock],
     for call in calls:
       checkAbort(abort)
       let toolIndex = findTool(tools, call.name)
+      let span = startToolSpan(trace, parent, call)
       var output: ContentBlock
       var started = epochTime()
       var allowed = true
-      if not approvalPolicy.isNil and toolIndex >= 0:
-        let approval = approvalPolicy(step, call, tools[toolIndex])
-        if approval.mode == tamDeny:
-          allowed = false
-          output = toolResultBlock(call, toolFailure("approval_denied",
-            if approval.reason.len > 0: approval.reason else:
-              "Tool execution was denied: " & call.name))
-        elif approval.mode == tamAsk:
-          if agentEvents.isNil:
-            raiseProviderError("tool approval requires an AgentEvent consumer")
-          let reason = if approval.reason.len > 0: approval.reason else:
-            "Tool execution requires approval: " & call.name
-          let approvalRequest = newToolApprovalRequest(call, reason)
-          if not emitAgentEvent(agentEvents, AgentEvent(
-              kind: aeToolApprovalRequired, runId: runId,
-              sessionId: request.sessionId, turnId: request.turnId,
-              step: step, approval: approvalRequest)):
-            raiseCancelledError()
-          let decision = await approvalRequest.waitDecision()
-          if decision == tadDeny:
+      try:
+        if not approvalPolicy.isNil and toolIndex >= 0:
+          let approval = approvalPolicy(step, call, tools[toolIndex])
+          if approval.mode == tamDeny:
             allowed = false
-            output = toolResultBlock(call, toolFailure("approval_denied", reason))
-      if allowed:
-        if not callbacks.onToolStart.isNil: callbacks.onToolStart(step, call)
-        started = epochTime()
-        output = await execOneAsync(tools, call,
-          toolContext(call, request, step, abort))
-        if not callbacks.onToolFinish.isNil:
-          callbacks.onToolFinish(step, call, output,
-            int((epochTime() - started) * 1000))
-      result.add output
-      if not emitAgentEvent(agentEvents, AgentEvent(kind: aeToolResult,
-          runId: runId, sessionId: request.sessionId, turnId: request.turnId,
-          step: step, toolResult: output,
-          durationMs: int((epochTime() - started) * 1000))):
-        raiseCancelledError()
+            output = toolResultBlock(call, toolFailure("approval_denied",
+              if approval.reason.len > 0: approval.reason else:
+                "Tool execution was denied: " & call.name))
+          elif approval.mode == tamAsk:
+            if agentEvents.isNil:
+              raiseProviderError("tool approval requires an AgentEvent consumer")
+            let reason = if approval.reason.len > 0: approval.reason else:
+              "Tool execution requires approval: " & call.name
+            let approvalRequest = newToolApprovalRequest(call, reason)
+            if not emitAgentEvent(agentEvents, AgentEvent(
+                kind: aeToolApprovalRequired, runId: runId,
+                sessionId: request.sessionId, turnId: request.turnId,
+                step: step, approval: approvalRequest)):
+              raiseCancelledError()
+            let decision = await approvalRequest.waitDecision()
+            if decision == tadDeny:
+              allowed = false
+              output = toolResultBlock(call, toolFailure("approval_denied", reason))
+        if allowed:
+          if not callbacks.onToolStart.isNil: callbacks.onToolStart(step, call)
+          started = epochTime()
+          output = await execOneAsync(tools, call,
+            toolContext(call, request, step, abort))
+          if not callbacks.onToolFinish.isNil:
+            callbacks.onToolFinish(step, call, output,
+              int((epochTime() - started) * 1000))
+        finishToolSpan(trace, span, call, output)
+        result.add output
+        if not emitAgentEvent(agentEvents, AgentEvent(kind: aeToolResult,
+            runId: runId, sessionId: request.sessionId, turnId: request.turnId,
+            step: step, toolResult: output,
+            durationMs: int((epochTime() - started) * 1000))):
+          raiseCancelledError()
+      except CatchableError as e:
+        let failure = finishError(e)
+        finishSpan(trace, span, failure.status, error = failure.message)
+        raise
     return
   when compileOption("threads"):
     if batchOverlaps(tools, calls):
@@ -484,7 +631,7 @@ proc execToolsAsync(tools: seq[Tool], calls: seq[ContentBlock],
       let started = epochTime()
       if not callbacks.onToolStart.isNil:
         for call in calls: callbacks.onToolStart(step, call)
-      result = execTools(tools, calls, abort, request, step)
+      result = execTools(tools, calls, abort, request, step, trace, parent)
       let durationMs = int((epochTime() - started) * 1000)
       if not callbacks.onToolFinish.isNil:
         for i, call in calls:
@@ -496,7 +643,8 @@ proc execToolsAsync(tools: seq[Tool], calls: seq[ContentBlock],
     var pending: seq[Future[ContentBlock]]
     for call in calls:
       if not callbacks.onToolStart.isNil: callbacks.onToolStart(step, call)
-      pending.add execOneAsync(tools, call, toolContext(call, request, step, abort))
+      pending.add execOneTracedAsync(tools, call,
+        toolContext(call, request, step, abort), trace, parent)
     for i, future in pending:
       let output = await future
       result.add output
@@ -508,8 +656,8 @@ proc execToolsAsync(tools: seq[Tool], calls: seq[ContentBlock],
     checkAbort(abort)
     if not callbacks.onToolStart.isNil: callbacks.onToolStart(step, call)
     let started = epochTime()
-    let output = await execOneAsync(tools, call,
-      toolContext(call, request, step, abort))
+    let output = await execOneTracedAsync(tools, call,
+      toolContext(call, request, step, abort), trace, parent)
     result.add output
     if not callbacks.onToolFinish.isNil:
       callbacks.onToolFinish(step, call, output,
@@ -518,27 +666,56 @@ proc execToolsAsync(tools: seq[Tool], calls: seq[ContentBlock],
 proc retryingCall(provider: Provider, request: ProviderRequest,
                   maxRetries: int, abort: AbortCheck,
                   onEvent: StreamCallback,
-                  callbacks: RunCallbacks): Future[ProviderResponse] {.async.} =
+                  callbacks: RunCallbacks,
+                  trace: TraceState = nil,
+                  parent: TraceSpan = nil): Future[ProviderResponse] {.async.} =
   for attempt in 0 .. maxRetries:
     checkAbort(abort)
     var started = false
+    var span: TraceSpan
+    if not trace.isNil:
+      span = startSpan(trace, parent, "nimgent.model", skModel, %*{
+        "provider": provider.name, "model": request.model,
+        "attempt": attempt, "stream": not onEvent.isNil})
     try:
       if onEvent.isNil:
-        return await provider.generateAsync(request)
-      return await provider.generateStreamAsync(request, proc (ev: StreamEvent): bool =
-        if ev.kind in {seTextDelta, seThinkingDelta, seToolCallDelta}:
-          started = true
-        if ev.kind == seFinished:
-          return true
-        onEvent(ev))
+        result = await provider.generateAsync(request)
+      else:
+        result = await provider.generateStreamAsync(request, proc (ev: StreamEvent): bool =
+          if ev.kind in {seTextDelta, seThinkingDelta, seToolCallDelta}:
+            started = true
+          if ev.kind == seFinished:
+            return true
+          onEvent(ev))
+      if not trace.isNil:
+        finishSpan(trace, span, ssOk, %*{
+          "input_tokens": result.usage.inputTokens,
+          "output_tokens": result.usage.outputTokens,
+          "cache_read_tokens": result.usage.cacheReadTokens,
+          "cache_write_tokens": result.usage.cacheWriteTokens,
+          "finish_reason": $result.finishReason,
+          "tool_calls": result.toolCalls.len,
+          "request_id": result.requestId})
+      return result
     except ProviderError as e:
-      if started or e.aborted or e.overflow or not e.retryable or
-          attempt == maxRetries:
+      let retry = not started and not e.aborted and not e.overflow and
+        e.retryable and attempt < maxRetries
+      let delayMs = if retry: retryDelayMs(attempt, e.retryAfterMs) else: 0
+      if not trace.isNil:
+        finishSpan(trace, span,
+          if e of CancelledError: ssCancelled else: ssError,
+          %*{"http_status": e.status, "retryable": e.retryable,
+            "will_retry": retry, "retry_delay_ms": delayMs,
+            "request_id": e.requestId}, e.msg)
+      if not retry:
         raise
-      let delayMs = retryDelayMs(attempt, e.retryAfterMs)
       if not callbacks.onRetry.isNil:
         callbacks.onRetry(attempt + 1, delayMs, e)
       await sleepAbort(delayMs, abort)
+    except CatchableError as e:
+      if not trace.isNil:
+        finishSpan(trace, span, ssError, error = e.msg)
+      raise
 
 proc runLoop(provider: Provider, request: ProviderRequest,
              tools: seq[Tool], maxRetries, maxSteps: int,
@@ -556,6 +733,16 @@ proc runLoop(provider: Provider, request: ProviderRequest,
   let runId = if request.turnId.len > 0: request.turnId else:
     "run:" & $epochTime()
   var currentStep = -1
+  let traceState = newTraceState(callbacks.trace,
+    if callbacks.trace.isNil: "" else: "trace:" & runId & ":" & $traceNowNs())
+  var runSpan: TraceSpan
+  var stepSpan: TraceSpan
+  if not traceState.isNil:
+    runSpan = startSpan(traceState, nil, "nimgent.run", skRun, %*{
+      "provider": provider.name, "model": request.model,
+      "run_id": runId,
+      "session_id": request.sessionId, "turn_id": request.turnId,
+      "stream": not onEvent.isNil, "max_steps": maxSteps})
   try:
     if not emitAgentEvent(agentEvents, AgentEvent(kind: aeRunStart,
         runId: runId, sessionId: request.sessionId, turnId: request.turnId,
@@ -589,12 +776,15 @@ proc runLoop(provider: Provider, request: ProviderRequest,
         true
     for step in 0 ..< maxSteps:
       currentStep = step
+      if not traceState.isNil:
+        stepSpan = startSpan(traceState, runSpan, "nimgent.step", skStep, %*{
+          "step": step, "model": request.model})
       if not emitAgentEvent(agentEvents, AgentEvent(kind: aeStepStart,
           runId: runId, sessionId: request.sessionId, turnId: request.turnId,
           step: step, stepModel: request.model)):
         raiseCancelledError()
       result = await retryingCall(provider, request, maxRetries, abort, cb,
-        callbacks)
+        callbacks, traceState, stepSpan)
       if cancelled:
         raiseCancelledError()
       let calls = result.toolCalls
@@ -615,7 +805,8 @@ proc runLoop(provider: Provider, request: ProviderRequest,
           stepResult.finishReason = frStepLimit
       else:
         stepResult.toolResults = await execToolsAsync(tools, calls, abort, step,
-          request, callbacks, agentEvents, runId, approvalPolicy)
+          request, callbacks, agentEvents, runId, approvalPolicy,
+          traceState, stepSpan)
       completedSteps.add stepResult
       if not callbacks.onStepFinish.isNil:
         callbacks.onStepFinish(step, stepResult)
@@ -623,6 +814,13 @@ proc runLoop(provider: Provider, request: ProviderRequest,
           runId: runId, sessionId: request.sessionId, turnId: request.turnId,
           step: step, stepResult: stepResult)):
         raiseCancelledError()
+      if not traceState.isNil:
+        finishSpan(traceState, stepSpan, ssOk, %*{
+          "tool_calls": calls.len, "tool_results": stepResult.toolResults.len,
+          "input_tokens": stepResult.usage.inputTokens,
+          "output_tokens": stepResult.usage.outputTokens,
+          "finish_reason": $stepResult.finishReason})
+        stepSpan = nil
       if finished: break
       request.messages.add Message(role: roleAssistant, content: result.content)
       request.messages.add userMessage(stepResult.toolResults)
@@ -635,7 +833,19 @@ proc runLoop(provider: Provider, request: ProviderRequest,
         runId: runId, sessionId: request.sessionId, turnId: request.turnId,
         step: currentStep, response: result)):
       raiseCancelledError()
+    if not traceState.isNil:
+      finishSpan(traceState, runSpan, ssOk, %*{
+        "steps": completedSteps.len,
+        "input_tokens": totalUsage.inputTokens,
+        "output_tokens": totalUsage.outputTokens,
+        "cache_read_tokens": totalUsage.cacheReadTokens,
+        "cache_write_tokens": totalUsage.cacheWriteTokens,
+        "finish_reason": $result.finishReason,
+        "request_id": result.requestId})
   except CatchableError as e:
+    let failure = finishError(e)
+    finishSpan(traceState, stepSpan, failure.status, error = failure.message)
+    finishSpan(traceState, runSpan, failure.status, error = failure.message)
     if not emitAgentEvent(agentEvents, AgentEvent(kind: aeError,
         runId: runId, sessionId: request.sessionId, turnId: request.turnId,
         step: currentStep, error: e)):
@@ -1230,7 +1440,8 @@ proc emitPartial(acc: string, last: var JsonNode, onPartial: PartialObjectCallba
 
 proc finishObjectAsync(session: ObjectSession, first: ProviderResponse,
                        maxRepairs: int,
-                       abort: AbortCheck): Future[ObjectResult[JsonNode]] {.async.} =
+                       abort: AbortCheck,
+                       trace: TraceSink = nil): Future[ObjectResult[JsonNode]] {.async.} =
   var session = session
   result.response = first
   result.source = session.source
@@ -1250,7 +1461,7 @@ proc finishObjectAsync(session: ObjectSession, first: ProviderResponse,
       else:
         session.req.messages.add userMessage(instruction)
       result.response = await generateTextAsync(session.provider, session.req,
-        session.maxRetries, abort)
+        session.maxRetries, abort, RunCallbacks(trace: trace))
     result.usage.addUsage(result.response.usage)
     result.repairs = repair
     result.attempts = repair + 1
@@ -1281,7 +1492,8 @@ proc generateObjectAsync(
   maxRepairs = 0,
   mode = omAuto,
   abort: AbortCheck = nil,
-  truncation = otReject
+  truncation = otReject,
+  trace: TraceSink = nil
 ): Future[ObjectResult[JsonNode]] {.async.} =
   ## Schema in, JSON out. Uses native structured output when the provider
   ## has it (`omAuto`), extracts JSON from text or a tool call, validates.
@@ -1293,8 +1505,8 @@ proc generateObjectAsync(
     buildRequest(model, prompt, messages, system, @[], maxTokens, sessionId, options),
     schema, name, description, mode, maxRetries, maxRepairs, truncation)
   let first = await generateTextAsync(session.provider, session.req,
-    session.maxRetries, abort)
-  return await finishObjectAsync(session, first, maxRepairs, abort)
+    session.maxRetries, abort, RunCallbacks(trace: trace))
+  return await finishObjectAsync(session, first, maxRepairs, abort, trace)
 
 proc generateObjectAsync*(
   model: LanguageModel,
@@ -1312,14 +1524,15 @@ proc generateObjectAsync*(
   mode = omAuto,
   abort: AbortCheck = nil,
   providerOptions = ProviderOptions(),
-  truncation = otReject
+  truncation = otReject,
+  trace: TraceSink = nil
 ): Future[ObjectResult[JsonNode]] {.async.} =
   let resolved = resolveOptions(options, providerOptions, model.provider.name)
   return await generateObjectAsync(model.provider, model.id, schema,
     prompt = prompt, messages = messages, system = system, name = name,
     description = description, maxTokens = maxTokens, sessionId = sessionId,
     options = resolved, maxRetries = maxRetries, maxRepairs = maxRepairs,
-    mode = mode, abort = abort, truncation = truncation)
+    mode = mode, abort = abort, truncation = truncation, trace = trace)
 
 proc generateObject*(model: LanguageModel, schema: JsonNode, prompt = "",
                      messages: seq[Message] = @[], system = "",
@@ -1328,13 +1541,14 @@ proc generateObject*(model: LanguageModel, schema: JsonNode, prompt = "",
                      maxRepairs = 0, mode = omAuto,
                      abort: AbortCheck = nil,
                      providerOptions = ProviderOptions(),
-                     truncation = otReject): ObjectResult[JsonNode] =
+                     truncation = otReject,
+                     trace: TraceSink = nil): ObjectResult[JsonNode] =
   waitFor generateObjectAsync(model, schema, prompt = prompt,
     messages = messages, system = system, name = name,
     description = description, maxTokens = maxTokens, sessionId = sessionId,
     options = options, maxRetries = maxRetries, maxRepairs = maxRepairs,
     mode = mode, abort = abort, providerOptions = providerOptions,
-    truncation = truncation)
+    truncation = truncation, trace = trace)
 
 proc streamObjectAsync(
   provider: Provider,
@@ -1355,7 +1569,8 @@ proc streamObjectAsync(
   abort: AbortCheck = nil,
   onPartial: PartialObjectCallback = nil,
   onEvent: StreamCallback = nil,
-  truncation = otReject
+  truncation = otReject,
+  trace: TraceSink = nil
 ): Future[ObjectResult[JsonNode]] {.async.} =
   ## Like `generateObject`, but the first attempt streams. `onPartial` gets
   ## the repaired JSON tree whenever it changes (not schema-valid). Schema
@@ -1399,10 +1614,11 @@ proc streamObjectAsync(
         cancelled = true
         return false
       true,
-    maxRetries = session.maxRetries, abort = abort)
+    maxRetries = session.maxRetries, abort = abort,
+    callbacks = RunCallbacks(trace: trace))
   if cancelled:
     raiseCancelledError()
-  return await finishObjectAsync(session, first, maxRepairs, abort)
+  return await finishObjectAsync(session, first, maxRepairs, abort, trace)
 
 proc streamObjectAsync*(
   model: LanguageModel,
@@ -1423,7 +1639,8 @@ proc streamObjectAsync*(
   onPartial: PartialObjectCallback = nil,
   onEvent: StreamCallback = nil,
   providerOptions = ProviderOptions(),
-  truncation = otReject
+  truncation = otReject,
+  trace: TraceSink = nil
 ): Future[ObjectResult[JsonNode]] {.async.} =
   let resolved = resolveOptions(options, providerOptions, model.provider.name)
   return await streamObjectAsync(model.provider, model.id, schema,
@@ -1431,7 +1648,8 @@ proc streamObjectAsync*(
     description = description, maxTokens = maxTokens, sessionId = sessionId,
     options = resolved, wakeFd = wakeFd, maxRetries = maxRetries,
     maxRepairs = maxRepairs, mode = mode, abort = abort,
-    onPartial = onPartial, onEvent = onEvent, truncation = truncation)
+    onPartial = onPartial, onEvent = onEvent, truncation = truncation,
+    trace = trace)
 
 proc streamObject*(model: LanguageModel, schema: JsonNode, prompt = "",
                    messages: seq[Message] = @[], system = "",
@@ -1442,14 +1660,15 @@ proc streamObject*(model: LanguageModel, schema: JsonNode, prompt = "",
                    onPartial: PartialObjectCallback = nil,
                    onEvent: StreamCallback = nil,
                    providerOptions = ProviderOptions(),
-                   truncation = otReject): ObjectResult[JsonNode] =
+                   truncation = otReject,
+                   trace: TraceSink = nil): ObjectResult[JsonNode] =
   waitFor streamObjectAsync(model, schema, prompt = prompt,
     messages = messages, system = system, name = name,
     description = description, maxTokens = maxTokens, sessionId = sessionId,
     options = options, wakeFd = wakeFd, maxRetries = maxRetries,
     maxRepairs = maxRepairs, mode = mode, abort = abort,
     onPartial = onPartial, onEvent = onEvent,
-    providerOptions = providerOptions, truncation = truncation)
+    providerOptions = providerOptions, truncation = truncation, trace = trace)
 
 proc toObject*[T](r: ObjectResult[JsonNode]): ObjectResult[T] =
   ## Decode `r.value` as `T`. Validation already ran against the schema.
@@ -1482,7 +1701,8 @@ proc generateObjectAsync*[T](
   mode = omAuto,
   abort: AbortCheck = nil,
   providerOptions = ProviderOptions(),
-  truncation = otReject
+  truncation = otReject,
+  trace: TraceSink = nil
 ): Future[ObjectResult[T]] {.async.} =
   ## `generateObject` with `jsonSchema(T)`, then `toObject`.
   when T is JsonNode:
@@ -1493,7 +1713,7 @@ proc generateObjectAsync*[T](
     description = description, maxTokens = maxTokens, sessionId = sessionId,
     options = options, maxRetries = maxRetries, maxRepairs = maxRepairs,
     mode = mode, abort = abort, providerOptions = providerOptions,
-    truncation = truncation))
+    truncation = truncation, trace = trace))
 
 proc generateObject*[T](model: LanguageModel, prompt = "",
                         messages: seq[Message] = @[], system = "", name = "",
@@ -1502,12 +1722,14 @@ proc generateObject*[T](model: LanguageModel, prompt = "",
                         maxRepairs = 0, mode = omAuto,
                         abort: AbortCheck = nil,
                         providerOptions = ProviderOptions(),
-                        truncation = otReject): ObjectResult[T] =
+                        truncation = otReject,
+                        trace: TraceSink = nil): ObjectResult[T] =
   waitFor generateObjectAsync[T](model, prompt = prompt, messages = messages,
     system = system, name = name, description = description,
     maxTokens = maxTokens, sessionId = sessionId, options = options,
     maxRetries = maxRetries, maxRepairs = maxRepairs, mode = mode,
-    abort = abort, providerOptions = providerOptions, truncation = truncation)
+    abort = abort, providerOptions = providerOptions, truncation = truncation,
+    trace = trace)
 
 proc streamObjectAsync*[T](
   model: LanguageModel,
@@ -1527,7 +1749,8 @@ proc streamObjectAsync*[T](
   onPartial: PartialObjectCallback = nil,
   onEvent: StreamCallback = nil,
   providerOptions = ProviderOptions(),
-  truncation = otReject
+  truncation = otReject,
+  trace: TraceSink = nil
 ): Future[ObjectResult[T]] {.async.} =
   when T is JsonNode:
     {.error: "use streamObject(..., schema=) for JsonNode; not streamObject[JsonNode]".}
@@ -1538,7 +1761,7 @@ proc streamObjectAsync*[T](
     options = options, wakeFd = wakeFd, maxRetries = maxRetries,
     maxRepairs = maxRepairs, mode = mode, abort = abort,
     onPartial = onPartial, onEvent = onEvent,
-    providerOptions = providerOptions, truncation = truncation))
+    providerOptions = providerOptions, truncation = truncation, trace = trace))
 
 proc streamObject*[T](model: LanguageModel, prompt = "",
                       messages: seq[Message] = @[], system = "", name = "",
@@ -1549,10 +1772,11 @@ proc streamObject*[T](model: LanguageModel, prompt = "",
                       onPartial: PartialObjectCallback = nil,
                       onEvent: StreamCallback = nil,
                       providerOptions = ProviderOptions(),
-                      truncation = otReject): ObjectResult[T] =
+                      truncation = otReject,
+                      trace: TraceSink = nil): ObjectResult[T] =
   waitFor streamObjectAsync[T](model, prompt = prompt, messages = messages,
     system = system, name = name, description = description,
     maxTokens = maxTokens, sessionId = sessionId, options = options,
     wakeFd = wakeFd, maxRetries = maxRetries, maxRepairs = maxRepairs,
     mode = mode, abort = abort, onPartial = onPartial, onEvent = onEvent,
-    providerOptions = providerOptions, truncation = truncation)
+    providerOptions = providerOptions, truncation = truncation, trace = trace)

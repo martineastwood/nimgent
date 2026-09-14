@@ -486,6 +486,24 @@ Approval is opt-in. An `approvalPolicy` returns `tamAllow`, `tamAsk`, or
 `approve()` or `deny()`. A denial is sent back to the model as a structured
 `approval_denied` tool result.
 
+## Tracing
+
+Pass a `TraceSink` through `RunCallbacks` to receive completed, nested spans
+for runs, model steps, provider attempts, and local tools. Tracing is optional,
+dependency-free, and does not record prompts, tool arguments, or model output:
+
+```nim
+var spans: seq[TraceSpan]
+let response = generateText(model, prompt = "Hello",
+  callbacks = RunCallbacks(trace = proc (span: TraceSpan) = spans.add span))
+```
+
+Retries are separate model spans, and each span includes timing, status,
+provider/model identity, request IDs, finish reasons, and token usage. Pass the
+same sink to `embed` or `embedMany` with their `trace` parameter for embedding
+spans. `generateObject` and `streamObject` accept it too; repair turns appear
+as additional model spans.
+
 ## Agent sessions
 
 Use `nimgent/session` when an agent needs to remember previous turns:

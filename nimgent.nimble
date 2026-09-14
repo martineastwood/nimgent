@@ -11,3 +11,4 @@ task test, "Run the test suite":
   exec "nim c -r --hints:off --threads:on --mm:atomicArc tests/all_tests.nim"
   exec "nim c -r --hints:off --threads:on --mm:atomicArc tests/google_tests.nim"
   exec "nim c -r --hints:off --threads:on --mm:atomicArc tests/stream_cancel_tests.nim"
+  exec "nim c -r --hints:off --threads:on --mm:atomicArc tests/tracing_tests.nim"
