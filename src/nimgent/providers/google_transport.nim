@@ -246,12 +246,14 @@ proc requestNative(p: GoogleProvider, request: ProviderRequest,
   if p.apiKey.len == 0: raiseProviderError("GOOGLE API key is not configured")
   let streaming = not onEvent.isNil
   var payload = $buildGoogleBody(request)
-  let client = newAsyncHttpClient(sslContext = newContext(verifyMode = CVerifyPeer),
+  let sslContext = newContext(verifyMode = CVerifyPeer)
+  let client = newAsyncHttpClient(sslContext = sslContext,
     headers = p.makeHeaders())
   client.timeout = p.timeoutSeconds * 1000
   var watch = WakeWatch()
   defer:
     client.close()
+    destroyContext(sslContext)
     watch.unregister()
   var model = request.model
   model.removePrefix("models/")
@@ -312,10 +314,13 @@ method embedAsync*(p: GoogleProvider,
     if not request.options.isNil:
       mergeRequestOptions(item, copy(request.options))
     requests.add item
-  let client = newAsyncHttpClient(sslContext = newContext(verifyMode = CVerifyPeer),
+  let sslContext = newContext(verifyMode = CVerifyPeer)
+  let client = newAsyncHttpClient(sslContext = sslContext,
     headers = p.makeHeaders())
   client.timeout = p.timeoutSeconds * 1000
-  defer: client.close()
+  defer:
+    client.close()
+    destroyContext(sslContext)
   let url = p.endpoint & "/" & modelPath & ":batchEmbedContents"
   try:
     let response = await client.request(url, HttpPost, $(%*{"requests": requests}))

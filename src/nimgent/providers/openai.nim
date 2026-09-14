@@ -260,11 +260,14 @@ method generateAsync*(provider: OpenAIProvider,
                       request: ProviderRequest): Future[ProviderResponse] {.async.} =
   provider.ensureApiKey()
   let body = provider.requestBody(request, stream = false)
+  let sslContext = newContext(verifyMode = CVerifyPeer)
   let client = newAsyncHttpClient(
-    sslContext = newContext(verifyMode = CVerifyPeer),
+    sslContext = sslContext,
     headers = provider.makeHeaders(request.sessionId))
   client.timeout = provider.timeoutSeconds * 1000
-  defer: client.close()
+  defer:
+    client.close()
+    destroyContext(sslContext)
   var response: AsyncResponse
   try:
     response = await client.request(provider.endpointFor(request.model),
@@ -295,11 +298,14 @@ method embedAsync*(provider: OpenAIProvider,
   body["model"] = %request.model
   body["input"] = %request.values
   body["encoding_format"] = %"float"
+  let sslContext = newContext(verifyMode = CVerifyPeer)
   let client = newAsyncHttpClient(
-    sslContext = newContext(verifyMode = CVerifyPeer),
+    sslContext = sslContext,
     headers = provider.makeHeaders())
   client.timeout = provider.timeoutSeconds * 1000
-  defer: client.close()
+  defer:
+    client.close()
+    destroyContext(sslContext)
   var response: AsyncResponse
   try:
     response = await client.request(provider.embeddingsEndpoint, HttpPost, $body)
@@ -346,13 +352,15 @@ method generateStreamAsync*(provider: OpenAIProvider,
   # AsyncHttpClient starts parseBody without awaiting, so bodyStream.read()
   # yields chunks as they arrive.
   provider.ensureApiKey()
+  let sslContext = newContext(verifyMode = CVerifyPeer)
   let client = newAsyncHttpClient(
-    sslContext = newContext(verifyMode = CVerifyPeer),
+    sslContext = sslContext,
     headers = provider.makeHeaders(request.sessionId))
   client.timeout = provider.timeoutSeconds * 1000
   var watch = WakeWatch()
   defer:
     client.close()
+    destroyContext(sslContext)
     watch.unregister()
   var payload = $provider.requestBody(request, stream = true)
   var response: AsyncResponse

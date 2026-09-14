@@ -258,10 +258,12 @@ method generateAsync*(provider: AnthropicProvider,
 
   let body = buildAnthropicBody(request)
 
-  let client = newAsyncHttpClient(
-    sslContext = newContext(verifyMode = CVerifyPeer))
+  let sslContext = newContext(verifyMode = CVerifyPeer)
+  let client = newAsyncHttpClient(sslContext = sslContext)
   client.timeout = provider.timeoutSeconds * 1000
-  defer: client.close()
+  defer:
+    client.close()
+    destroyContext(sslContext)
   let headers = provider.makeHeaders(request.sessionId)
 
   var response: AsyncResponse
@@ -354,13 +356,15 @@ method generateStreamAsync*(provider: AnthropicProvider,
                             onEvent: StreamCallback): Future[ProviderResponse] {.async.} =
   if provider.apiKey.len == 0:
     raiseProviderError("ANTHROPIC API key is not configured")
+  let sslContext = newContext(verifyMode = CVerifyPeer)
   let client = newAsyncHttpClient(
-    sslContext = newContext(verifyMode = CVerifyPeer),
+    sslContext = sslContext,
     headers = provider.makeHeaders(request.sessionId))
   client.timeout = provider.timeoutSeconds * 1000
   var watch = WakeWatch()
   defer:
     client.close()
+    destroyContext(sslContext)
     watch.unregister()
   var payload = block:
     let body = buildAnthropicBody(request)
