@@ -326,6 +326,19 @@ method embedAsync*(provider: OpenAIProvider,
     raiseProviderError(provider.label & " returned invalid embedding JSON: " & e.msg)
   result.requestId = requestIdFromHeaders(response.headers)
 
+type StreamState = ref object
+  acc: StreamAcc
+  response: ProviderResponse
+
+proc streamHandler(provider: OpenAIProvider, responses: bool, state: StreamState,
+                   onEvent: StreamCallback): proc (data: JsonNode): SseAction =
+  if responses:
+    result = proc (data: JsonNode): SseAction =
+      handleResponsesEvent(state.acc, state.response, data, onEvent, provider.label)
+  else:
+    result = proc (data: JsonNode): SseAction =
+      handleChatEvent(state.acc, state.response, data, onEvent)
+
 method generateStreamAsync*(provider: OpenAIProvider,
                             request: ProviderRequest,
                             onEvent: StreamCallback): Future[ProviderResponse] {.async.} =
@@ -341,15 +354,16 @@ method generateStreamAsync*(provider: OpenAIProvider,
   defer:
     client.close()
     watch.unregister()
-  let body = provider.requestBody(request, stream = true)
+  var payload = $provider.requestBody(request, stream = true)
   var response: AsyncResponse
   try:
     let reqFut = client.request(provider.endpointFor(request.model), HttpPost,
-      $body)
+      payload)
     if not await awaitWithWakeAsync(reqFut, addr watch, request.wakeFd, onEvent):
       result.finishReason = frStop
       return
     response = await reqFut
+    payload.setLen(0)
   except CatchableError as e:
     raiseProviderError(provider.label & " stream failed: " & e.msg, retryable = true)
   if response.code.int >= 400:
@@ -357,30 +371,24 @@ method generateStreamAsync*(provider: OpenAIProvider,
       await drainBodyStreamAsync(response.bodyStream),
       response.headers)
 
-  var acc = initStreamAcc()
-  var resp = ProviderResponse()
+  let state = StreamState(acc: initStreamAcc())
   let requestId = requestIdFromHeaders(response.headers)
-  let handle =
-    if provider.usesResponsesFor(request.model):
-      proc (data: JsonNode): SseAction =
-        handleResponsesEvent(acc, resp, data, onEvent, provider.label)
-    else:
-      proc (data: JsonNode): SseAction =
-        handleChatEvent(acc, resp, data, onEvent)
+  let handle = provider.streamHandler(provider.usesResponsesFor(request.model),
+    state, onEvent)
   let drive = await forEachSseAsync(response.bodyStream, addr watch,
     request.wakeFd, onEvent, handle)
   if drive == sdCancelled:
-    assembleStream(acc, resp)
-    result = resp
+    assembleStream(state.acc, state.response)
+    result = state.response
     result.requestId = requestId
     if result.finishReason == frUnknown:
       result.finishReason = frStop
     return
-  if drive == sdClosed and resp.finishReason == frUnknown:
+  if drive == sdClosed and state.response.finishReason == frUnknown:
     raiseProviderError(provider.label &
       " stream failed: connection closed mid-response", retryable = true)
-  assembleStream(acc, resp)
-  result = resp
+  assembleStream(state.acc, state.response)
+  result = state.response
   result.requestId = requestId
   discard onEvent(StreamEvent(kind: seFinished))
 

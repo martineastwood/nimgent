@@ -236,11 +236,16 @@ proc handleGoogleEvent*(response: var ProviderResponse, data: JsonNode,
   # Metadata/usage can arrive after finishReason; consume through EOF.
   sseContinue
 
+proc googleStreamHandler(response: ref ProviderResponse,
+    onEvent: StreamCallback): proc (data: JsonNode): SseAction =
+  result = proc (data: JsonNode): SseAction =
+    handleGoogleEvent(response[], data, onEvent)
+
 proc requestNative(p: GoogleProvider, request: ProviderRequest,
                    onEvent: StreamCallback): Future[ProviderResponse] {.async.} =
   if p.apiKey.len == 0: raiseProviderError("GOOGLE API key is not configured")
   let streaming = not onEvent.isNil
-  let body = buildGoogleBody(request)
+  var payload = $buildGoogleBody(request)
   let client = newAsyncHttpClient(sslContext = newContext(verifyMode = CVerifyPeer),
     headers = p.makeHeaders())
   client.timeout = p.timeoutSeconds * 1000
@@ -253,11 +258,12 @@ proc requestNative(p: GoogleProvider, request: ProviderRequest,
   let url = p.endpoint & "/models/" & encodeUrl(model, usePlus = false) &
     (if streaming: ":streamGenerateContent?alt=sse" else: ":generateContent")
   try:
-    let pending = client.request(url, HttpPost, $body)
+    let pending = client.request(url, HttpPost, payload)
     if streaming and not await awaitWithWakeAsync(pending, addr watch, request.wakeFd, onEvent):
       result.finishReason = frStop
       return
     let response = await pending
+    payload.setLen(0)
     if response.code.int >= 400:
       let detail = apiErrorMessage(await drainBodyStreamAsync(response.bodyStream))
       raiseProviderError("Google API error (" & $response.code.int & "): " & detail,
@@ -270,17 +276,16 @@ proc requestNative(p: GoogleProvider, request: ProviderRequest,
       result.requestId = requestIdFromHeaders(response.headers)
       if result.finishReason == frUnknown: raiseProviderError("Google returned no completed candidate")
       return
-    var accumulated: ProviderResponse
+    let accumulated = new ProviderResponse
     let requestId = requestIdFromHeaders(response.headers)
     let drive = await forEachSseAsync(response.bodyStream, addr watch, request.wakeFd,
-      onEvent, proc (data: JsonNode): SseAction =
-        handleGoogleEvent(accumulated, data, onEvent))
+      onEvent, googleStreamHandler(accumulated, onEvent))
     if drive == sdCancelled:
       result.finishReason = frStop
       return
-    if accumulated.finishReason == frUnknown:
+    if accumulated[].finishReason == frUnknown:
       raiseProviderError("Google stream closed mid-response", retryable = true)
-    result = accumulated
+    result = accumulated[]
     result.requestId = requestId
     discard onEvent(StreamEvent(kind: seFinished))
   except ProviderError: raise

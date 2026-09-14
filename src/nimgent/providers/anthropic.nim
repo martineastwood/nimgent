@@ -340,6 +340,15 @@ proc handleAnthropicEvent*(message: var JsonNode, args: var seq[string],
   else: discard
   sseContinue
 
+type AnthropicStreamState = ref object
+  message: JsonNode
+  args: seq[string]
+
+proc anthropicStreamHandler(state: AnthropicStreamState,
+    onEvent: StreamCallback): proc (data: JsonNode): SseAction =
+  result = proc (data: JsonNode): SseAction =
+    handleAnthropicEvent(state.message, state.args, data, onEvent)
+
 method generateStreamAsync*(provider: AnthropicProvider,
                             request: ProviderRequest,
                             onEvent: StreamCallback): Future[ProviderResponse] {.async.} =
@@ -353,15 +362,18 @@ method generateStreamAsync*(provider: AnthropicProvider,
   defer:
     client.close()
     watch.unregister()
-  let body = buildAnthropicBody(request)
-  body["stream"] = %true
+  var payload = block:
+    let body = buildAnthropicBody(request)
+    body["stream"] = %true
+    $body
   var response: AsyncResponse
   try:
-    let pending = client.request(provider.endpoint, HttpPost, $body)
+    let pending = client.request(provider.endpoint, HttpPost, payload)
     if not await awaitWithWakeAsync(pending, addr watch, request.wakeFd, onEvent):
       result.finishReason = frStop
       return
     response = await pending
+    payload.setLen(0)
   except CatchableError as e:
     raiseProviderError("Anthropic stream failed: " & e.msg, retryable = true)
   if response.code.int >= 400:
@@ -371,13 +383,11 @@ method generateStreamAsync*(provider: AnthropicProvider,
       status = response.code.int,
       retryAfterMs = parseRetryAfter(response.headers.getOrDefault("Retry-After")),
       requestId = requestIdFromHeaders(response.headers))
-  var message = %*{"content": [], "usage": {}}
-  var args: seq[string]
+  let state = AnthropicStreamState(message: %*{"content": [], "usage": {}})
   var drive: SseDrive
   try:
     drive = await forEachSseAsync(response.bodyStream, addr watch,
-      request.wakeFd, onEvent, proc (data: JsonNode): SseAction =
-        handleAnthropicEvent(message, args, data, onEvent))
+      request.wakeFd, onEvent, anthropicStreamHandler(state, onEvent))
   except ProviderError:
     raise
   except CatchableError as e:
@@ -387,11 +397,11 @@ method generateStreamAsync*(provider: AnthropicProvider,
       retryable = true)
   if drive == sdCancelled:
     # A cancelled argument fragment is not an executable tool call.
-    let content = message["content"]
+    let content = state.message["content"]
     if content.len > 0 and content[content.len - 1]{"type"}.getStr in
         ["tool_use", "server_tool_use"]:
       content.elems.setLen(content.len - 1)
-  result = parseAnthropicOutput(message)
+  result = parseAnthropicOutput(state.message)
   result.requestId = requestIdFromHeaders(response.headers)
   if drive == sdCancelled:
     result.finishReason = frStop
