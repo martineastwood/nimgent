@@ -122,25 +122,25 @@ proc loadInMemoryVectorStore*(path: string): InMemoryVectorStore =
   if document.kind != JObject:
     raise invalidStoreFile("root must be an object")
   let version = document.getOrDefault("version")
-  if version.kind != JInt or version.getInt != vectorStoreSchemaVersion:
+  if version.isNil or version.kind != JInt or version.getInt != vectorStoreSchemaVersion:
     raise invalidStoreFile("unsupported version")
   let dimension = document.getOrDefault("dimension")
-  if dimension.kind != JInt or dimension.getInt < 0:
+  if dimension.isNil or dimension.kind != JInt or dimension.getInt < 0:
     raise invalidStoreFile("dimension must be a non-negative integer")
   let records = document.getOrDefault("records")
-  if records.kind != JArray:
+  if records.isNil or records.kind != JArray:
     raise invalidStoreFile("records must be an array")
 
   result = newInMemoryVectorStore()
   result.dimension = dimension.getInt
   for item in records:
-    if item.kind != JObject:
+    if item.isNil or item.kind != JObject:
       raise invalidStoreFile("record must be an object")
     let id = item.getOrDefault("id")
     let values = item.getOrDefault("embedding")
-    if id.kind != JString or id.getStr.len == 0:
+    if id.isNil or id.kind != JString or id.getStr.len == 0:
       raise invalidStoreFile("record ID must be a non-empty string")
-    if values.kind != JArray:
+    if values.isNil or values.kind != JArray:
       raise invalidStoreFile("record embedding must be an array")
     var embedding: seq[float]
     for value in values:

@@ -7,9 +7,9 @@ import std/[asyncdispatch, asyncfile, json, osproc, sequtils, strtabs,
   strutils, tables]
 when not defined(windows):
   import posix
-import nimwire
 import nimgent/providers/provider
-export nimwire
+
+const mcpProtocolVersion* = "2026-07-28"
 
 type
   McpClientError* = object of CatchableError
@@ -52,10 +52,6 @@ proc clientFailure(message: string, code = 0,
   error.data = data
   error
 
-proc requestKey(id: JsonNode): string =
-  if id.isNil: return "null"
-  $id
-
 proc optional(node: JsonNode, key: string): JsonNode =
   if not node.isNil and key in node: node[key] else: nil
 
@@ -75,7 +71,7 @@ proc readResponses(client: McpClient) {.async.} =
         break
       let message = parseJson(line)
       if "id" notin message: continue
-      let key = requestKey(message["id"])
+      let key = if message["id"].isNil: "null" else: $message["id"]
       if key in client.pending:
         let future = client.pending[key]
         client.pending.del(key)
@@ -86,7 +82,7 @@ proc readResponses(client: McpClient) {.async.} =
   if not client.closed and not failure.isNil:
     client.failPending(failure)
 
-proc requestParams(client: McpClient, params: JsonNode): JsonNode =
+proc requestParams(params: JsonNode): JsonNode =
   result = if params.isNil: newJObject() else: copy(params)
   if result.kind != JObject:
     raise clientFailure("MCP request params must be an object")
@@ -114,7 +110,7 @@ proc requestAsync*(client: McpClient, methodName: string,
   let key = $id
   client.pending[key] = future
   var request = %*{"jsonrpc": "2.0", "id": id, "method": methodName}
-  request["params"] = client.requestParams(params)
+  request["params"] = requestParams(params)
   try:
     await client.input.write($request & "\n")
   except CatchableError as error:

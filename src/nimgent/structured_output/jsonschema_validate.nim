@@ -255,8 +255,8 @@ proc validateOpenAiStrictSchema*(schema: JsonNode): seq[string] =
   if schema.isNil or schema.kind != JObject:
     return @["$: native structured output requires a root object schema"]
   var issues: seq[string]
-  if schema.getOrDefault("type").kind != JString or
-      schema.getOrDefault("type").getStr != "object":
+  let schemaType = schema.getOrDefault("type")
+  if schemaType.isNil or schemaType.kind != JString or schemaType.getStr != "object":
     issues.add "$: native structured output requires type object at the root"
 
   proc walk(n: JsonNode, path: string) =
@@ -273,10 +273,10 @@ proc validateOpenAiStrictSchema*(schema: JsonNode): seq[string] =
       if extra.isNil or extra.kind != JBool or extra.getBool:
         issues.add path & ".additionalProperties: native strict objects require false"
       let props = n.getOrDefault("properties")
-      if props.kind == JObject:
+      if not props.isNil and props.kind == JObject:
         var required: seq[string]
         let requiredNode = n.getOrDefault("required")
-        if requiredNode.kind == JArray:
+        if not requiredNode.isNil and requiredNode.kind == JArray:
           for item in requiredNode:
             if item.kind == JString: required.add item.getStr
         for key, _ in props:

@@ -1388,6 +1388,7 @@ suite "json schema":
     check validateJsonSchema(jsonSchema(OnlyOptionalRecipe)).len == 0
 
   test "preflights malformed and unsupported schemas":
+    check "type object" in validateOpenAiStrictSchema(%*{"properties": {}}).join(" ")
     let issues = validateJsonSchema(%*{
       "type": "object",
       "properties": {"name": {"minLength": "one"}},
