@@ -21,7 +21,7 @@ let chat = openAI(apiKey).model("gpt-4o-mini")
 let embeddings = openAI(apiKey).embeddingModel("text-embedding-3-small")
 ```
 
-For every exported type and procedure, see the [generated API reference](/reference/api/nimgent/).
+For every exported type and procedure, see the [generated API reference](/nimgent/reference/api/nimgent/).
 
 ## Generation
 
@@ -35,7 +35,7 @@ streamTextAsync(model, prompt = "Hello", onEvent = callback)
 The response exposes `text`, `content`, `usage`, `finishReason`, `requestId`,
 and `steps`. A multi-turn tool run aggregates usage in `totalUsage`.
 Pass portable generation controls through `generationOptions` and provider
-extensions through `providerOptions`; see [Providers](/guides/providers/).
+extensions through `providerOptions`; see [Providers](/nimgent/guides/providers/).
 
 ## Tracing
 
@@ -43,7 +43,7 @@ Set `RunCallbacks.trace` to a `TraceSink` to receive completed spans for runs,
 steps, provider attempts, and local tools. The core has no telemetry dependency
 and omits prompts, tool arguments, and model output by default. Embeddings accept
 the same sink through their `trace` parameter, as do structured-output calls.
-See [Tracing](/guides/tracing/) for the span names and attributes.
+See [Tracing](/nimgent/guides/tracing/) for the span names and attributes.
 
 ## Embeddings
 
@@ -55,7 +55,7 @@ let similarity = cosineSimilarity(many.embeddings[0], many.embeddings[1])
 
 `nimgent/vector_store` adds an in-memory store — `upsert`, `search`, `delete`,
 `save`, and `loadInMemoryVectorStore` — for local retrieval. See
-[Embeddings and retrieval](/guides/embeddings-and-retrieval/).
+[Embeddings and retrieval](/nimgent/guides/embeddings-and-retrieval/).
 
 ## Cancellation and retries
 
@@ -71,7 +71,7 @@ let response = await generateTextAsync(
 Transient HTTP and transport failures are retried by default. Configure the
 limit with `maxRetries`. Context overflow, ordinary client errors, and a
 started stream are not retried. See
-[Errors and retries](/guides/errors-and-retries/) for the `ProviderError`
+[Errors and retries](/nimgent/guides/errors-and-retries/) for the `ProviderError`
 fields and backoff rules.
 
 ## MCP clients
@@ -83,13 +83,13 @@ let client = await connectMcpStdioAsync(@["./my-mcp-server"])
 let remoteTools = await client.asToolsAsync(prefix = "fs_")
 ```
 
-See [MCP tools](/guides/mcp/).
+See [MCP tools](/nimgent/guides/mcp/).
 
 ## Composing providers
 
 `wrapProvider(inner, mapRequest, mapResponse)` intercepts every request and
 response; `routeProvider(default, route)` sends each model to the provider that
-serves it. See [Middleware and routing](/guides/middleware-and-routing/).
+serves it. See [Middleware and routing](/nimgent/guides/middleware-and-routing/).
 
 ## Testing
 
@@ -100,7 +100,7 @@ let model = scriptedModel(@[textResponse("hello")])
 ```
 
 `FakeProvider` records every request it received. See
-[Testing](/guides/testing/).
+[Testing](/nimgent/guides/testing/).
 
 ## Direct provider requests
 

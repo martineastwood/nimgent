@@ -15,7 +15,7 @@ nimble install nimgent
 export OPENAI_API_KEY=...
 ```
 
-This guide uses OpenAI. See [Providers](/guides/providers/) for the other
+This guide uses OpenAI. See [Providers](/nimgent/guides/providers/) for the other
 supported providers and their constructors.
 
 ## Send your first request
@@ -139,7 +139,7 @@ echo response.text
 ```
 
 The second request includes the earlier weather result, so the model can answer
-the follow-up without asking for the city again. See [Sessions](/guides/sessions/)
+the follow-up without asking for the city again. See [Sessions](/nimgent/guides/sessions/)
 to persist or inspect a conversation.
 
 ## Use nimgent asynchronously
@@ -182,8 +182,8 @@ echo response.text
 
 ## Where to go next
 
-- [Providers](/guides/providers/): choose a provider and configure its options.
-- [Streaming](/guides/streaming/): display text as it arrives.
-- [Tools and agents](/guides/tools-and-agents/): handle richer tools, failures, and approvals.
-- [Structured output](/guides/structured-output/): receive validated Nim values.
-- [Sessions](/guides/sessions/): keep a transcript across runs.
+- [Providers](/nimgent/guides/providers/): choose a provider and configure its options.
+- [Streaming](/nimgent/guides/streaming/): display text as it arrives.
+- [Tools and agents](/nimgent/guides/tools-and-agents/): handle richer tools, failures, and approvals.
+- [Structured output](/nimgent/guides/structured-output/): receive validated Nim values.
+- [Sessions](/nimgent/guides/sessions/): keep a transcript across runs.

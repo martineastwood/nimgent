@@ -49,7 +49,7 @@ Sessions also retain tool results. This is useful when a follow-up depends on a
 lookup you already performed. Create the session from an agent that has the
 tools it needs, then a question such as "What should I wear?" can use an
 earlier weather result without calling the weather tool again. See
-[Tools and agents](/guides/tools-and-agents/) for defining those tools.
+[Tools and agents](/nimgent/guides/tools-and-agents/) for defining those tools.
 
 ## Stream a conversation
 
@@ -124,6 +124,6 @@ conversation.reset()
 
 ## Next steps
 
-- [Tools and agents](/guides/tools-and-agents/) to give a session access to local tools.
-- [Streaming](/guides/streaming/) to show session responses as they arrive.
-- [Structured output](/guides/structured-output/) to receive validated Nim values.
+- [Tools and agents](/nimgent/guides/tools-and-agents/) to give a session access to local tools.
+- [Streaming](/nimgent/guides/streaming/) to show session responses as they arrive.
+- [Structured output](/nimgent/guides/structured-output/) to receive validated Nim values.

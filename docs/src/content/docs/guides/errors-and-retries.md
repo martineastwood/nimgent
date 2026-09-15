@@ -106,9 +106,9 @@ Cancellation is cooperative for local tools. If a tool does long-running work, c
 
 ## Other errors you may see
 
-`generateObject` raises `ObjectError`, a subtype of `ProviderError`, when it cannot produce a value that matches your schema. Its `issueDetails` and `raw` fields help you diagnose the output. See [Structured output](/guides/structured-output/) for the repair flow.
+`generateObject` raises `ObjectError`, a subtype of `ProviderError`, when it cannot produce a value that matches your schema. Its `issueDetails` and `raw` fields help you diagnose the output. See [Structured output](/nimgent/guides/structured-output/) for the repair flow.
 
-Tool failures are different: a failed local tool call becomes a result the model can read and respond to. It does not automatically fail the whole model run. See [Tools and agents](/guides/tools-and-agents/) for returning tool failures.
+Tool failures are different: a failed local tool call becomes a result the model can read and respond to. It does not automatically fail the whole model run. See [Tools and agents](/nimgent/guides/tools-and-agents/) for returning tool failures.
 
 ## Troubleshooting
 
@@ -119,4 +119,4 @@ Tool failures are different: a failed local tool call becomes a result the model
 
 ## Next steps
 
-See [Streaming](/guides/streaming/) for rendering partial output, or [Sessions](/guides/sessions/) for managing conversation history before it becomes too large.
+See [Streaming](/nimgent/guides/streaming/) for rendering partial output, or [Sessions](/nimgent/guides/sessions/) for managing conversation history before it becomes too large.

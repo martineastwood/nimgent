@@ -40,4 +40,4 @@ let response = generateText(model, prompt = "Summarize this.",
 
 ## Next steps
 
-See [Settings](/guides/providers/settings/) for portable controls, or [Middleware and routing](/guides/middleware-and-routing/) to route models in your own application.
+See [Settings](/nimgent/guides/providers/settings/) for portable controls, or [Middleware and routing](/nimgent/guides/middleware-and-routing/) to route models in your own application.

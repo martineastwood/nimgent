@@ -35,14 +35,14 @@ Each provider has its own setup page and API key environment variable.
 
 | Provider | Constructor | Setup |
 | --- | --- | --- |
-| OpenAI | `openAI(apiKey)` | [OpenAI](/guides/providers/openai/) |
-| Anthropic | `anthropic(apiKey)` | [Anthropic](/guides/providers/anthropic/) |
-| Google Gemini | `google(apiKey)` | [Google Gemini](/guides/providers/google/) |
-| OpenRouter | `openRouter(apiKey)` | [OpenRouter](/guides/providers/openrouter/) |
-| Hyper | `hyper(apiKey)` | [Hyper](/guides/providers/hyper/) |
-| Mistral | `mistral(apiKey)` | [Mistral](/guides/providers/mistral/) |
-| OpenCode and OpenCode Zen | `openCode(apiKey)` | [OpenCode](/guides/providers/opencode/) |
-| Another API | Your own `Provider` subtype | [Custom provider](/guides/providers/custom-provider/) |
+| OpenAI | `openAI(apiKey)` | [OpenAI](/nimgent/guides/providers/openai/) |
+| Anthropic | `anthropic(apiKey)` | [Anthropic](/nimgent/guides/providers/anthropic/) |
+| Google Gemini | `google(apiKey)` | [Google Gemini](/nimgent/guides/providers/google/) |
+| OpenRouter | `openRouter(apiKey)` | [OpenRouter](/nimgent/guides/providers/openrouter/) |
+| Hyper | `hyper(apiKey)` | [Hyper](/nimgent/guides/providers/hyper/) |
+| Mistral | `mistral(apiKey)` | [Mistral](/nimgent/guides/providers/mistral/) |
+| OpenCode and OpenCode Zen | `openCode(apiKey)` | [OpenCode](/nimgent/guides/providers/opencode/) |
+| Another API | Your own `Provider` subtype | [Custom provider](/nimgent/guides/providers/custom-provider/) |
 
 You can keep more than one model ready and choose one at runtime:
 
@@ -61,7 +61,7 @@ echo generateText(model, prompt = "Summarize this file.").text
 
 ## Configure a request
 
-Use [Settings](/guides/providers/settings/) for generation controls that travel with a model switch, such as temperature and stop sequences. It also explains provider-specific settings for features that only one provider offers.
+Use [Settings](/nimgent/guides/providers/settings/) for generation controls that travel with a model switch, such as temperature and stop sequences. It also explains provider-specific settings for features that only one provider offers.
 
 ## Troubleshooting
 
@@ -71,4 +71,4 @@ Use [Settings](/guides/providers/settings/) for generation controls that travel 
 
 ## Next steps
 
-Open a provider setup page above, then continue with [Streaming](/guides/streaming/) or [Tools and agents](/guides/tools-and-agents/).
+Open a provider setup page above, then continue with [Streaming](/nimgent/guides/streaming/) or [Tools and agents](/nimgent/guides/tools-and-agents/).

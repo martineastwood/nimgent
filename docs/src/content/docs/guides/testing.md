@@ -126,6 +126,6 @@ Deliberate omissions, so you know when to reach for a fixture server instead:
 - **No usage realism.** Pass `usage = Usage(inputTokens: …)` to `textResponse`
   when a test asserts on token totals; otherwise they are zero.
 
-Related: [Errors and retries](/guides/errors-and-retries/) for what to assert
-when things go wrong, and [Core API](/reference/core-api/) for the response
+Related: [Errors and retries](/nimgent/guides/errors-and-retries/) for what to assert
+when things go wrong, and [Core API](/nimgent/reference/core-api/) for the response
 types the fake produces.

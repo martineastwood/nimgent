@@ -33,4 +33,4 @@ Pass `settings` as `providerOptions` to `streamText` when you want streamed usag
 
 ## Next steps
 
-See [Settings](/guides/providers/settings/) for portable controls, or [Streaming](/guides/streaming/) to render Hyper output as it arrives.
+See [Settings](/nimgent/guides/providers/settings/) for portable controls, or [Streaming](/nimgent/guides/streaming/) to render Hyper output as it arrives.

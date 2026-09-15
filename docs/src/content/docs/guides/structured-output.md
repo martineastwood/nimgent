@@ -212,6 +212,6 @@ validated value. Return `false` from `onPartial` to cancel the stream.
 
 ## Next steps
 
-- [Streaming](/guides/streaming/) to show text and tool activity as it arrives.
-- [Tools and agents](/guides/tools-and-agents/) to use the same typed inputs for tools.
-- [Providers](/guides/providers/) to choose a provider and its options.
+- [Streaming](/nimgent/guides/streaming/) to show text and tool activity as it arrives.
+- [Tools and agents](/nimgent/guides/tools-and-agents/) to use the same typed inputs for tools.
+- [Providers](/nimgent/guides/providers/) to choose a provider and its options.

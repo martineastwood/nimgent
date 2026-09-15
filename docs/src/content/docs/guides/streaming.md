@@ -90,7 +90,7 @@ let response = streamText(
 
 `seThinkingDelta` is available when a provider returns visible reasoning.
 `seToolCallDelta` contains tool-call progress, so use it to update your UI
-rather than to run a tool yourself. See [Tools and agents](/guides/tools-and-agents/)
+rather than to run a tool yourself. See [Tools and agents](/nimgent/guides/tools-and-agents/)
 to define `weather` and other local tools.
 
 ## Stream asynchronously
@@ -142,7 +142,7 @@ let response = researcher.stream(
 
 `researcher` can be any `Agent` you created with `newAgent`. Use
 `researcher.events(...)` when your interface also needs approval requests, run
-boundaries, tool results, or errors. See [Tools and agents](/guides/tools-and-agents/)
+boundaries, tool results, or errors. See [Tools and agents](/nimgent/guides/tools-and-agents/)
 for that flow.
 
 ## Troubleshooting
@@ -157,7 +157,7 @@ for that flow.
 
 ## Next steps
 
-- [Tools and agents](/guides/tools-and-agents/) to stream tool-using runs.
-- [Structured output](/guides/structured-output/) to stream a validated object.
-- [Sessions](/guides/sessions/) to keep a conversation across runs.
-- [Providers](/guides/providers/) to choose and configure a provider.
+- [Tools and agents](/nimgent/guides/tools-and-agents/) to stream tool-using runs.
+- [Structured output](/nimgent/guides/structured-output/) to stream a validated object.
+- [Sessions](/nimgent/guides/sessions/) to keep a conversation across runs.
+- [Providers](/nimgent/guides/providers/) to choose and configure a provider.

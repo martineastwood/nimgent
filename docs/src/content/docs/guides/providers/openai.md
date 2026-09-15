@@ -46,4 +46,4 @@ Use `dimensions` with `embed` or `embedMany`. Changing dimensions means you need
 
 ## Next steps
 
-See [Settings](/guides/providers/settings/) for portable controls, or [Files and images](/guides/files-and-images/) to attach documents and images.
+See [Settings](/nimgent/guides/providers/settings/) for portable controls, or [Files and images](/nimgent/guides/files-and-images/) to attach documents and images.

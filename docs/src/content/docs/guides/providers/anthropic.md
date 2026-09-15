@@ -39,4 +39,4 @@ let response = generateText(
 
 ## Next steps
 
-See [Settings](/guides/providers/settings/) for portable controls, or [Structured output](/guides/structured-output/) for typed results.
+See [Settings](/nimgent/guides/providers/settings/) for portable controls, or [Structured output](/nimgent/guides/structured-output/) for typed results.

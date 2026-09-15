@@ -22,4 +22,4 @@ Mistral uses its OpenAI-compatible Chat Completions API. The standard nimgent ge
 
 ## Next steps
 
-See [Settings](/guides/providers/settings/) for portable controls, or [Tools and agents](/guides/tools-and-agents/) to let a model call Nim functions.
+See [Settings](/nimgent/guides/providers/settings/) for portable controls, or [Tools and agents](/nimgent/guides/tools-and-agents/) to let a model call Nim functions.
