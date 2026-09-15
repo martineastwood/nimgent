@@ -48,6 +48,10 @@ type
     id*: string
     ## Agent configuration used for each turn.
     agent*: Agent
+    ## Most recent messages sent to the model per turn; 0 sends the whole
+    ## transcript. Counted in messages, not turns: a turn with tool calls uses
+    ## several. The event log always keeps every turn.
+    historyLimit*: int
     ## Canonical append-only transcript.
     events*: seq[SessionEvent]
     turns*: int
@@ -139,11 +143,15 @@ proc appendEvent(session: Session, event: SessionEvent) =
 proc newSessionId(): string =
   $int(epochTime() * 1_000_000)
 
-proc newSession*(agent: Agent, messages: seq[Message] = @[], id = ""): Session =
+proc newSession*(agent: Agent, messages: seq[Message] = @[], id = "",
+                 historyLimit = 0): Session =
   ## Create an empty session, or continue from an existing transcript.
   if agent.isNil:
     raiseProviderError("session agent must not be nil")
-  result = Session(id: if id.len > 0: id else: newSessionId(), agent: agent)
+  if historyLimit < 0:
+    raiseProviderError("session historyLimit must be at least 0")
+  result = Session(id: if id.len > 0: id else: newSessionId(), agent: agent,
+    historyLimit: historyLimit)
   for message in messages:
     if message.role == roleUser:
       result.events.add SessionEvent(kind: sekUser, message: copyMessage(message))
@@ -175,8 +183,28 @@ proc messages*(session: Session): seq[Message] =
   ## Model-facing view of the transcript currently in the session.
   messages(session.events)
 
+proc isTurnStart(message: Message): bool =
+  ## A window may only start at a plain user message. One that carries tool
+  ## results would reach the model without the call that produced it.
+  if message.role != roleUser or message.content.len == 0:
+    return false
+  for part in message.content:
+    if part.kind == ckToolResult:
+      return false
+  true
+
+proc windowMessages(history: seq[Message], limit: int): seq[Message] =
+  ## Keep the most recent messages, widened to the turn they start in so tool
+  ## calls keep their results.
+  if limit <= 0 or history.len <= limit:
+    return history
+  var start = history.len - limit
+  while start > 0 and not history[start].isTurnStart:
+    dec start
+  history[start .. ^1]
+
 proc requestMessages(session: Session, prompt: string): seq[Message] =
-  result = messages(session.events)
+  result = windowMessages(messages(session.events), session.historyLimit)
   result.add userMessage(prompt)
 
 proc nextTurnId(session: Session): string =
@@ -564,6 +592,8 @@ proc sessionJson*(session: Session): JsonNode =
     raiseProviderError("session must not be nil")
   result = %*{"version": sessionSchemaVersion, "id": session.id,
     "events": newJArray()}
+  if session.historyLimit > 0:
+    result["history_limit"] = %session.historyLimit
   for event in session.events:
     result["events"].add eventJson(event)
 
@@ -582,7 +612,8 @@ proc sessionFromJson*(agent: Agent, node: JsonNode): Session =
     raise newException(ValueError, "unsupported session JSON version: " & $version)
   if "events" notin node or node["events"].kind != JArray:
     raise newException(ValueError, "session JSON must contain an events array")
-  result = Session(id: node.getOrDefault("id").getStr, agent: agent)
+  result = Session(id: node.getOrDefault("id").getStr, agent: agent,
+    historyLimit: node.getOrDefault("history_limit").getInt)
   if result.id.len == 0: result.id = newSessionId()
   for event in node["events"]:
     result.events.add parseEvent(event)
@@ -594,7 +625,8 @@ proc sessionFromJson*(agent: Agent, raw: string): Session =
   sessionFromJson(agent, parseJson(raw))
 
 proc reset*(session: Session) =
-  ## Clear the transcript, counters, and last response while retaining the agent.
+  ## Clear the transcript, counters, and last response while retaining the agent
+  ## configuration and history window.
   if session.isNil:
     raiseProviderError("session must not be nil")
   session.events = @[]

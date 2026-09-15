@@ -19,7 +19,10 @@ let researcher = newAgent(
   tools = @[weather],
   maxSteps = 5)
 
-let conversation = newSession(researcher, id = "weather-demo")
+# `historyLimit` counts messages, not turns, so a turn with tool calls uses
+# several. The transcript keeps every turn, so the session can still be saved
+# in full.
+let conversation = newSession(researcher, id = "weather-demo", historyLimit = 20)
 
 proc main() {.async.} =
   let first = await conversation.runAsync("What's the weather like in Paris?")

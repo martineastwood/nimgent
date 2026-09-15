@@ -92,13 +92,43 @@ The saved session contains the conversation and its state. It does not contain
 the agent configuration, API key, or tool handlers, so you always choose what
 can run when you restore it.
 
+## Keep only the recent messages
+
+`historyLimit` counts messages, not turns. One turn with tool calls is several
+messages: your prompt, the assistant tool call, the tool results, and the final
+answer. Set it when each turn should stop sending old messages to the model:
+
+```nim
+let conversation = newSession(assistant, historyLimit = 20)
+```
+
+Each turn then sends at most the 20 most recent messages. Twenty messages is
+roughly ten simple question and answer exchanges, and fewer once tools are
+involved.
+
+The window can be larger than the limit, never smaller. It never starts in the
+middle of a turn: if the cut lands on a tool result, nimgent widens the window to
+include the turn that produced the tool call, so calls stay with their results.
+
+The transcript still keeps every turn, `turns` and `totalUsage` still describe
+the whole conversation, and the window is saved and restored with the session.
+You can change it at any time, and `0` sends the whole transcript again:
+
+```nim
+conversation.historyLimit = 40
+```
+
+Use a window when older context is no longer useful. When the model should
+still remember something about older turns, summarize them instead.
+
 ## Compact a long conversation
 
 Every session run sends the completed history, so a long conversation keeps
-growing. nimgent does not decide when or how to compact: `messages` gives you
-the model-facing view of the transcript, and `replaceEvents` installs what the
-model should see next. This example summarizes older turns with a cheaper model
-and keeps the last few turns verbatim:
+growing. A window caps what the model sees; compaction changes the transcript
+itself, so a saved conversation stays small. nimgent does not decide when or how
+to compact: `messages` gives you the model-facing view of the transcript, and
+`replaceEvents` installs what the model should see next. This example summarizes
+older turns with a cheaper model and keeps the last few turns verbatim:
 
 ```nim
 let summarizer = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
@@ -147,10 +177,10 @@ conversation.reset()
 
 - **The model forgets earlier context:** use the same `Session` for each
   related request. Calling `agent.run(...)` directly starts a new request.
-- **The conversation grows too large:** each session run includes completed
-  history, so long conversations use more context. Use `messages` and
-  `replaceEvents` to keep a summary plus recent turns, or reset the session
-  when the old history is no longer useful.
+- **The conversation grows too large:** set `historyLimit` to cap how many
+  messages each turn sends (counted in messages, not turns), or summarize
+  older turns with `messages` and `replaceEvents` when the model needs to
+  remember them.
 - **Restoring fails:** restore with an agent and a session JSON document created
   by nimgent. The saved format has a version and rejects incompatible data.
 - **Two requests modify the same session at once:** serialize access to one

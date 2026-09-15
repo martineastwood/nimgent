@@ -2695,3 +2695,42 @@ suite "agent sessions":
     conversation.replaceEvents(incoming)
     incoming[0].message.content[0].input["x"] = %2
     check conversation.events[0].message.content[0].input["x"].getInt == 1
+
+  test "limits the model-facing history to a recent window":
+    let p = ScriptProvider()
+    let conversation = newSession(newAgent(p.model("m"), maxRetries = 0),
+      id = "window", historyLimit = 2)
+    discard conversation.run("first")
+    discard conversation.run("second")
+    discard conversation.run("third")
+    check p.last.messages.len == 3
+    check p.last.messages[0].content[0].text == "second"
+    # The transcript and its counters still describe every turn.
+    check conversation.events.len == 12
+    check conversation.turns == 3
+    check conversation.totalUsage.inputTokens == 6
+
+  test "widens the window to keep tool calls with their results":
+    let p = ScriptProvider(toolFirst: true)
+    let echoTool = tool[EchoInput, string]("echo", "echo",
+      proc (_: ToolContext, _: EchoInput): string = "pong")
+    let conversation = newSession(newAgent(p.model("m"), tools = @[echoTool],
+      maxSteps = 2, maxRetries = 0), historyLimit = 1)
+    discard conversation.run("first")
+    discard conversation.run("second")
+    check p.last.messages.mapIt(it.content.mapIt(it.kind)) == @[
+      @[ckText], @[ckToolUse], @[ckToolResult], @[ckText], @[ckText]]
+    check p.last.messages[0].content[0].text == "first"
+
+  test "round trips the history window":
+    let conversation = newSession(newAgent(ScriptProvider().model("m")),
+      id = "window-json", historyLimit = 8)
+    let restored = sessionFromJson(newAgent(ScriptProvider().model("m")),
+      conversation.sessionJsonString)
+    check restored.historyLimit == 8
+    check restored.sessionJson == conversation.sessionJson
+    let unlimited = sessionFromJson(newAgent(ScriptProvider().model("m")),
+      %*{"version": sessionSchemaVersion, "id": "plain", "events": []})
+    check unlimited.historyLimit == 0
+    expect ProviderError:
+      discard newSession(newAgent(ScriptProvider().model("m")), historyLimit = -1)

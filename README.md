@@ -163,6 +163,17 @@ discard conversation.run("My name is Nim.")
 echo conversation.run("What is my name?").text
 ```
 
+A long conversation keeps growing. Use `historyLimit` to send only the most
+recent messages to the model. It counts messages, not turns, and the session
+still keeps the full transcript:
+
+```nim
+let conversation = newSession(assistant, historyLimit = 20)
+```
+
+When the model still needs older context, you summarize it yourself: read the
+transcript with `messages` and install a shorter one with `replaceEvents`.
+
 Agent runs have blocking and async forms, plus normalized events for rendering
 text, thinking, tool calls, and approvals. Sessions can be serialized and
 restored with the same agent configuration. See the [sessions guide](https://martineastwood.github.io/nimgent/guides/sessions/)
