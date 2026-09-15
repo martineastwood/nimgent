@@ -5,7 +5,7 @@
 ## then adapts remote tools to nimgent's normal Tool type.
 
 import std/[asyncdispatch, asyncfile, asyncstreams, base64, httpclient, json,
-  osproc, sequtils, strtabs, strutils, tables, unicode]
+  osproc, sequtils, strtabs, strutils, tables]
 when not defined(windows):
   import posix
 import nimgent/providers/provider

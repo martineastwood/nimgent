@@ -1,7 +1,7 @@
 nimcache/
-tests/all_tests
-tests/stream_cancel_tests
-tests/google_tests
+# Compiled test binaries
+tests/*_test
+tests/*_tests
 *.dSYM/
 .nimble/
 .DS_Store
