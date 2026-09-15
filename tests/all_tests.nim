@@ -2655,3 +2655,43 @@ suite "agent sessions":
     conversation.reset()
     check conversation.turns == 0
     check conversation.totalUsage == Usage()
+
+  test "exposes messages for caller-driven compaction":
+    let p = ScriptProvider()
+    let conversation = newSession(newAgent(p.model("m"), maxRetries = 0),
+      id = "compaction")
+    discard conversation.run("first question")
+    discard conversation.run("second question")
+    check conversation.messages.mapIt($it.role) == @[
+      "user", "assistant", "user", "assistant"]
+    # A caller can read the older half to summarize it.
+    check conversation.events[0 ..< 4].messages[0].content[0].text ==
+      "first question"
+    check conversation.userEventIndices == @[1, 5]
+    # Keep the recent half, replace the older half with a summary.
+    let cut = conversation.userEventIndices[^1]
+    conversation.replaceEvents(@[SessionEvent(kind: sekUser,
+      message: userMessage("Summary: first question."))] &
+      conversation.events[cut .. ^1])
+    check conversation.turns == 1
+    check conversation.totalUsage.inputTokens == 2
+    check conversation.totalUsage.outputTokens == 4
+    check conversation.lastResponse.text == "ok"
+    check conversation.messages.mapIt(it.content[0].text) == @[
+      "Summary: first question.", "second question", "ok"]
+    discard conversation.run("third question")
+    check p.last.messages.mapIt(it.content[0].text) == @[
+      "Summary: first question.", "second question", "ok", "third question"]
+    check conversation.turns == 2
+    check conversation.totalUsage.inputTokens == 5
+    # Turn ids keep counting instead of restarting from the shorter transcript.
+    check conversation.events[^4].turnId == "compaction:turn:3"
+
+  test "replaceEvents owns the transcript it is given":
+    var incoming = @[SessionEvent(kind: sekUser, message: userMessage(@[
+      toolUse("call", "echo", %*{"x": 1})]))]
+    let conversation = newSession(newAgent(ScriptProvider().model("m"),
+      maxRetries = 0))
+    conversation.replaceEvents(incoming)
+    incoming[0].message.content[0].input["x"] = %2
+    check conversation.events[0].message.content[0].input["x"].getInt == 1

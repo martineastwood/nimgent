@@ -92,6 +92,39 @@ The saved session contains the conversation and its state. It does not contain
 the agent configuration, API key, or tool handlers, so you always choose what
 can run when you restore it.
 
+## Compact a long conversation
+
+Every session run sends the completed history, so a long conversation keeps
+growing. nimgent does not decide when or how to compact: `messages` gives you
+the model-facing view of the transcript, and `replaceEvents` installs what the
+model should see next. This example summarizes older turns with a cheaper model
+and keeps the last few turns verbatim:
+
+```nim
+let summarizer = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
+
+# User events are the safe cut points, so tool calls stay with their results.
+let starts = conversation.userEventIndices
+if starts.len > 2:
+  let cut = starts[^2]
+  let summary = generateText(summarizer,
+    messages = conversation.events[0 ..< cut].messages,
+    system = "Summarize the conversation for future turns. Keep facts and decisions."
+  ).text
+
+  conversation.replaceEvents(@[SessionEvent(kind: sekUser,
+      message: userMessage("Conversation so far, summarized:\n" & summary))] &
+    conversation.events[cut .. ^1])
+```
+
+`replaceEvents` copies the events you pass and rebuilds `turns`, `totalUsage`,
+and `lastResponse` from the new transcript. The next run sends the summary and
+the kept events, and the session id stays the same. New turn ids keep counting
+forward, so they stay unique even though the transcript got shorter.
+
+Always cut at a user event. Slicing inside a turn can start the model input
+with an assistant or tool message that has no preceding request.
+
 ## Inspect or reset a session
 
 You can inspect the number of completed turns, cumulative usage, and the latest
@@ -115,8 +148,9 @@ conversation.reset()
 - **The model forgets earlier context:** use the same `Session` for each
   related request. Calling `agent.run(...)` directly starts a new request.
 - **The conversation grows too large:** each session run includes completed
-  history, so long conversations use more context. Reset the session or start
-  a new conversation when the old history is no longer useful.
+  history, so long conversations use more context. Use `messages` and
+  `replaceEvents` to keep a summary plus recent turns, or reset the session
+  when the old history is no longer useful.
 - **Restoring fails:** restore with an agent and a session JSON document created
   by nimgent. The saved format has a version and rejects incompatible data.
 - **Two requests modify the same session at once:** serialize access to one

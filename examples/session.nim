@@ -39,4 +39,17 @@ proc main() {.async.} =
   echo "turns: ", resumed.turns
   echo "events after resume: ", resumed.events.len
 
+  # Compaction is application policy. Summarize the older turns, keep the most
+  # recent turn verbatim, and replace the transcript so it stops growing.
+  let summarizer = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
+  let cut = resumed.userEventIndices[^1]
+  let summary = (await generateTextAsync(summarizer,
+    messages = resumed.events[0 ..< cut].messages,
+    system = "Summarize the conversation for future turns.")).text
+  resumed.replaceEvents(@[SessionEvent(kind: sekUser,
+      message: userMessage("Conversation so far, summarized:\n" & summary))] &
+    resumed.events[cut .. ^1])
+  echo "events after compaction: ", resumed.events.len
+  echo "turns after compaction: ", resumed.turns
+
 waitFor main()

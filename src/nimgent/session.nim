@@ -53,6 +53,9 @@ type
     turns*: int
     totalUsage*: Usage
     lastResponse*: ProviderResponse
+    ## Highest turn number issued. Kept monotonic so turn ids stay unique when
+    ## a caller replaces the transcript.
+    turnSeq: int
 
 proc copyBlock(part: ContentBlock): ContentBlock =
   result = part
@@ -104,8 +107,10 @@ proc copyEvent(event: SessionEvent): SessionEvent =
   else:
     discard
 
-proc messagesFromEvents(events: openArray[SessionEvent]): seq[Message] =
+proc messages*(events: openArray[SessionEvent]): seq[Message] =
   ## Convert completed message events into the provider-neutral request shape.
+  ## Pass any slice of `Session.events` to read the part a caller wants to
+  ## summarize, drop, or rewrite.
   for event in events:
     case event.kind
     of sekUser, sekAssistant:
@@ -166,12 +171,40 @@ proc commit(session: Session, turnId, prompt: string, response: ProviderResponse
     response: copyResponse(response))
   session.rebuildState()
 
+proc messages*(session: Session): seq[Message] =
+  ## Model-facing view of the transcript currently in the session.
+  messages(session.events)
+
 proc requestMessages(session: Session, prompt: string): seq[Message] =
-  result = messagesFromEvents(session.events)
+  result = messages(session.events)
   result.add userMessage(prompt)
 
 proc nextTurnId(session: Session): string =
-  session.id & ":turn:" & $(session.events.len + 1)
+  inc session.turnSeq
+  session.id & ":turn:" & $session.turnSeq
+
+proc replaceEvents*(session: Session, events: openArray[SessionEvent]) =
+  ## Replace the transcript, for example after compacting older turns, and
+  ## rebuild `turns`, `totalUsage`, and `lastResponse` from it.
+  ##
+  ## The caller owns the new transcript: keep it provider-valid by starting at
+  ## a user turn and keeping each tool call with its results. Use
+  ## `userEventIndices` to find safe cut points.
+  if session.isNil:
+    raiseProviderError("session must not be nil")
+  session.events = @[]
+  for event in events:
+    session.events.add copyEvent(event)
+  session.rebuildState()
+
+proc userEventIndices*(session: Session): seq[int] =
+  ## Indices of user events, the boundaries a caller can safely cut at when
+  ## compacting a transcript.
+  if session.isNil:
+    raiseProviderError("session must not be nil")
+  for i, event in session.events:
+    if event.kind == sekUser:
+      result.add i
 
 proc validateTurn(session: Session, prompt: string) =
   if session.isNil:
@@ -553,6 +586,7 @@ proc sessionFromJson*(agent: Agent, node: JsonNode): Session =
   if result.id.len == 0: result.id = newSessionId()
   for event in node["events"]:
     result.events.add parseEvent(event)
+  result.turnSeq = result.events.len
   result.rebuildState()
 
 proc sessionFromJson*(agent: Agent, raw: string): Session =
