@@ -1,196 +1,122 @@
 ---
 title: Errors and retries
-description: What nimgent retries, what it raises, and how to tell them apart.
+description: Handle failed model requests, cancellations, and temporary provider errors.
 ---
 
-Model calls fail for mundane reasons: a rate limit, a flaky connection, a
-context window you overshot. nimgent's policy is to absorb the failures that are
-worth absorbing and to surface the rest with enough detail to act on — no
-silent retry loops, no swallowed errors.
+nimgent retries temporary provider failures for you. When a request still fails, catch `ProviderError` to show a useful message, reduce an oversized prompt, or record the provider request ID for support.
 
-The useful split is between three things that look alike in a stack trace:
+## Handle a failed request
 
-- **Transport and API failures** — raise `ProviderError`.
-- **Failures the model should see** — tool errors, which are values, not
-  exceptions.
-- **Your own mistakes** — bad arguments, which raise immediately and locally.
+This example makes a request and distinguishes cancellation, a context overflow, and other provider errors.
 
-## What gets retried
+```nim title="handle_errors.nim"
+import std/os
+import nimgent
+import nimgent/providers/openai
 
-`generateText`, `streamText`, `generateObject`, and the embedding helpers retry
-by default. An attempt is retried when **all** of these hold:
+let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4.1-mini")
 
-- the error is marked `retryable` — HTTP 429, any 5xx, or a transport failure;
-- no response content has started arriving yet (a stream that has emitted a
-  delta is never restarted);
-- the error is not context overflow and not a cancellation;
-- attempts remain under `maxRetries`, which defaults to `2`.
-
-Everything else fails on the first attempt. A 400 from a bad request will fail
-the same way the second time, and a context overflow needs a smaller prompt, not
-another call.
-
-### Backoff
-
-Between attempts nimgent waits, using the server's `Retry-After` when it sent
-one (capped at 30 seconds, so a wild header cannot park your process) and
-otherwise a full-jitter exponential backoff based on 250 ms, capped at 8
-seconds:
-
-```nim
-let response = generateText(model, prompt = "…", maxRetries = 5)
-```
-
-Sleeps are abort-aware — they check your `abort` callback every 50 ms — so a
-cancellation during backoff returns promptly instead of waiting out the delay.
-`retryDelayMs(attempt, retryAfterMs)` is exported if you want to reason about
-the schedule yourself.
-
-## Watching retries happen
-
-Rather than guessing from logs, observe them:
-
-```nim
-let response = generateText(model, prompt = "…",
-  callbacks = RunCallbacks(
-    onRetry: proc (attempt: int, delayMs: int, error: ref ProviderError) =
-      echo "attempt ", attempt, " failed (", error.status, "), retrying in ", delayMs, "ms"))
-```
-
-`attempt` is 1-based. A `TraceSink` records the same thing as separate model
-spans, each carrying `http_status`, `retryable`, `will_retry`, `retry_delay_ms`,
-and `request_id`.
-
-## Reading a `ProviderError`
-
-```nim
 try:
-  discard generateText(model, prompt = "…")
-except ProviderError as e:
-  echo e.msg          # human-readable message
-  echo e.status       # HTTP status, or 0 when there was no response
-  echo e.retryable    # 429 / 5xx / transport
-  echo e.overflow     # context window exceeded
-  echo e.aborted      # your abort() returned true
-  echo e.requestId    # provider request id, for support
-  echo e.retryAfterMs # server-supplied delay, 0 if none
-```
-
-The fields exist so that application-level policy does not have to parse
-strings. `overflow` is detected from the provider's own wording rather than a
-generic "token" match, which is why it is reliable enough to branch on:
-shrink the prompt, drop history, or compact — do not retry. `requestId` is
-forwarded from the provider, so a user-facing "contact support" flow can quote
-something the provider will recognise.
-
-## Cancellation
-
-Cancelling is not an error condition in the same sense, but it does raise:
-`CancelledError`, which is a `ProviderError` subtype with `aborted` set. Catch it
-before the general case when the difference matters:
-
-```nim
-try:
-  let response = generateText(model, prompt = "…",
-    abort = proc (): bool = stopRequested)
+  let response = generateText(model, prompt = "Explain Nim in one sentence.")
+  echo response.text
 except CancelledError:
-  echo "stopped by the caller"
-except ProviderError as e:
-  echo "failed: ", e.msg
+  echo "Request cancelled."
+except ProviderError as error:
+  if error.overflow:
+    echo "The prompt is too large. Try sending less context."
+  else:
+    echo "The request failed: ", error.msg
+    if error.requestId.len > 0:
+      echo "Provider request ID: ", error.requestId
 ```
 
-There are three places cancellation is checked, and each covers a different
-kind of wait:
+`ProviderError` covers network and provider API failures. Its fields let you respond to the kind of failure without parsing an error message.
 
-| Trigger | Where it is noticed |
+| Field | Use it for |
 | --- | --- |
-| `abort = proc (): bool` | Before each attempt, during backoff, and before each tool call |
-| Streaming callback returns `false` | Immediately, mid-stream |
-| `ToolContext.abort()` inside a tool | Wherever your tool checks it |
+| `status` | The HTTP status code, or `0` when no response arrived. |
+| `overflow` | Reduce the prompt, history, or attached content. |
+| `retryable` | Record whether the failure was temporary. |
+| `requestId` | Give the provider's request ID to support. |
+| `retryAfterMs` | See a delay requested by the provider. |
 
-A tool that ignores `context.abort()` will finish its work regardless — the
-check is cooperative, because nimgent cannot safely interrupt your code. Check
-it between chunks of work in anything long-running.
+## Retries happen automatically
 
-## Failures the model handles
+`generateText`, `streamText`, structured output, and embeddings retry temporary failures twice by default. This covers rate limits, server errors, and network failures.
 
-Tool problems are deliberately not exceptions. Invalid arguments, a raised
-exception inside your handler, an explicit `toolFailure(...)`, and a denied
-approval all become structured tool results the model reads on the next turn:
+Set `maxRetries` when you need a different limit. Set it to `0` when your application should make exactly one attempt.
 
 ```nim
-proc lookup(ctx: ToolContext, input: LookupInput): ToolResult =
-  if input.id notin knownIds:
-    return toolFailure("not_found", "No record exists", %*{"id": input.id},
-      retryable = false)
-  ToolResult(output: describe(record(input.id)), value: %*record(input.id))
+let response = generateText(
+  model,
+  prompt = "Summarize this report.",
+  maxRetries = 5
+)
 ```
 
-The code and message are for the model — it can retry with different arguments
-when `retryable` is true, or explain the problem. The run itself succeeded: that
-is the point. A tool failure never aborts the loop, so a flaky dependency
-becomes a turn the model can reason about instead of a dead run. See
-[Tools and agents](/guides/tools-and-agents/) for shaping those failures.
+nimgent does not retry a cancelled request, a context overflow, or a non-temporary provider error. A stream is retried only before it has delivered content, so users never receive a duplicated partial answer.
 
-Structured output is the in-between case. `generateObject` raises an
-`ObjectError` (also a `ProviderError`) once every attempt and repair has failed:
+Provider-provided retry delays are honored. Otherwise, nimgent waits for a short randomized backoff between attempts.
+
+## Observe retries
+
+Use `onRetry` when you want to show status in a UI or record retry activity.
 
 ```nim
-try:
-  let recipe = generateObject[Recipe](model, prompt = "A weeknight lasagna.")
-except ObjectError as e:
-  for issue in e.issueDetails:
-    echo issue.path, ": ", issue.message   # "$.servings: expected integer"
-  echo e.raw                               # exactly what the model produced
+let response = generateText(
+  model,
+  prompt = "Summarize this report.",
+  callbacks = RunCallbacks(
+    onRetry = proc (attempt, delayMs: int, error: ref ProviderError) =
+      echo "Retry ", attempt, " in ", delayMs, "ms: ", error.msg
+  )
+)
 ```
 
-`ObjectError` is also raised **before** any request for problems no retry can
-fix: an invalid schema, a schema that `omNative` cannot express, or `omNative`
-against a provider with no native structured output. Those messages name the
-keyword or the provider, so the fix is in your code rather than in a prompt.
+`attempt` starts at `1` for the first retry.
 
-## Errors that mean "fix your code"
+## Cancel work the user no longer needs
 
-Some arguments are validated up front, on the caller's thread, before anything
-is sent:
-
-- `maxRetries < 0`, `maxSteps < 1`, `maxRepairs < 0` — `ProviderError` with a
-  message naming the argument.
-- Empty or duplicate tool names, or a tool without a JSON Schema object — same.
-- `toolChoiceSpecific` naming a tool you did not pass — `ProviderError`.
-- Empty `values` for `embedMany`, or an empty/duplicate schema problem —
-  `ProviderError`.
-- Vector store misuse (empty id, mismatched embedding dimension, unreadable
-  store file) — `ValueError`.
-- Typed provider options that contradict each other, such as Anthropic
-  `budgetTokens` without `EnabledThinking` — `ProviderError`, raised locally
-  instead of arriving as a 400.
-
-Treating these as bugs rather than conditions to handle is the intended
-reading: they are all decidable at the call site.
-
-## A workable handler
+Pass an `abort` callback that returns `true` when your application wants to stop the request.
 
 ```nim
-proc ask(model: LanguageModel, prompt: string): string =
-  var attempt = 0
-  while true:
-    inc attempt
-    try:
-      return generateText(model, prompt = prompt, maxRetries = 2).text
-    except CancelledError:
-      raise                                  # the caller asked to stop
-    except ProviderError as e:
-      if e.overflow and attempt < 3:
-        continue                             # caller should shrink context here
-      echo "giving up: ", e.msg, " (", e.status, ", req ", e.requestId, ")"
-      raise
+var stopRequested = false
+
+let response = generateText(
+  model,
+  prompt = "Write a detailed guide to Nim.",
+  abort = proc (): bool = stopRequested
+)
 ```
 
-The shape worth copying: separate cancellation first, branch on `overflow`
-rather than on message text, and re-raise once the retries are spent so the
-failure is visible instead of becoming an empty string.
+When the callback returns `true`, nimgent raises `CancelledError`. Catch it before `ProviderError` when cancellation is a normal user action.
 
-Related: [Tools and agents](/guides/tools-and-agents/) for model-facing
-failures, [Structured output](/guides/structured-output/) for repair turns, and
-[Core API](/reference/core-api/) for the cancellation and retry parameters.
+For streaming, return `false` from `onEvent` to stop the stream:
+
+```nim
+discard streamText(model, prompt = "List ten ideas.", onEvent =
+  proc (event: StreamEvent): bool =
+    if event.kind == seTextDelta:
+      stdout.write event.text
+    not stopRequested
+)
+```
+
+Cancellation is cooperative for local tools. If a tool does long-running work, check `context.abort()` during that work so it can stop promptly.
+
+## Other errors you may see
+
+`generateObject` raises `ObjectError`, a subtype of `ProviderError`, when it cannot produce a value that matches your schema. Its `issueDetails` and `raw` fields help you diagnose the output. See [Structured output](/guides/structured-output/) for the repair flow.
+
+Tool failures are different: a failed local tool call becomes a result the model can read and respond to. It does not automatically fail the whole model run. See [Tools and agents](/guides/tools-and-agents/) for returning tool failures.
+
+## Troubleshooting
+
+- **The request fails immediately:** Check your API key, model ID, and request options. Retrying a bad request will not fix it.
+- **You receive a rate limit:** Keep the default retries, reduce concurrent work, or raise `maxRetries` if waiting is acceptable for your application.
+- **The prompt is too large:** Send less history or context. Do not retry an overflow unchanged.
+- **A stream stops after showing text:** Treat the partial response as incomplete. nimgent does not restart streams after content has arrived.
+
+## Next steps
+
+See [Streaming](/guides/streaming/) for rendering partial output, or [Sessions](/guides/sessions/) for managing conversation history before it becomes too large.

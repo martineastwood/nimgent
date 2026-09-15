@@ -17,6 +17,7 @@ node_modules/
 .pnp.*
 dist/
 .astro/
+docs/src/content/docs/reference/api/
 coverage/
 .nyc_output/
 .eslintcache

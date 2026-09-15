@@ -175,6 +175,7 @@ proc buildResponsesBody*(request: ProviderRequest, stream: bool): JsonNode =
     result["include"] = %*["reasoning.encrypted_content"]
 
 proc responsesObjectOptions*(name, description: string, schema: JsonNode): JsonNode =
+  ## Build Responses API options for native JSON schema output.
   var fmt = %*{
     "type": "json_schema",
     "name": name,
@@ -209,6 +210,7 @@ proc thinkingFromReasoningItem(item: JsonNode): ContentBlock =
     signature: if sig.len > 0: $sig else: "")
 
 proc parseResponsesOutput*(data: JsonNode, failPrefix: string): ProviderResponse =
+  ## Parse an OpenAI Responses API response.
   if data.isNil or data.kind != JObject:
     raiseProviderError(failPrefix & " returned an empty response")
   let status = data.getOrDefault("status").getStr
@@ -282,6 +284,7 @@ proc toolSlot(tools: var seq[PendingTool], data: JsonNode): int =
 proc handleResponsesEvent*(acc: var StreamAcc, response: var ProviderResponse,
                            data: JsonNode, onEvent: StreamCallback,
                            failPrefix: string): SseAction =
+  ## Consume one Responses API SSE event.
   let typ = data.getOrDefault("type").getStr
   case typ
   of "response.failed", "error":

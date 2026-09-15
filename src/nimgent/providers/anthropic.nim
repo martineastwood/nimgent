@@ -3,7 +3,7 @@
 import std/[options, asyncdispatch, base64, httpclient, json, net, strutils]
 import nimgent/providers/[provider, stream, http_metadata]
 
-const defaultAnthropicEndpoint* = "https://api.anthropic.com/v1/messages"
+const defaultAnthropicEndpoint* = "https://api.anthropic.com/v1/messages" ## Default Anthropic Messages endpoint.
 
 proc anthropicEfforts*(model: string): seq[string] =
   ## Explicit known families; unknown models retain manual thinking support.
@@ -17,6 +17,7 @@ proc anthropicEfforts*(model: string): seq[string] =
       return @["low", "medium", "high", "xhigh", "max"]
 
 proc anthropicThinkingOptions*(model, level: string): JsonNode =
+  ## Convert a thinking level to Anthropic request options.
   let efforts = anthropicEfforts(model)
   if efforts.len == 0: return thinkingOptions("anthropic", level)
   if level.len == 0: return newJObject()
@@ -33,6 +34,7 @@ proc anthropicThinkingOptions*(model, level: string): JsonNode =
 
 type
   AnthropicProvider* = ref object of Provider
+    ## Anthropic Messages provider configuration.
     apiKey: string
     endpoint*: string
     timeoutSeconds: int
@@ -53,10 +55,12 @@ proc makeHeaders(provider: AnthropicProvider, sessionId = ""): HttpHeaders =
     result[provider.sessionHeader] = sessionId
 
 proc anthropicImageBlock*(mimeType, data: string): JsonNode =
+  ## Encode base64 image data as an Anthropic content block.
   %*{"type": "image", "source": {
     "type": "base64", "media_type": mimeType, "data": data}}
 
 proc anthropicDocument*(f: FileContent): JsonNode =
+  ## Encode file content as an Anthropic document block.
   let title = fileLabel(f)
   let textDoc = f.mimeType.startsWith("text/") or f.mimeType == "application/json"
   var src: JsonNode
@@ -145,6 +149,7 @@ proc encodeMessage(message: Message): JsonNode =
     inc i
 
 proc parseAnthropicOutput*(data: JsonNode): ProviderResponse =
+  ## Parse an Anthropic Messages response.
   if data.isNil or data.kind != JObject:
     raiseProviderError("Anthropic returned an empty response")
   let content = data.getOrDefault("content")
@@ -197,19 +202,19 @@ proc parseAnthropicOutput*(data: JsonNode): ProviderResponse =
 proc anthropic*(apiKey: string, endpoint = "",
                 timeoutSeconds = 300, sessionHeader = "",
                 userAgent = ""): AnthropicProvider =
+  ## Create an Anthropic provider.
   let url = if endpoint.len > 0: endpoint else: defaultAnthropicEndpoint
-  AnthropicProvider(name: "anthropic",
-                    capabilities: {pcTools, pcStructuredOutput, pcImages,
-                      pcFiles, pcHostedTools, pcStreaming},
-                    apiKey: apiKey, endpoint: url,
+  AnthropicProvider(name: "anthropic", apiKey: apiKey, endpoint: url,
                     timeoutSeconds: timeoutSeconds,
                     sessionHeader: sessionHeader, userAgent: userAgent)
 
 method nativeObjectOptions*(provider: AnthropicProvider, model, name,
                             description: string, schema: JsonNode): JsonNode =
+  ## Return Anthropic native structured-output options.
   %*{"output_config": {"format": {"type": "json_schema", "schema": schema}}}
 
 proc buildAnthropicBody*(request: ProviderRequest): JsonNode =
+  ## Build an Anthropic Messages request body.
   validateToolChoice(request.toolChoice, request.tools)
   result = %*{
     "model": request.model,
@@ -253,6 +258,7 @@ proc buildAnthropicBody*(request: ProviderRequest): JsonNode =
 
 method generateAsync*(provider: AnthropicProvider,
                       request: ProviderRequest): Future[ProviderResponse] {.async.} =
+  ## Send a request through the Anthropic Messages API.
   if provider.apiKey.len == 0:
     raiseProviderError("ANTHROPIC API key is not configured")
 
@@ -292,6 +298,7 @@ method generateAsync*(provider: AnthropicProvider,
 
 proc handleAnthropicEvent*(message: var JsonNode, args: var seq[string],
                           data: JsonNode, onEvent: StreamCallback): SseAction =
+  ## Consume one Anthropic Messages SSE event.
   case data.getOrDefault("type").getStr
   of "message_start":
     message = copy(data["message"])
@@ -354,6 +361,7 @@ proc anthropicStreamHandler(state: AnthropicStreamState,
 method generateStreamAsync*(provider: AnthropicProvider,
                             request: ProviderRequest,
                             onEvent: StreamCallback): Future[ProviderResponse] {.async.} =
+  ## Stream a request through the Anthropic Messages API.
   if provider.apiKey.len == 0:
     raiseProviderError("ANTHROPIC API key is not configured")
   let sslContext = newContext(verifyMode = CVerifyPeer)
@@ -415,14 +423,17 @@ method generateStreamAsync*(provider: AnthropicProvider,
 
 type
   AnthropicThinking* = enum
+    ## Anthropic thinking mode.
     DisabledThinking = "disabled"
     AdaptiveThinking = "adaptive"
     EnabledThinking = "enabled"
   AnthropicOptions* = object
+    ## Anthropic-specific structured and thinking settings.
     thinking*: Option[AnthropicThinking]
     budgetTokens*: Option[int] ## Required with EnabledThinking.
 
 proc toProviderJson*(value: AnthropicOptions): JsonNode =
+  ## Serialize Anthropic-specific request options.
   result = newJObject()
   if value.budgetTokens.isSome and
       (value.thinking.isNone or value.thinking.get != EnabledThinking):

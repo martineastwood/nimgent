@@ -4,6 +4,7 @@ import std/[json]
 
 type
   SpanKind* = enum
+    ## Operation category recorded in a trace span.
     skRun
     skStep
     skModel
@@ -11,6 +12,7 @@ type
     skEmbedding
 
   SpanStatus* = enum
+    ## Completion status recorded in a trace span.
     ssOk
     ssError
     ssCancelled
@@ -30,7 +32,9 @@ type
     error*: string
 
   TraceSink* = proc (span: TraceSpan) {.closure.}
+    ## Callback that receives each completed span.
 
 proc durationMs*(span: TraceSpan): int =
+  ## Return a completed span's duration in milliseconds.
   if span.isNil or span.endNs <= span.startNs: return 0
   int((span.endNs - span.startNs) div 1_000_000)

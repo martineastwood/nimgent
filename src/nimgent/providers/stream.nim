@@ -5,25 +5,30 @@ import nimgent/providers/provider
 
 type
   SseAction* = enum
+    ## Action returned by an SSE event handler.
     sseContinue
     sseStop
     sseCancel
 
   SseDrive* = enum
+    ## Terminal state returned by an SSE stream driver.
     sdEnded      ## [DONE] or handle sseStop
     sdCancelled
     sdClosed     ## body ended without a terminal
 
   WakeWatch* = object
+    ## Optional file-descriptor watcher used during streaming.
     fd: cint = -1
 
   PendingTool* = object
+    ## Tool-call fragments accumulated from a stream.
     id*: string
     name*: string
     args*: string
     itemId*: string
 
   StreamAcc* = object
+    ## Text, reasoning, and tool fragments accumulated from a stream.
     text*: string
     think*: string
     details*: JsonNode
@@ -31,6 +36,7 @@ type
     parsedFinal*: bool
 
 proc initStreamAcc*(): StreamAcc =
+  ## Create an empty stream accumulator.
   StreamAcc(details: newJArray())
 
 proc parseOpenAiUsage*(usage: JsonNode, result: var Usage) =
@@ -53,6 +59,7 @@ proc parseOpenAiUsage*(usage: JsonNode, result: var Usage) =
     ("cache_write_tokens" in details)
 
 proc popLine*(buf: var string): tuple[ok: bool, line: string] =
+  ## Remove and return one newline-terminated line from a buffer.
   let nl = buf.find('\n')
   if nl < 0: return (false, "")
   var line = buf[0 ..< nl]
@@ -62,6 +69,7 @@ proc popLine*(buf: var string): tuple[ok: bool, line: string] =
   (true, line)
 
 proc register*(w: var WakeWatch, wakeFd: cint) =
+  ## Register a wake file descriptor when one is supplied.
   if w.fd >= 0: return
   if wakeFd < 0: return
   try:
@@ -71,6 +79,7 @@ proc register*(w: var WakeWatch, wakeFd: cint) =
   w.fd = wakeFd
 
 proc unregister*(w: var WakeWatch) =
+  ## Unregister a previously watched wake file descriptor.
   if w.fd < 0: return
   let fd = w.fd
   w.fd = -1
@@ -122,6 +131,7 @@ proc awaitWithWakeAsync*[T](fut: Future[T], watch: ptr WakeWatch, wakeFd: cint,
   true
 
 proc drainBodyStreamAsync*(bodyStream: FutureStream[string]): Future[string] {.async.} =
+  ## Read all remaining chunks from an asynchronous response body.
   while true:
     let (more, chunk) = await bodyStream.read()
     if not more: break
@@ -134,6 +144,7 @@ proc forEachSseAsync*(
   onEvent: StreamCallback,
   handle: proc (data: JsonNode): SseAction {.closure.}
 ): Future[SseDrive] {.async.} =
+  ## Parse SSE data lines and pass each JSON event to a handler.
   var buf = ""
   while true:
     let readFut = bodyStream.read()
@@ -158,6 +169,7 @@ proc forEachSseAsync*(
     if not more: return sdClosed
 
 proc assembleStream*(acc: StreamAcc, response: var ProviderResponse) =
+  ## Turn accumulated stream fragments into response content once.
   if acc.parsedFinal: return
   if acc.think.len > 0 or acc.details.len > 0:
     response.content.add ContentBlock(kind: ckThinking, thinking: acc.think,

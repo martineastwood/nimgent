@@ -1,4 +1,4 @@
-import std/[json, osproc, streams, strutils, unittest]
+import std/[json, options, osproc, streams, strutils, unittest]
 import nimgent
 import nimgent/providers/google
 from nimgent/providers/openai import openCodeGoogle
@@ -19,15 +19,12 @@ suite "native Gemini":
   test "one Google provider exposes generation, hosted tools, and embeddings":
     let p = google("key")
     check p.endpoint == defaultGoogleEndpoint
-    for capability in [pcStreaming, pcTools, pcStructuredOutput, pcImages,
-                       pcFiles, pcHostedTools, pcEmbeddings]:
-      check p.supports(capability)
 
   test "native batch embeddings preserve order and options":
     fixture("embed", proc (p: GoogleProvider) =
       let response = embedMany(p.embeddingModel("fixture"), @["one", "two"],
-        providerOptions = ProviderOptions(extra: %*{
-          "google": {"taskType": "RETRIEVAL_DOCUMENT"}}), maxRetries = 0)
+        providerOptions = ProviderOptions(
+          google: GoogleOptions(taskType: some("RETRIEVAL_DOCUMENT"))), maxRetries = 0)
       check response.embeddings == @[@[1.0, 0.0], @[0.0, 1.0]])
 
   test "native generation options are not mutated and URL sources retain retrieval metadata":

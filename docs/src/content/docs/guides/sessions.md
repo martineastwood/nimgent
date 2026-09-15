@@ -1,131 +1,129 @@
 ---
 title: Sessions
-description: Give an agent a memory — a transcript that survives across runs.
+description: Keep conversation context across agent runs and restore it later.
 ---
 
-By default, every run is a stranger. Ask about the weather, then ask what to
-wear, and the second call has no idea what the first one said — the model only
-sees the messages you send it. A **session** fixes that by owning the
-conversation transcript: every prompt, answer, and tool result is appended to
-it, and every new run includes it.
+Use a session when one request should remember an earlier request. A session
+keeps the conversation transcript for one agent, so follow-up questions can use
+earlier prompts, answers, and tool results.
 
-Two things stay separate:
+## Start a conversation
 
-- The **`Agent`** is configuration — model, instructions, tools. It is
-  reusable and stateless.
-- The **`Session`** is one conversation — the transcript, turn count, and
-  total usage. You create it from an agent, and each `run` appends to it.
+Create an agent, then create one session for each conversation:
 
 ```nim
+import std/os
+import nimgent
 import nimgent/[agent, session]
+import nimgent/providers/openai
 
-let conversation = newSession(researcher, id = "weather-demo")
+let assistant = newAgent(
+  openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini"),
+  instructions = "You are a concise assistant.")
 
-let first = conversation.run("What's the weather like in Paris?")
-echo first.text
+let conversation = newSession(assistant, id = "onboarding-demo")
 
-let second = conversation.run("What should I wear?")
-echo second.text    # the model knows the forecast from the first turn
+discard conversation.run("My name is Ada.")
+let response = conversation.run("What is my name?")
+
+echo response.text
 ```
 
-The id is optional; nimgent generates one when omitted. It is passed through to
-providers that support server-side sessions and appears in events and logs, so
-it's worth setting when you'll want to correlate runs later.
+Save the example as `conversation.nim`, then run it with:
 
-## What a session records
-
-Each turn appends a small set of events to an append-only transcript: the user
-prompt, each assistant step (a model turn, including tool calls), tool results,
-and a final turn-finished marker. You can read them:
-
-```nim
-for event in conversation.events:
-  case event.kind
-  of sekUser, sekAssistant:
-    echo $event.message.role, ": ", textContent(event.message.content)
-  else:
-    discard
-
-echo conversation.turns        # completed model turns
-echo conversation.totalUsage.inputTokens   # usage across every turn
+```sh
+OPENAI_API_KEY=... nim c -r conversation.nim
 ```
 
-Failures are observable too. A cancelled or failed turn records a
-`sekTurnFailed` event with the error, but nothing incomplete ever enters the
-model-facing transcript — the next run starts from the last *completed* state,
-not from a half-written exchange.
+The second call includes the earlier message, so the model can answer "Ada"
+without you assembling a message history yourself.
 
-## Continue from a snapshot
+An `Agent` holds reusable setup such as the model, instructions, and tools. A
+`Session` holds the history for one conversation. You can create many sessions
+from the same agent. The id is optional, but setting one helps you correlate a
+saved conversation with your application record.
 
-A session can be serialized to JSON and restored later — that's how you
-persist a conversation across process restarts, or hand it to a background
-worker:
+## Use a session with tools
 
-```nim
-let snapshot = conversation.sessionJsonString
+Sessions also retain tool results. This is useful when a follow-up depends on a
+lookup you already performed. Create the session from an agent that has the
+tools it needs, then a question such as "What should I wear?" can use an
+earlier weather result without calling the weather tool again. See
+[Tools and agents](/guides/tools-and-agents/) for defining those tools.
 
-# later, possibly in another process:
-let resumed = sessionFromJson(researcher, snapshot)
-let next = resumed.run("What should I wear? Keep it brief.")
-```
+## Stream a conversation
 
-The snapshot contains the transcript and derived state — not your API key, not
-tool callbacks. That's deliberate: a session file should be safe to store
-without leaking credentials, and restoring requires you to supply the agent
-again, so the tools and instructions that run are always ones you chose. The
-JSON carries a schema version, and restoring a snapshot from a different
-version fails loudly rather than guessing.
-
-## Stream a session
-
-Sessions support the same streaming forms as agents. Text arrives live, but the
-transcript is only committed after the run completes — so a cancelled stream
-leaves no partial turn behind:
+Sessions stream in the same way as agents. The completed turn is added to the
+conversation after the stream finishes:
 
 ```nim
 let response = conversation.stream(
-  "Summarize the weather.",
+  "Summarize what we discussed.",
   proc (event: StreamEvent): bool =
     if event.kind == seTextDelta:
       stdout.write event.text
+      flushFile(stdout)
     true)
+
+echo ""
+echo response.finishReason
 ```
 
-For UIs that also need lifecycle boundaries and approval prompts, use the
-`AgentEvent` callback overload or the pull-based stream:
+Return `false` from the callback to cancel. A cancelled or failed run is not
+used as incomplete conversation context in the next request.
+
+## Save and restore a session
+
+Use `sessionJsonString` to save a conversation, then restore it with the agent
+that should continue it:
 
 ```nim
-let events = conversation.events("What changed since yesterday?")
-while true:
-  let (available, event) = await events.read()
-  if not available: break
-  handle(event)
+let saved = conversation.sessionJsonString
+writeFile("conversation.json", saved)
 
-let response = await events.result
+# Later, including after a process restart:
+let restored = sessionFromJson(assistant, readFile("conversation.json"))
+let response = restored.run("What was my name again?")
+
+echo response.text
 ```
 
-## Start over
+The saved session contains the conversation and its state. It does not contain
+the agent configuration, API key, or tool handlers, so you always choose what
+can run when you restore it.
 
-`reset` clears the transcript and counters but keeps the agent and the session
-id — useful for a "new conversation" button:
+## Inspect or reset a session
+
+You can inspect the number of completed turns, cumulative usage, and the latest
+response:
+
+```nim
+echo "turns: ", conversation.turns
+echo "input tokens: ", conversation.totalUsage.inputTokens
+echo "last answer: ", conversation.lastResponse.text
+```
+
+Use `reset` when a user starts over. It clears the conversation history and
+usage while keeping the agent and session id:
 
 ```nim
 conversation.reset()
 ```
 
-If instead you want a *fresh conversation* with a new id, create a new session
-with `newSession(researcher)`.
+## Troubleshooting and limits
 
-## Agents, sessions, and models
+- **The model forgets earlier context:** use the same `Session` for each
+  related request. Calling `agent.run(...)` directly starts a new request.
+- **The conversation grows too large:** each session run includes completed
+  history, so long conversations use more context. Reset the session or start
+  a new conversation when the old history is no longer useful.
+- **Restoring fails:** restore with an agent and a session JSON document created
+  by nimgent. The saved format has a version and rejects incompatible data.
+- **Two requests modify the same session at once:** serialize access to one
+  session, or use separate sessions for separate conversations.
 
-A last note on how the pieces fit, since this is where newcomers usually trip:
+## Next steps
 
-- A `LanguageModel` is bound to one provider; it is the "who answers".
-- An `Agent` wraps a model with instructions, tools, and limits; it is the
-  "how it behaves".
-- A `Session` wraps an agent with a transcript; it is the "what has been said".
-
-You can run a model directly (`generateText`), run an agent (`agent.run`), or
-run a session (`conversation.run`) — each layer just adds state to the one
-below it. Pick the smallest one that does the job, and add layers when the
-conversation actually needs them.
+- [Tools and agents](/guides/tools-and-agents/) to give a session access to local tools.
+- [Streaming](/guides/streaming/) to show session responses as they arrive.
+- [Structured output](/guides/structured-output/) to receive validated Nim values.

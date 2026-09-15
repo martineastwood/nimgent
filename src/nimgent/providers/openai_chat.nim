@@ -3,7 +3,14 @@
 import std/json
 import nimgent/providers/[provider, stream]
 
+type
+  ChatReasoning* = enum
+    ## How an OpenAI-compatible Chat host wants replayed assistant thinking.
+    crReasoning        ## `reasoning` plus `reasoning_details` (OpenRouter style).
+    crReasoningContent ## `reasoning_content`, required back by thinking-mode hosts.
+
 proc openAiImagePart*(mimeType, data: string): JsonNode =
+  ## Encode an image as an OpenAI-compatible chat content part.
   %*{"type": "image_url", "image_url": {
     "url": "data:" & mimeType & ";base64," & data}}
 
@@ -65,8 +72,9 @@ proc keepChatReasoningDetail(item: JsonNode): bool =
   let sig = item.getOrDefault("signature")
   not sig.isNil and sig.kind == JString and sig.getStr.len > 0
 
-proc attachChatThinking(encoded: JsonNode, message: Message, hasToolCalls: bool) =
-  ## Replay thinking the Chat Completions hosts expect (OpenRouter / compat).
+proc attachChatThinking(encoded: JsonNode, message: Message, hasToolCalls: bool,
+                        reasoning: ChatReasoning) =
+  ## Replay thinking the Chat Completions host expects.
   var think = ""
   var details = newJArray()
   var hadDetails = false
@@ -85,6 +93,11 @@ proc attachChatThinking(encoded: JsonNode, message: Message, hasToolCalls: bool)
           details.add item
     except CatchableError:
       discard
+  if reasoning == crReasoningContent:
+    # Thinking-mode upstreams (DeepSeek/Kimi) require the field back on every
+    # assistant turn, including the tool call that consumed it.
+    if think.len > 0: encoded["reasoning_content"] = %think
+    return
   if details.len > 0:
     if think.len > 0:
       encoded["reasoning"] = %think
@@ -94,7 +107,8 @@ proc attachChatThinking(encoded: JsonNode, message: Message, hasToolCalls: bool)
     # Claude-via-OpenRouter 400s unsigned thinking on tool follow-up.
     encoded["reasoning"] = %think
 
-proc encodeMessage(result: var JsonNode, message: Message) =
+proc encodeMessage(result: var JsonNode, message: Message,
+                   reasoning: ChatReasoning) =
   if message.role == roleUser:
     addUserMessages(result, message)
     return
@@ -121,13 +135,15 @@ proc encodeMessage(result: var JsonNode, message: Message) =
     encoded["tool_calls"] = calls
   elif content.len == 0:
     encoded["content"] = %""
-  attachChatThinking(encoded, message, calls.len > 0)
+  attachChatThinking(encoded, message, calls.len > 0, reasoning)
   result.add encoded
 
 proc buildChatBody*(request: ProviderRequest, stream: bool,
                     includeSessionId = false, applyCache = false,
                     maxTokensField = "max_completion_tokens",
-                    promptCacheKey = ""): JsonNode =
+                    promptCacheKey = "",
+                    reasoning = crReasoning): JsonNode =
+  ## Build an OpenAI-compatible Chat Completions request body.
   validateToolChoice(request.toolChoice, request.tools)
   for tool in request.tools:
     if tool.hosted.len > 0:
@@ -151,7 +167,7 @@ proc buildChatBody*(request: ProviderRequest, stream: bool,
       parts.add %*{"type": "text", "text": s}
     messages.add %*{"role": "system", "content": parts}
   for message in request.messages:
-    encodeMessage(messages, message)
+    encodeMessage(messages, message, reasoning)
   result["messages"] = messages
   if request.tools.len > 0 and request.toolChoice.kind != tckNone:
     result["tools"] = newJArray()
@@ -183,6 +199,7 @@ proc buildChatBody*(request: ProviderRequest, stream: bool,
     applyCacheBreakpoints(result)
 
 proc chatObjectOptions*(name, description: string, schema: JsonNode): JsonNode =
+  ## Build Chat Completions options for native JSON schema output.
   var spec = %*{
     "name": name,
     "strict": true,
@@ -258,6 +275,7 @@ proc mergeChatReasoningDetails(acc: JsonNode, incoming: JsonNode) =
       acc.add copy(item)
 
 proc parseChatOutput*(data: JsonNode, failPrefix: string): ProviderResponse =
+  ## Parse an OpenAI-compatible Chat Completions response.
   if "choices" notin data or data["choices"].len == 0:
     raiseProviderError(failPrefix & " response contained no choices")
   result.model = data.getOrDefault("model").getStr
@@ -279,6 +297,7 @@ proc parseChatOutput*(data: JsonNode, failPrefix: string): ProviderResponse =
 
 proc handleChatEvent*(acc: var StreamAcc, response: var ProviderResponse,
                       data: JsonNode, onEvent: StreamCallback): SseAction =
+  ## Consume one Chat Completions SSE event.
   if response.model.len == 0:
     response.model = data.getOrDefault("model").getStr
   if "usage" in data and data["usage"].kind == JObject:

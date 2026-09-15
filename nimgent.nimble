@@ -8,6 +8,7 @@ requires "nim >= 2.0.0"
 
 task test, "Run the test suite":
   exec "nim c -r --hints:off --threads:on --mm:orc tests/all_tests.nim"
+  exec "nim c -r --hints:off --threads:on --mm:orc tests/mcp_client_tests.nim"
   exec "nim c -r --hints:off --threads:on --mm:orc tests/google_tests.nim"
   exec "nim c -r --hints:off --threads:on --mm:orc tests/stream_cancel_tests.nim"
   exec "nim c -r --hints:off --threads:on --mm:orc tests/tracing_tests.nim"

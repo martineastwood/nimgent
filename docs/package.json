@@ -4,9 +4,10 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "astro dev",
-    "start": "astro dev",
-    "build": "astro build",
+    "generate:api": "node scripts/generate-api.mjs",
+    "dev": "npm run generate:api && astro dev",
+    "start": "npm run generate:api && astro dev",
+    "build": "npm run generate:api && astro build",
     "preview": "astro preview",
     "astro": "astro"
   },
@@ -14,6 +15,6 @@
     "@astrojs/starlight": "^0.42.0",
     "astro": "^7.2.10",
     "sharp": "^0.35.3",
-    "starlight-theme-black": "^0.7.1"
+    "starlight-theme-next": "^0.4.0"
   }
 }

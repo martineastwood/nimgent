@@ -1,155 +1,116 @@
 ---
 title: Structured output
-description: Get typed, validated data out of a model instead of free-form text.
+description: Ask a model for validated Nim values instead of parsing free-form text.
 ---
 
-Free-form model text is easy to print and hard to program against. Structured
-output fixes that: you describe the shape of the data you want with a plain Nim
-type, nimgent turns that type into a JSON Schema for the model, and you get back
-a decoded, schema-validated Nim value — not a string you have to parse yourself.
+Use structured output when your program needs data it can rely on, such as a
+recipe, search filters, or a classification result. Define a Nim type, ask the
+model for that type, and use the validated value directly.
+
+## Generate a typed value
+
+Define the shape you need, then call `generateObject` with that type:
 
 ```nim
+import std/os
+import nimgent
+import nimgent/providers/openai
+
 type Recipe = object
   name: string
   servings: int
   ingredients: seq[string]
 
-let recipe = generateObject[Recipe](
+let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
+let result = generateObject[Recipe](
   model,
-  prompt = "A weeknight lasagna.")
+  prompt = "Create a weeknight lasagna recipe for four people.")
 
-echo recipe.value.name        # "Weeknight lasagna"
-echo recipe.value.servings    # 6
-for ingredient in recipe.value.ingredients:
-  echo "- ", ingredient
+echo result.value.name
+echo result.value.servings
+for ingredient in result.value.ingredients:
+  echo ingredient
 ```
 
-Under the hood, nimgent does four things for you:
+Save the example as `recipe.nim`, then run it with:
 
-1. Derives a JSON Schema from your type at compile time.
-2. Asks the model for JSON that matches it (using the provider's native
-   structured-output feature when one exists).
-3. Validates what came back against the schema, locally repairing malformed
-   JSON where it can.
-4. Optionally sends the failure back to the model for another try, then decodes
-   the validated JSON into your type.
+```sh
+OPENAI_API_KEY=... nim c -r recipe.nim
+```
 
-Everything below builds on that loop. If a request fails after all of it, you
-get an exception with the exact validation issues — nothing half-decoded slips
-through.
+`result.value` is a `Recipe`, not a JSON string. nimgent validates the model's
+JSON against the type before returning it.
 
-## Optional fields
+## Shape the result
 
-Use `Option[T]` when a field might not be present:
+Use ordinary Nim objects, sequences, enums, and nested types to describe the
+data you need:
+
+```nim
+type Difficulty = enum easy, medium, hard
+
+type Ingredient = object
+  name: string
+  quantity: string
+
+type Recipe = object
+  name: string
+  difficulty: Difficulty
+  ingredients: seq[Ingredient]
+```
+
+The model must choose one of the enum values and return each nested ingredient
+with its declared fields.
+
+Use `Option[T]` for data that may be absent:
 
 ```nim
 import std/options
 
 type Recipe = object
   name: string
-  servings: int
   notes: Option[string]
 ```
 
-`notes` stays in the schema's `required` list but accepts `null`. That sounds
-backwards, but it's what strict native structured output demands: every declared
-property must be required, and optionality is expressed as "the value may be
-null". `jsonOptional` (see below) is the other flavour — a field the model may
-omit entirely.
+When `notes` has no value, the model returns `null` and you receive `none`.
+This form works with strict native structured output. Use `jsonOptional` only
+when a field must be omitted entirely, because native mode may reject schemas
+with omitted fields.
 
-## Constraining fields with pragmas
+## Add constraints and descriptions
 
-Types describe *what* a field is; pragmas describe *what makes it valid*. They
-are compile-time annotations, so they cost nothing at runtime:
+Field pragmas help the model produce useful values and reject invalid ones:
 
 ```nim
 type Review = object
-  headline {.jsonMinLength: 3, jsonMaxLength: 80.}: string
+  headline {.jsonDescription: "A short, neutral headline.",
+             jsonMinLength: 3, jsonMaxLength: 80.}: string
   score {.jsonMinimum: 1, jsonMaximum: 5.}: int
-  url {.jsonPattern: "^https?://".}: string
-  summary {.jsonDescription: "Two sentences, no marketing language".}: string
-  spoilers {.jsonOptional.}: bool
+  sourceUrl {.jsonPattern: "^https?://".}: string
 ```
 
-| Pragma | Schema keyword |
+You can combine pragmas on one field:
+
+| Pragma | Effect |
 | --- | --- |
-| `jsonDescription` | `description` |
-| `jsonPattern` | `pattern` |
-| `jsonMinimum` / `jsonMaximum` | `minimum` / `maximum` |
-| `jsonMinLength` / `jsonMaxLength` | `minLength` / `maxLength` |
-| `jsonMinItems` / `jsonMaxItems` | `minItems` / `maxItems` |
-| `jsonOptional` | removes the field from `required` |
+| `jsonDescription` | Adds guidance for the model about what the field should contain. |
+| `jsonMinimum` / `jsonMaximum` | Sets inclusive numeric bounds. |
+| `jsonMinLength` / `jsonMaxLength` | Sets the minimum or maximum number of characters in a string. |
+| `jsonPattern` | Requires a string to match a regular expression. |
+| `jsonMinItems` / `jsonMaxItems` | Sets the minimum or maximum number of items in a sequence. |
+| `jsonOptional` | Allows the model to omit the field entirely. Use `Option[T]` when `null` is acceptable and native structured output matters. |
 
-`jsonOptional` is the one pragma that costs you something: strict native mode
-requires every property to be required, so a schema using it is no longer
-native-compatible. `omAuto` falls back to JSON extracted from the model's text,
-and `omNative` raises with the offending field. Reach for `Option[T]` when you
-want optionality *and* native enforcement.
+Use descriptions for requirements that are easier to express in words than with
+a type.
 
-The `description` pragma is worth using liberally — it's the cheapest way to
-steer the model toward the output you actually want.
+## Use a runtime schema
 
-## Enums and unions
-
-Nim enums become JSON string enums, so the model chooses from your values and
-nothing else:
+If the schema comes from configuration or another service, pass a `JsonNode`
+instead of a Nim type:
 
 ```nim
-type Size = enum small, medium, large
+import std/json
 
-type Order = object
-  size: Size        # must be exactly "small", "medium", or "large"
-  toppings: seq[string]
-```
-
-Enums with explicit string labels use those labels verbatim:
-
-```nim
-type Suit = enum
-  clubs = "clubs", diamonds = "diamonds", hearts = "hearts", spades = "spades"
-```
-
-Variant objects (`case` objects) become discriminated unions. Each branch turns
-into a `oneOf` entry, and the branch's own fields are only required when its
-discriminator value is present:
-
-```nim
-type Shape = object
-  case kind: ShapeKind
-  of skCircle:
-    radius: float
-  of skRect:
-    width: float
-    height: float
-```
-
-This is how you model "one of several shapes of answer" — a support ticket that
-is either a refund request or a bug report, for example — and have the type
-system enforce the difference.
-
-## Nested objects and containers
-
-Nest plain objects freely, and use the standard containers you already use:
-
-| Nim type | JSON Schema shape |
-| --- | --- |
-| `seq[T]`, `openArray[T]` | array of `<T>` |
-| `array[N, T]` | array with exactly `N` items |
-| `set[T]`, `HashSet[T]` | array with unique items |
-| `Table[string, V]` | object with `<V>` values |
-| `Option[T]` | `<T>` that may also be `null` |
-
-Objects are derived with `"additionalProperties": false`, so the model cannot
-invent fields you didn't declare. Generic types work too — `jsonSchema(Box[int])`
-resolves `Box[T]` with `T = int`.
-
-## Working without a type
-
-Sometimes the schema only exists at runtime — loaded from a config file, built
-dynamically, or shared with another service. Pass it directly and work with
-`JsonNode`:
-
-```nim
 let schema = %*{
   "type": "object",
   "properties": {"answer": {"type": "string"}},
@@ -163,145 +124,94 @@ let result = generateObject(
 echo result.value["answer"].getStr
 ```
 
-When you *do* have a type but the schema came from elsewhere, you can still
-decode into it with `result.toObject[MyType]` — the same validation already ran,
-so the decode either succeeds or raises with a clear message.
+The returned value is a `JsonNode`. If you have a matching Nim type later, use
+`result.toObject[YourType]` to decode the validated value.
 
-Schemas are checked before anything is sent to the provider. nimgent supports
-the practical core of draft-07: `type`, `properties`, `required`, `enum`,
-`const`, numeric bounds, string lengths and `pattern`, array bounds and
-`items`, `uniqueItems`, `additionalProperties`, `anyOf`/`oneOf`/`allOf`, `not`,
-`if`/`then`/`else`, and local `$ref`. Unsupported keywords (like `format`) and
-external references fail fast with a list of the exact problems, rather than
-silently producing garbage.
+## Choose an output mode
 
-## Choosing how the model answers
+Leave `mode` at its default, `omAuto`, unless you have a specific requirement:
 
-There is more than one way to get JSON out of a model, and they have different
-trade-offs. The `mode` parameter picks one — or lets nimgent choose:
-
-| Mode | How the value arrives | When to use it |
-| --- | --- | --- |
-| `omAuto` *(default)* | Provider-native output if available, otherwise JSON parsed from the model's text | Almost always — best quality with a safe fallback |
-| `omNative` | Provider-native structured output only | You want to *know* the schema was enforced, not parsed |
-| `omJson` | Instructs the model to reply with raw JSON and extracts it from the text | Providers without native support, or schemas native mode can't express |
-| `omTool` | A forced `submit` tool call whose arguments are the value | Models that behave better through tool calls |
-
-The provider decides what "native" means — OpenAI's `response_format` with a
-strict JSON schema, for example. Native mode is stricter than plain JSON Schema
-(it rejects `oneOf`, `allOf`, `not`, and requires every property to be
-required), so when a schema doesn't fit, `omAuto` quietly falls back to text
-extraction while `omNative` raises an error telling you exactly which keyword
-was the problem.
-
-You can always check which path was taken:
-
-```nim
-if result.source == osNative:
-  echo "schema enforced by the provider"
-```
-
-## When the model gets it wrong
-
-Models produce malformed JSON and values that violate your constraints. nimgent
-has three layers of defense, and they run in order:
-
-**1. Local repair.** While parsing, nimgent closes unfinished brackets, string
-literals, and partial booleans. This fixes the common "model ran out of tokens
-mid-JSON" case without another model call. The result is flagged with
-`result.locallyRepaired`.
-
-**2. Validation.** The parsed value is checked against the schema. Anything
-that doesn't match — wrong types, missing fields, enum values that don't exist,
-numbers out of range — fails with issue paths like `$.ingredients[2]`.
-
-**3. Model repairs.** With `maxRepairs` set above zero, the failed output and
-its issues are fed back to the model for another attempt:
-
-```nim
-let recipe = generateObject[Recipe](
-  model,
-  prompt = "A weeknight lasagna.",
-  maxRepairs = 2)   # up to 2 extra model turns
-```
-
-This costs extra calls, so leave it at `0` when the model is generally reliable
-and turn it up for the flaky edges of your schema.
-
-Truncation gets special treatment. A response cut off by `maxTokens` is
-*rejected* by default — a repaired half-recipe is usually worse than no recipe.
-When you'd rather have the partial value, opt in:
-
-```nim
-let recipe = generateObject[Recipe](
-  model,
-  prompt = "A long recipe.",
-  truncation = otRepair)
-```
-
-## Streaming a partial object
-
-For UIs that should show the object as it forms, `streamObject` reports partial
-values through a callback as they arrive:
-
-```nim
-let recipe = streamObject[Recipe](
-  model,
-  prompt = "A weeknight lasagna.",
-  onPartial = proc (partial: JsonNode): bool =
-    if "name" in partial:
-      stdout.write "\rname: " & partial["name"].getStr
-      flushFile(stdout)
-    true)   # return false to cancel
-```
-
-The partial value is best-effort parsed JSON, not a validated `Recipe` — fields
-appear as the model produces them. The final value is validated (and repaired,
-if you set `maxRepairs`) after the stream completes, and the `ObjectResult`
-you get back is identical in shape to `generateObject`'s.
-
-## What you get back
-
-Both `generateObject` and `streamObject` return an `ObjectResult[T]`:
-
-```nim
-echo recipe.value.name          # the decoded T
-echo recipe.usage.totalTokens   # token usage across all attempts
-echo recipe.attempts            # 1 + repairs
-echo recipe.source              # osNative, osText, or osTool
-```
-
-| Field | What it tells you |
+| Mode | Use it when |
 | --- | --- |
-| `value` | Your decoded value |
-| `response` | The last provider response (text, content blocks, finish reason) |
-| `usage` | Token usage aggregated across every attempt, including repairs |
-| `repairs` | How many model repair turns were needed |
-| `attempts` | Total provider calls made |
-| `locallyRepaired` | Whether local JSON repair had to run |
-| `source` | Whether the value came from native output, extracted text, or a tool call |
+| `omAuto` | You want native structured output where available, with JSON text as a fallback. This is the default. |
+| `omNative` | The provider must enforce the schema natively. It fails before a request if the provider or schema is incompatible. |
+| `omJson` | You need JSON text output rather than a provider-native format. |
+| `omTool` | Your model works best when it submits the result through a tool call. The schema root must be an object. |
 
-All the usual generation knobs work here too: `system` for instructions,
-`maxTokens` for limits, `maxRetries` for transport retries, `abort` for
-cancellation, and `providerOptions` for provider-specific settings. `name` and
-`description` label the schema for native mode — the type name and an empty
-description are used by default.
+For example, require native structured output with:
 
-## Handling failures
+```nim
+let result = generateObject[Recipe](
+  model,
+  prompt = "Create a weeknight lasagna recipe.",
+  mode = omNative)
+```
 
-When nothing succeeds, `generateObject` raises an `ObjectError`:
+## Repair invalid output
+
+If a response is not valid for your schema, `maxRepairs` gives the model extra
+attempts to correct it:
+
+```nim
+let result = generateObject[Recipe](
+  model,
+  prompt = "Create a weeknight lasagna recipe.",
+  maxRepairs = 1)
+```
+
+Each repair is another model call. The default is `0`, so use repairs when a
+strict schema is more important than the additional latency and cost.
+
+If no attempt succeeds, `generateObject` raises `ObjectError`:
 
 ```nim
 try:
-  let recipe = generateObject[Recipe](model, prompt = "A weeknight lasagna.")
-except ObjectError as e:
-  for issue in e.issueDetails:
+  discard generateObject[Recipe](model, prompt = "Create a recipe.")
+except ObjectError as error:
+  for issue in error.issueDetails:
     echo issue.path, ": ", issue.message
-  writeFile("last_failed.txt", e.raw)   # the model's raw output, for debugging
 ```
 
-`issueDetails` carries one entry per validation problem with its JSON path, and
-`raw` holds exactly what the model said — useful for filing bugs or building
-your own retry UI. Related pages: [Streaming](/guides/streaming/) for token-level
-events, and [Tools and agents](/guides/tools-and-agents/) — the same schema
-derivation powers typed tool inputs.
+## Stream a partial object
+
+Use `streamObject` when your interface should show fields while the model is
+still building the object:
+
+```nim
+import std/[json, os]
+
+let result = streamObject[Recipe](
+  model,
+  prompt = "Create a weeknight lasagna recipe.",
+  onPartial = proc (partial: JsonNode): bool =
+    if "name" in partial:
+      stdout.write "\rRecipe: " & partial["name"].getStr
+      flushFile(stdout)
+    true)
+
+echo ""
+echo result.value.name
+```
+
+`onPartial` receives best-effort JSON as it arrives. It may be incomplete or
+not yet valid, so use `result.value` after `streamObject` returns for the final
+validated value. Return `false` from `onPartial` to cancel the stream.
+
+## Troubleshooting
+
+- **Native mode rejects the schema:** use `omAuto`, or remove schema features
+  that the provider's native format cannot express. `jsonOptional` is one
+  common cause.
+- **The model returns an invalid value:** add field descriptions or constraints,
+  then consider `maxRepairs` for important responses.
+- **The response is cut off:** increase `maxTokens`. By default, a response
+  truncated at the token limit is rejected rather than treated as a complete
+  object.
+- **You need an omitted field instead of `null`:** use `jsonOptional`, keeping
+  in mind that it may not work with `omNative`.
+
+## Next steps
+
+- [Streaming](/guides/streaming/) to show text and tool activity as it arrives.
+- [Tools and agents](/guides/tools-and-agents/) to use the same typed inputs for tools.
+- [Providers](/guides/providers/) to choose a provider and its options.

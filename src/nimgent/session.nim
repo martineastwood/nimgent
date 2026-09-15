@@ -8,10 +8,11 @@ import std/[asyncdispatch, json, strutils, times]
 import nimgent
 import nimgent/agent
 
-const sessionSchemaVersion* = 1
+const sessionSchemaVersion* = 1 ## Current serialized session format version.
 
 type
   SessionEventKind* = enum
+    ## Kind of event stored in a session transcript.
     sekUser = "user"
     sekAssistant = "assistant"
     sekToolResult = "tool_result"
@@ -23,6 +24,7 @@ type
   ## interrupted turn observable without putting incomplete messages into the
   ## model-facing transcript.
   SessionEvent* = object
+    ## One durable event in a session transcript.
     turnId*: string
     case kind*: SessionEventKind
     of sekUser, sekAssistant:
@@ -237,6 +239,7 @@ proc runEventsAsync*(session: Session, prompt: string,
                      callbacks = RunCallbacks(),
                      onEvent: AgentEventCallback = nil
                      ): Future[ProviderResponse] {.async.} =
+  ## Run one session turn while receiving lifecycle events.
   let turnId = session.beginTurn(prompt)
   try:
     let response = await session.agent.runEventsAsync("",
@@ -253,6 +256,7 @@ proc streamAsync*(session: Session, prompt: string,
                   onEvent: AgentEventCallback,
                   abort: AbortCheck = nil,
                   callbacks = RunCallbacks()): Future[ProviderResponse] {.async.} =
+  ## Stream one session turn while receiving lifecycle events.
   if onEvent.isNil:
     raiseProviderError("session stream callback must not be nil")
   let turnId = session.beginTurn(prompt)
@@ -270,6 +274,7 @@ proc stream*(session: Session, prompt: string,
              onEvent: AgentEventCallback,
              abort: AbortCheck = nil,
              callbacks = RunCallbacks()): ProviderResponse =
+  ## Synchronously stream one session turn with lifecycle events.
   waitFor session.streamAsync(prompt, onEvent, abort, callbacks)
 
 proc events*(session: Session, prompt: string,
@@ -530,6 +535,7 @@ proc sessionJson*(session: Session): JsonNode =
     result["events"].add eventJson(event)
 
 proc sessionJsonString*(session: Session): string =
+  ## Serialize a session transcript as a JSON string.
   $session.sessionJson
 
 proc sessionFromJson*(agent: Agent, node: JsonNode): Session =
@@ -550,6 +556,7 @@ proc sessionFromJson*(agent: Agent, node: JsonNode): Session =
   result.rebuildState()
 
 proc sessionFromJson*(agent: Agent, raw: string): Session =
+  ## Rehydrate a session from a JSON string and agent configuration.
   sessionFromJson(agent, parseJson(raw))
 
 proc reset*(session: Session) =

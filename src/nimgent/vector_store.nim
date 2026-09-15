@@ -6,16 +6,19 @@ const vectorStoreSchemaVersion = 1
 
 type
   VectorRecord* = object
+    ## Stored vector and metadata identified by a caller-provided ID.
     id*: string
     embedding*: seq[float]
     metadata*: JsonNode
 
   VectorMatch* = object
+    ## Vector search result with its similarity score.
     id*: string
     score*: float
     metadata*: JsonNode
 
   InMemoryVectorStore* = ref object
+    ## Small in-memory vector store for local retrieval and tests.
     records: seq[VectorRecord]
     dimension: int
 
@@ -33,6 +36,7 @@ proc cosineSimilarity*(a, b: openArray[float]): float =
   dot / sqrt(normA * normB)
 
 proc newInMemoryVectorStore*(): InMemoryVectorStore =
+  ## Create an empty in-memory vector store.
   InMemoryVectorStore()
 
 proc copyEmbedding(embedding: openArray[float]): seq[float] =
@@ -48,6 +52,7 @@ proc validateEmbedding(store: InMemoryVectorStore, embedding: openArray[float]) 
 
 proc upsert*(store: InMemoryVectorStore, id: string,
              embedding: openArray[float], metadata: JsonNode = nil) =
+  ## Insert or replace a vector by ID.
   if store.isNil:
     raise newException(ValueError, "vector store must not be nil")
   if id.len == 0:
@@ -64,6 +69,7 @@ proc upsert*(store: InMemoryVectorStore, id: string,
   store.records.add record
 
 proc delete*(store: InMemoryVectorStore, id: string): bool =
+  ## Delete a vector by ID and report whether it existed.
   if store.isNil:
     raise newException(ValueError, "vector store must not be nil")
   for i, record in store.records:
@@ -74,6 +80,7 @@ proc delete*(store: InMemoryVectorStore, id: string): bool =
 
 proc search*(store: InMemoryVectorStore, embedding: openArray[float],
              limit = 10): seq[VectorMatch] =
+  ## Return up to `limit` vectors ranked by cosine similarity.
   if store.isNil:
     raise newException(ValueError, "vector store must not be nil")
   if limit < 0:

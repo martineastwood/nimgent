@@ -187,14 +187,6 @@ waitFor main()
 wrappers for scripts and CLI programs. Do not call the blocking wrappers from
 inside an async event loop.
 
-Providers expose a small capability set for applications that switch providers
-at runtime:
-
-```nim
-if model.provider.supports(pcStreaming):
-  discard
-```
-
 For deterministic application tests, `import nimgent/testing` and use
 `scriptedModel(@[textResponse("hello")])`.
 
@@ -643,8 +635,9 @@ let recipe = streamObject[Recipe](
 
 ## MCP clients
 
-`nimgent/mcp` connects to a current MCP `2026-07-28` server over stdio and
-adapts its tools into ordinary `nimgent.Tool` values:
+`nimgent/mcp` connects to a current MCP `2026-07-28` server over stdio or
+Streamable HTTP. It exposes tools, resources, prompts, completions,
+subscriptions, and Tasks, and adapts tools into ordinary `nimgent.Tool` values:
 
 ```nim
 import std/[asyncdispatch, json]
@@ -655,6 +648,7 @@ defer: client.close()
 
 let remoteTools = waitFor client.asToolsAsync(prefix = "mcp_")
 let result = waitFor client.callToolAsync("lookup", %*{"query": "Nim"})
+let resources = waitFor client.listResourcesAsync()
 ```
 
 The client pins the stateless revision, performs `server/discover`, and does

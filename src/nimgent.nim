@@ -41,11 +41,13 @@ type
     closed: bool
 
 proc read*(stream: AgentEventStream): Future[(bool, AgentEvent)] =
+  ## Read the next event, returning false when the stream is closed.
   if stream.isNil:
     raise newException(ValueError, "agent event stream must not be nil")
   stream.queue.read()
 
 proc close*(stream: AgentEventStream) =
+  ## Close the event stream and stop waiting readers.
   if stream.isNil or stream.closed: return
   stream.closed = true
   if not stream.queue.finished:
@@ -53,17 +55,19 @@ proc close*(stream: AgentEventStream) =
 
 type
   EmbedResult* = object
+    ## Result for embedding one value.
     value*: string
     embedding*: seq[float]
     usage*: EmbeddingUsage
 
   EmbedManyResult* = object
+    ## Result for embedding a batch of values in input order.
     values*: seq[string]
     embeddings*: seq[seq[float]]
     usage*: EmbeddingUsage
 
 proc checkAbort(abort: AbortCheck)
-proc retryDelayMs*(attempt: int, retryAfterMs = 0): int
+proc retryDelayMs*(attempt: int, retryAfterMs = 0): int ## Calculate the next retry delay.
 proc sleepAbort(ms: int, abort: AbortCheck): Future[void]
 
 type TraceState = ref object
@@ -180,6 +184,7 @@ proc embedMany*(model: EmbeddingModel, values: seq[string],
                 abort: AbortCheck = nil,
                 providerOptions = ProviderOptions(),
                 trace: TraceSink = nil): EmbedManyResult =
+  ## Embed a batch of strings in one provider request.
   waitFor embedManyAsync(model, values, maxRetries, abort, providerOptions,
     trace)
 
@@ -188,6 +193,7 @@ proc embedAsync*(model: EmbeddingModel, value: string,
                  abort: AbortCheck = nil,
                  providerOptions = ProviderOptions(),
                  trace: TraceSink = nil): Future[EmbedResult] {.async.} =
+  ## Embed one string and return its vector with usage information.
   let response = await embedManyAsync(model, @[value], maxRetries, abort,
     providerOptions, trace)
   return EmbedResult(value: value, embedding: response.embeddings[0],
@@ -197,6 +203,7 @@ proc embed*(model: EmbeddingModel, value: string,
             maxRetries = 2, abort: AbortCheck = nil,
             providerOptions = ProviderOptions(),
             trace: TraceSink = nil): EmbedResult =
+  ## Synchronously embed one string.
   waitFor embedAsync(model, value, maxRetries, abort, providerOptions,
     trace)
 
@@ -250,6 +257,7 @@ const
 var retryRngSeeded = false
 
 proc retryDelayMs*(attempt: int, retryAfterMs = 0): int =
+  ## Calculate the next retry delay, respecting a provider Retry-After value.
   ## Retry-After wins (capped). Otherwise full jitter on 250ms * 2^attempt, max 8s.
   if retryAfterMs > 0:
     return min(retryAfterMs, retryAfterCapMs)
@@ -797,6 +805,7 @@ proc generateTextAsync*(
   turnId = "",
   toolChoice = toolChoiceAuto()
 ): Future[ProviderResponse] {.async.} =
+  ## Generate text and optionally run tools for one model turn.
   let resolved = resolveGenerationOptions(generationOptions, providerOptions,
     model.provider.name)
   return await generateTextAsync(model.provider, model.id, prompt, messages, system, tools,
@@ -813,6 +822,7 @@ proc generateText*(model: LanguageModel, prompt = "",
                    providerOptions = ProviderOptions(),
                    metadata: JsonNode = nil, turnId = "",
                    toolChoice = toolChoiceAuto()): ProviderResponse =
+  ## Synchronously generate text and optionally run tools.
   waitFor generateTextAsync(model, prompt, messages, system, tools, maxTokens,
     sessionId, generationOptions, maxRetries, maxSteps, abort, callbacks, providerOptions,
     metadata, turnId, toolChoice)
@@ -825,6 +835,7 @@ proc generateTextAsync*(
   callbacks = RunCallbacks(),
   providerOptions = ProviderOptions()
 ): Future[ProviderResponse] {.async.} =
+  ## Generate text from a ready-made provider request without a tool loop.
   ## Retry wrapper for a ready-made request. Does not run the tool loop
   ## (`maxSteps` 1); the caller owns tools.
   validateRun(@[], maxRetries, 1)
@@ -838,6 +849,7 @@ proc generateText*(provider: Provider, request: ProviderRequest,
                    abort: AbortCheck = nil,
                    callbacks = RunCallbacks(),
                    providerOptions = ProviderOptions()): ProviderResponse =
+  ## Synchronously execute a ready-made provider request without a tool loop.
   waitFor generateTextAsync(provider, request, maxRetries, abort, callbacks, providerOptions)
 
 proc streamTextAsync(
@@ -860,6 +872,7 @@ proc streamTextAsync(
   metadata: JsonNode = nil,
   toolChoice = toolChoiceAuto()
 ): Future[ProviderResponse] {.async.} =
+  ## Stream text deltas and optionally run tools for one model turn.
   ## Streaming completion; `onEvent` receives deltas. Return false to cancel.
   validateRun(tools, maxRetries, maxSteps)
   let request = buildRequest(model, prompt, messages, system,
@@ -888,6 +901,7 @@ proc streamTextAsync*(
   turnId = "",
   toolChoice = toolChoiceAuto()
 ): Future[ProviderResponse] {.async.} =
+  ## Stream text deltas from a language model and optionally run tools.
   let resolved = resolveGenerationOptions(generationOptions, providerOptions,
     model.provider.name)
   return await streamTextAsync(model.provider, model.id, onEvent, prompt,
@@ -905,6 +919,7 @@ proc streamText*(model: LanguageModel, onEvent: StreamCallback, prompt = "",
                  providerOptions = ProviderOptions(),
                  metadata: JsonNode = nil, turnId = "",
                  toolChoice = toolChoiceAuto()): ProviderResponse =
+  ## Synchronously stream text deltas from a language model.
   waitFor streamTextAsync(model, onEvent, prompt, messages, system, tools,
     maxTokens, sessionId, generationOptions, wakeFd, maxRetries, maxSteps, abort,
     callbacks, providerOptions, metadata, turnId, toolChoice)
@@ -918,6 +933,7 @@ proc streamTextAsync*(
   callbacks = RunCallbacks(),
   providerOptions = ProviderOptions()
 ): Future[ProviderResponse] {.async.} =
+  ## Stream a ready-made provider request without a tool loop.
   ## Streaming retry wrapper for a ready-made request. No tool loop.
   validateRun(@[], maxRetries, 1)
   var resolved = request
@@ -930,6 +946,7 @@ proc streamText*(provider: Provider, request: ProviderRequest,
                  abort: AbortCheck = nil,
                  callbacks = RunCallbacks(),
                  providerOptions = ProviderOptions()): ProviderResponse =
+  ## Synchronously stream a ready-made provider request without a tool loop.
   waitFor streamTextAsync(provider, request, onEvent, maxRetries, abort,
     callbacks, providerOptions)
 
@@ -952,6 +969,7 @@ proc generateAgentTextAsync*(model: LanguageModel,
                              onEvent: AgentEventCallback = nil,
                              approvalPolicy: ToolApprovalPolicy = nil
                              ): Future[ProviderResponse] {.async.} =
+  ## Run a model with tools and agent lifecycle events.
   let resolved = resolveGenerationOptions(generationOptions, providerOptions,
     model.provider.name)
   validateRun(tools, maxRetries, maxSteps)
@@ -981,6 +999,7 @@ proc streamAgentTextAsync*(model: LanguageModel,
                            onEvent: AgentEventCallback = nil,
                            approvalPolicy: ToolApprovalPolicy = nil
                            ): Future[ProviderResponse] {.async.} =
+  ## Stream an agent run with lifecycle events and tool execution.
   let resolved = resolveGenerationOptions(generationOptions, providerOptions,
     model.provider.name)
   validateRun(tools, maxRetries, maxSteps)
@@ -992,6 +1011,7 @@ proc streamAgentTextAsync*(model: LanguageModel,
 
 proc eventStream*(run: proc (callback: AgentEventCallback): Future[ProviderResponse]
                   {.closure.}): AgentEventStream =
+  ## Adapt an event-callback run into a pull-based event stream.
   result = AgentEventStream(queue: newFutureStream[AgentEvent]("agentEvents"))
   let stream = result
   proc pump(): Future[ProviderResponse] {.async.} =
@@ -1025,6 +1045,7 @@ proc generateTextAsync*(model: LanguageModel,
                         toolChoice = toolChoiceAuto(),
                         approvalPolicy: ToolApprovalPolicy = nil
                         ): Future[ProviderResponse] {.async.} =
+  ## Generate text while receiving agent lifecycle events.
   return await generateAgentTextAsync(model, prompt, messages, system, tools,
     maxTokens, sessionId, generationOptions, maxRetries, maxSteps, abort, callbacks,
     providerOptions, metadata, turnId, toolChoice, onEvent, approvalPolicy)
@@ -1039,6 +1060,7 @@ proc generateText*(model: LanguageModel, onEvent: AgentEventCallback,
                    metadata: JsonNode = nil, turnId = "",
                    toolChoice = toolChoiceAuto(),
                    approvalPolicy: ToolApprovalPolicy = nil): ProviderResponse =
+  ## Synchronously generate text while receiving agent lifecycle events.
   waitFor generateTextAsync(model, onEvent, prompt, messages, system, tools,
     maxTokens, sessionId, generationOptions, maxRetries, maxSteps, abort, callbacks,
     providerOptions, metadata, turnId, toolChoice, approvalPolicy)
@@ -1055,6 +1077,7 @@ proc streamTextAsync*(model: LanguageModel, onEvent: AgentEventCallback,
                       toolChoice = toolChoiceAuto(),
                       approvalPolicy: ToolApprovalPolicy = nil
                       ): Future[ProviderResponse] {.async.} =
+  ## Stream text while receiving agent lifecycle events.
   return await streamAgentTextAsync(model, prompt, messages, system, tools,
     maxTokens, sessionId, generationOptions, wakeFd, maxRetries, maxSteps, abort,
     callbacks, providerOptions, metadata, turnId, toolChoice, onEvent,
@@ -1070,6 +1093,7 @@ proc streamText*(model: LanguageModel, onEvent: AgentEventCallback,
                  metadata: JsonNode = nil, turnId = "",
                  toolChoice = toolChoiceAuto(),
                  approvalPolicy: ToolApprovalPolicy = nil): ProviderResponse =
+  ## Synchronously stream text while receiving agent lifecycle events.
   waitFor streamTextAsync(model, onEvent, prompt, messages, system, tools,
     maxTokens, sessionId, generationOptions, wakeFd, maxRetries, maxSteps, abort,
     callbacks, providerOptions, metadata, turnId, toolChoice, approvalPolicy)
@@ -1080,6 +1104,7 @@ proc generateTextAsync*(provider: Provider, request: ProviderRequest,
                         callbacks = RunCallbacks(),
                         providerOptions = ProviderOptions()
                         ): Future[ProviderResponse] {.async.} =
+  ## Generate a ready-made request while receiving agent lifecycle events.
   validateRun(@[], maxRetries, 1)
   var resolved = request
   resolved.options = resolveOptions(request.options, providerOptions, provider.name)
@@ -1091,6 +1116,7 @@ proc generateText*(provider: Provider, request: ProviderRequest,
                    maxRetries = 2, abort: AbortCheck = nil,
                    callbacks = RunCallbacks(),
                    providerOptions = ProviderOptions()): ProviderResponse =
+  ## Synchronously generate a ready-made request with agent lifecycle events.
   waitFor generateTextAsync(provider, request, onEvent, maxRetries, abort,
     callbacks, providerOptions)
 
@@ -1100,6 +1126,7 @@ proc streamTextAsync*(provider: Provider, request: ProviderRequest,
                       callbacks = RunCallbacks(),
                       providerOptions = ProviderOptions()
                       ): Future[ProviderResponse] {.async.} =
+  ## Stream a ready-made request while receiving agent lifecycle events.
   validateRun(@[], maxRetries, 1)
   var resolved = request
   resolved.options = resolveOptions(request.options, providerOptions, provider.name)
@@ -1111,6 +1138,7 @@ proc streamText*(provider: Provider, request: ProviderRequest,
                  abort: AbortCheck = nil,
                  callbacks = RunCallbacks(),
                  providerOptions = ProviderOptions()): ProviderResponse =
+  ## Synchronously stream a ready-made request with agent lifecycle events.
   waitFor streamTextAsync(provider, request, onEvent, maxRetries, abort,
     callbacks, providerOptions)
 
@@ -1123,6 +1151,7 @@ proc events*(model: LanguageModel, prompt = "",
              providerOptions = ProviderOptions(), metadata: JsonNode = nil,
              turnId = "", toolChoice = toolChoiceAuto(),
              approvalPolicy: ToolApprovalPolicy = nil): AgentEventStream =
+  ## Start a pull-based event stream for an agent run.
   eventStream(proc (callback: AgentEventCallback): Future[ProviderResponse]
               {.closure.} =
     streamAgentTextAsync(model, prompt, messages, system, tools, maxTokens,
@@ -1131,21 +1160,25 @@ proc events*(model: LanguageModel, prompt = "",
 
 type
   ObjectMode* = enum
+    ## Choose how structured output is requested and recovered.
     omAuto    ## native structured output when the provider has it
     omNative  ## native only; still extracts/validates/repairs
     omJson    ## prompt + extract JSON from text
     omTool    ## forced submit tool; arguments are the value
 
   ObjectSource* = enum
+    ## Identify how the returned structured value was obtained.
     osNative  ## provider-native structured output
     osText     ## JSON extracted from model text
     osTool     ## value extracted from the submit tool
 
   ObjectTruncation* = enum
+    ## Choose how truncated structured output is handled.
     otReject   ## reject locally repaired JSON after max-token truncation
     otRepair   ## accept locally repaired JSON after max-token truncation
 
   ObjectResult*[T] = object
+    ## Structured output together with the provider response and recovery details.
     value*: T
     response*: ProviderResponse
     usage*: Usage
@@ -1433,6 +1466,7 @@ proc generateObjectAsync*(
   truncation = otReject,
   trace: TraceSink = nil
 ): Future[ObjectResult[JsonNode]] {.async.} =
+  ## Generate JSON that matches a supplied schema.
   let resolved = resolveGenerationOptions(generationOptions, providerOptions,
     model.provider.name)
   return await generateObjectAsync(model.provider, model.id, schema,
@@ -1451,6 +1485,7 @@ proc generateObject*(model: LanguageModel, schema: JsonNode, prompt = "",
                      providerOptions = ProviderOptions(),
                      truncation = otReject,
                      trace: TraceSink = nil): ObjectResult[JsonNode] =
+  ## Synchronously generate JSON that matches a supplied schema.
   waitFor generateObjectAsync(model, schema, prompt = prompt,
     messages = messages, system = system, name = name,
     description = description, maxTokens = maxTokens, sessionId = sessionId,
@@ -1481,6 +1516,7 @@ proc streamObjectAsync(
   truncation = otReject,
   trace: TraceSink = nil
 ): Future[ObjectResult[JsonNode]] {.async.} =
+  ## Stream a structured response and report partial JSON as it changes.
   ## Like `generateObject`, but the first attempt streams. `onPartial` gets
   ## the repaired JSON tree whenever it changes (not schema-valid). Schema
   ## check and optional model repairs run after the stream ends. Max-token
@@ -1551,6 +1587,7 @@ proc streamObjectAsync*(
   truncation = otReject,
   trace: TraceSink = nil
 ): Future[ObjectResult[JsonNode]] {.async.} =
+  ## Stream a model's structured response using a generated JSON schema.
   let resolved = resolveGenerationOptions(generationOptions, providerOptions,
     model.provider.name)
   return await streamObjectAsync(model.provider, model.id, schema,
@@ -1573,6 +1610,7 @@ proc streamObject*(model: LanguageModel, schema: JsonNode, prompt = "",
                    providerOptions = ProviderOptions(),
                    truncation = otReject,
                    trace: TraceSink = nil): ObjectResult[JsonNode] =
+  ## Synchronously stream a model's structured response.
   waitFor streamObjectAsync(model, schema, prompt = prompt,
     messages = messages, system = system, name = name,
     description = description, maxTokens = maxTokens, sessionId = sessionId,
@@ -1615,6 +1653,7 @@ proc generateObjectAsync*[T](
   truncation = otReject,
   trace: TraceSink = nil
 ): Future[ObjectResult[T]] {.async.} =
+  ## Generate structured output and decode it into `T`.
   ## `generateObject` with `jsonSchema(T)`, then `toObject`.
   when T is JsonNode:
     {.error: "use generateObject(..., schema=) for JsonNode; not generateObject[JsonNode]".}
@@ -1636,6 +1675,7 @@ proc generateObject*[T](model: LanguageModel, prompt = "",
                         providerOptions = ProviderOptions(),
                         truncation = otReject,
                         trace: TraceSink = nil): ObjectResult[T] =
+  ## Synchronously generate structured output and decode it into `T`.
   waitFor generateObjectAsync[T](model, prompt = prompt, messages = messages,
     system = system, name = name, description = description,
     maxTokens = maxTokens, sessionId = sessionId,
@@ -1665,6 +1705,7 @@ proc streamObjectAsync*[T](
   truncation = otReject,
   trace: TraceSink = nil
 ): Future[ObjectResult[T]] {.async.} =
+  ## Stream structured output and decode the final value into `T`.
   when T is JsonNode:
     {.error: "use streamObject(..., schema=) for JsonNode; not streamObject[JsonNode]".}
   let nm = if name.len > 0: name else: $T
@@ -1687,6 +1728,7 @@ proc streamObject*[T](model: LanguageModel, prompt = "",
                       providerOptions = ProviderOptions(),
                       truncation = otReject,
                       trace: TraceSink = nil): ObjectResult[T] =
+  ## Synchronously stream structured output and decode it into `T`.
   waitFor streamObjectAsync[T](model, prompt = prompt, messages = messages,
     system = system, name = name, description = description,
     maxTokens = maxTokens, sessionId = sessionId,

@@ -117,6 +117,7 @@ proc runEventsAsync*(agent: Agent, prompt = "", messages: seq[Message] = @[],
                     metadata: JsonNode = nil, turnId = "",
                     onEvent: AgentEventCallback = nil
                     ): Future[ProviderResponse] {.async.} =
+  ## Run an agent while receiving lifecycle events.
   if agent.isNil:
     raiseProviderError("agent must not be nil")
   return await generateAgentTextAsync(agent.model, prompt = prompt,
@@ -133,6 +134,7 @@ proc streamAsync*(agent: Agent, prompt: string, onEvent: AgentEventCallback,
                   callbacks = RunCallbacks(), sessionId = "",
                   metadata: JsonNode = nil, turnId = ""
                   ): Future[ProviderResponse] {.async.} =
+  ## Stream an agent run while receiving lifecycle events.
   if agent.isNil:
     raiseProviderError("agent must not be nil")
   if onEvent.isNil:
@@ -150,6 +152,7 @@ proc stream*(agent: Agent, prompt: string, onEvent: AgentEventCallback,
              messages: seq[Message] = @[], abort: AbortCheck = nil,
              callbacks = RunCallbacks(), sessionId = "",
              metadata: JsonNode = nil, turnId = ""): ProviderResponse =
+  ## Blocking convenience wrapper around the event-aware stream.
   waitFor agent.streamAsync(prompt, onEvent, messages, abort, callbacks,
     sessionId, metadata, turnId)
 
@@ -157,6 +160,7 @@ proc events*(agent: Agent, prompt: string, messages: seq[Message] = @[],
              abort: AbortCheck = nil, callbacks = RunCallbacks(),
              sessionId = "", metadata: JsonNode = nil, turnId = ""
              ): AgentEventStream =
+  ## Start a pull-based event stream for an agent run.
   if agent.isNil:
     raiseProviderError("agent must not be nil")
   eventStream(proc (callback: AgentEventCallback): Future[ProviderResponse]

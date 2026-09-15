@@ -12,7 +12,7 @@ from nimgent/providers/openai import openAI, hyper, openCode, openCodeZen,
   defaultOpenCodeEndpoint, defaultOpenCodeZenEndpoint, openCodeChat,
   openCodeResponses, openCodeMessages, openCodeGoogle, gatewayBase,
   ocChat, ocResponses, ocMessages, ocGoogle,
-  chatObjectOptions
+  chatObjectOptions, crReasoningContent
 from nimgent/providers/openai_chat import parseChatOutput
 
 suite "MCP client":
@@ -125,7 +125,6 @@ suite "Anthropic streaming":
     check response.usage.cacheReadTokens == 20
     check response.finishReason == frToolUse
     check events.len == 4
-    check anthropic("key").supports(pcStreaming)
 
   test "stream errors propagate and callbacks cancel":
     var message = %*{"content": [{"type": "text", "text": ""}]}
@@ -208,7 +207,6 @@ suite "embeddings":
     withFixture("openai_embeddings_fixture.py") do (port: int):
       let provider = openAI("fixture-key",
         "http://127.0.0.1:" & $port & "/v1/responses", timeoutSeconds = 5)
-      check provider.supports(pcEmbeddings)
       let model = provider.embeddingModel("text-embedding-3-small")
       let batch = embedMany(model, @["alpha", "beta"],
         providerOptions = ProviderOptions(openai: OpenAIOptions(
@@ -850,7 +848,6 @@ suite "OpenCode provider":
     check chat.endpoint == defaultOpenCodeEndpoint
     check not chat.useResponses
     check chat.maxTokensField == "max_tokens"
-    check not openCode("k").supports(pcEmbeddings)
     check OpenAIProvider(openCodeResponses("k")).useResponses
     check RouteProvider(openCode("k", protocol = ocMessages)).name == "opencode"
 
@@ -902,7 +899,6 @@ suite "OpenCode provider":
     ## The Messages wire is the same adapter against the Zen base.
     check openCodeMessages("k", defaultOpenCodeZenEndpoint).endpoint ==
       "https://opencode.ai/zen/v1/messages"
-    check not openCodeZen("k").supports(pcEmbeddings)
     ## An explicit endpoint still wins, so a proxy can serve either catalog.
     check OpenAIProvider(openCodeZen("k", "http://proxy.test/v1/messages",
       protocol = ocChat)).endpoint == "http://proxy.test/v1/chat/completions"
@@ -930,16 +926,12 @@ suite "OpenCode provider":
     check GoogleProvider(zen.default).endpoint == "https://opencode.ai/zen/v1"
     check zen.name == "opencode"
     check RouteProvider(openCode("k", protocol = ocGoogle)).name == "opencode"
-    ## Zen documents no embeddings endpoint for Gemini.
-    check not go.supports(pcEmbeddings)
-    for capability in [pcStreaming, pcTools, pcStructuredOutput, pcHostedTools]:
-      check go.supports(capability)
     ## A bare endpoint is used as-is: a local or proxied gateway root.
     check openCodeGoogle("k", "http://127.0.0.1:1").endpoint == "http://127.0.0.1:1"
     check openCodeGoogle("k", "http://proxy.test/v1/responses").endpoint ==
       "http://proxy.test/v1"
 
-  test "session header, user agent, and explicit format on the wire":
+  test "session header, user agent, format, and reasoning replay on the wire":
     withFixture("opencode_fixture.py") do (port: int):
       let url = "http://127.0.0.1:" & $port & "/chat/completions"
       let chatProvider = openCode("fixture-key", url, timeoutSeconds = 5,
@@ -949,6 +941,16 @@ suite "OpenCode provider":
         messages: @[userMessage("hi")], maxTokens: 16))
       check chat.text == "pong"
       check chat.usage.inputTokens == 12
+      let toolTurn = chatProvider.generate(ProviderRequest(
+        model: "deepseek-v4.1-flash", sessionId: "sess-abc",
+        messages: @[
+          userMessage("hi"),
+          Message(role: roleAssistant, content: @[
+            ContentBlock(kind: ckThinking, thinking: "plan"),
+            toolUse("call_1", "read", %*{"path": "x"})
+          ])
+        ], maxTokens: 16))
+      check toolTurn.text == "plan"
       let responsesProvider = openCode("fixture-key", url, timeoutSeconds = 5,
         userAgent = "nimlet/0.1.0", protocol = ocResponses)
       let responses = responsesProvider.generate(ProviderRequest(
@@ -998,12 +1000,11 @@ method nativeObjectSchemaIssues(p: RecordingProvider, model: string,
 
 suite "route provider":
   test "dispatches each model and keeps the caller's name":
-    let fallback = RecordingProvider(name: "chat", capabilities: {pcStreaming})
+    let fallback = RecordingProvider(name: "chat")
     let special = RecordingProvider(name: "messages")
     let router = routeProvider(fallback, route = proc (model: string): Provider =
       if model == "special": special else: nil)
     check router.name == "chat"
-    check router.supports(pcStreaming)
     check router.servingProvider("special") == special
     check router.servingProvider("plain") == fallback
     discard router.generate(ProviderRequest(model: "special",
@@ -1016,7 +1017,7 @@ suite "route provider":
       discard routeProvider(nil)
 
   test "delegates structured output and embeddings by model":
-    let fallback = RecordingProvider(name: "chat", capabilities: {pcStreaming})
+    let fallback = RecordingProvider(name: "chat")
     let special = RecordingProvider(name: "messages")
     let router = routeProvider(fallback, route = proc (model: string): Provider =
       if model == "special": special else: nil)
@@ -1031,7 +1032,6 @@ suite "route provider":
     ## No route: everything lands on the default.
     let plain = routeProvider(fallback)
     check plain.servingProvider("anything") == fallback
-    check plain.supports(pcStreaming)
 
 suite "Mistral provider":
   test "defaults to Mistral Chat Completions":
@@ -1302,6 +1302,47 @@ suite "encoding":
       maxTokens: 10), stream = false)
     check "reasoning" notin stripped["messages"][1]
     check "reasoning_details" notin stripped["messages"][1]
+
+  test "reasoning-content chat hosts replay thinking on tool turns":
+    let provider = openCodeChat("key")
+    check provider.chatReasoning == crReasoningContent
+    let body = buildChatBody(ProviderRequest(
+      model: "m",
+      messages: @[
+        userMessage("hi"),
+        Message(role: roleAssistant, content: @[
+          ContentBlock(kind: ckThinking, thinking: "plan"),
+          toolUse("call_1", "read", %*{"path": "x"})
+        ])
+      ],
+      maxTokens: 10), stream = false, reasoning = provider.chatReasoning)
+    let asst = body["messages"][1]
+    check asst["reasoning_content"].getStr == "plan"
+    check "reasoning" notin asst
+    check "reasoning_details" notin asst
+    check asst["tool_calls"][0]["id"].getStr == "call_1"
+
+  test "captured reasoning_content rounds back to the wire":
+    let captured = parseChatOutput(%*{
+      "model": "m",
+      "choices": [{
+        "finish_reason": "tool_calls",
+        "message": {
+          "reasoning_content": "let me look",
+          "content": "",
+          "tool_calls": [{"id": "call_1", "type": "function",
+            "function": {"name": "read", "arguments": "{\"path\":\"x\"}"}}]
+        }
+      }]
+    }, "deepseek")
+    check captured.content[0].kind == ckThinking
+    let body = buildChatBody(ProviderRequest(model: "m",
+      messages: @[userMessage("hi"), Message(role: roleAssistant,
+        content: captured.content)], maxTokens: 10), stream = false,
+      reasoning = crReasoningContent)
+    check body["messages"][1]["reasoning_content"].getStr == "let me look"
+    check body["messages"][1]["tool_calls"][0]["function"]["name"].getStr ==
+      "read"
 
   test "chat completions keeps textless assistant turns valid":
     let body = buildChatBody(ProviderRequest(
@@ -2182,12 +2223,10 @@ suite "streamObject":
     check p.calls == 2
 
 suite "wrapProvider":
-  test "forwards capabilities and structured-output methods":
+  test "forwards structured-output methods":
     let inner = openAI("k")
     let w = wrapProvider(inner)
     check w.name == "openai"
-    check w.supports(pcStreaming)
-    check w.supports(pcHostedTools)
     check w.nativeObjectOptions("m", "o", "", %*{"type": "object"})["text"]["format"][
       "type"].getStr == "json_schema"
     check w.nativeObjectSchemaIssues("m", %*{"type": "integer"}).len > 0

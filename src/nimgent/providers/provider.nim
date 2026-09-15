@@ -10,10 +10,12 @@ import std/[asyncdispatch, base64, json, os, strutils]
 
 type
   Role* = enum
+    ## Message author role sent to the model.
     roleUser = "user"
     roleAssistant = "assistant"
 
   ContentKind* = enum
+    ## Kind of content stored in a message or response.
     ckText
     ckToolUse
     ckToolResult
@@ -23,17 +25,20 @@ type
     ckSource
 
   ImageContent* = object
+    ## Base64-encoded image content and optional source path.
     mimeType*: string
     data*: string  ## base64, no data: prefix
     path*: string  ## optional caller-owned source/reference path
 
   FileContent* = object
+    ## Base64-encoded file content and optional file metadata.
     mimeType*: string
     data*: string  ## base64, no data: prefix
     path*: string
     filename*: string
 
   SourceContent* = object
+    ## Citation or source metadata returned by a provider.
     url*: string
     title*: string
     id*: string
@@ -41,6 +46,7 @@ type
     raw*: JsonNode  ## provider citation object; required for Anthropic replay
 
   ContentBlock* = object
+    ## One provider-neutral text, tool, media, thinking, or source block.
     googlePart*: JsonNode ## Original native Gemini part, retained for signed replay.
     ## Non-empty when the provider already ran this tool use/result
     ## (`web_search`, …). `toolCalls` skips these; generateText must not
@@ -81,10 +87,12 @@ type
       source*: SourceContent
 
   Message* = object
+    ## A role and ordered content blocks sent to or returned by a model.
     role*: Role
     content*: seq[ContentBlock]
 
   ToolDefinition* = object
+    ## Provider-facing description of a callable or hosted tool.
     name*: string
     description*: string
     inputSchema*: JsonNode
@@ -93,12 +101,14 @@ type
     hostedOptions*: JsonNode
 
   ToolChoiceKind* = enum
+    ## Strategy for selecting a tool during a model call.
     tckAuto
     tckRequired
     tckNone
     tckSpecific
 
   ToolChoice* = object
+    ## Tool-selection strategy, optionally naming one required tool.
     case kind*: ToolChoiceKind
     of tckSpecific:
       name*: string
@@ -106,6 +116,7 @@ type
       discard
 
   FinishReason* = enum
+    ## Why a model step stopped.
     frUnknown
     frEndTurn
     frToolUse
@@ -113,16 +124,8 @@ type
     frStop
     frStepLimit
 
-  ProviderCapability* = enum
-    pcStreaming
-    pcTools
-    pcStructuredOutput
-    pcImages
-    pcFiles
-    pcHostedTools
-    pcEmbeddings
-
   Usage* = object
+    ## Token usage reported by a provider.
     inputTokens*: int
     outputTokens*: int
     cacheReadTokens*: int
@@ -132,6 +135,7 @@ type
     cacheReported*: bool
 
   ProviderRequest* = object
+    ## Provider-neutral request passed to a provider adapter.
     model*: string
     sessionId*: string
     ## Optional execution identity and metadata for local tool context.
@@ -151,6 +155,7 @@ type
     wakeFd*: cint = -1
 
   StepResult* = object
+    ## Result from one model call in a multi-step run.
     model*: string
     content*: seq[ContentBlock]
     usage*: Usage
@@ -159,6 +164,7 @@ type
     toolResults*: seq[ContentBlock]
 
   ProviderResponse* = object
+    ## Provider response, including content, usage, and step history.
     ## Provider-reported model, which may differ from the requested alias after
     ## routing or fallback. It is more trustworthy than asking the model.
     model*: string
@@ -172,6 +178,7 @@ type
     ## Every model call made by the high-level tool loop.
     steps*: seq[StepResult]
   ProviderError* = object of CatchableError
+    ## Error raised for provider, transport, or request failures.
     ## Raised for transport and API errors. `overflow` marks the specific case
     ## of exceeding the context window, which the agent can recover from.
     overflow*: bool
@@ -187,16 +194,19 @@ type
     message*: string
 
   ObjectError* = object of ProviderError
+    ## Error raised when structured output does not match its schema.
     ## generateObject could not produce a value that matches the schema.
     issueDetails*: seq[ObjectIssue]
     raw*: string
 
   CancelledError* = object of ProviderError
+    ## Error raised when a caller cancels a request.
 
   AbortCheck* = proc (): bool {.closure.}
     ## Return true to cancel. Checked before each attempt and tool call.
 
   ToolContext* = object
+    ## Context passed to a local tool invocation.
     ## Per-invocation state supplied to context-aware tool handlers.
     callId*: string
     sessionId*: string
@@ -221,6 +231,7 @@ type
     images*: seq[ImageContent]
 
   Tool* = object
+    ## Callable local tool or provider-hosted tool definition.
     name*: string
     description*: string
     inputSchema*: JsonNode
@@ -235,21 +246,25 @@ type
     hostedOptions*: JsonNode
 
   Provider* = ref object of RootObj
+    ## Base type implemented by a model provider adapter.
     name*: string
-    capabilities*: set[ProviderCapability]
 
   LanguageModel* = object
+    ## Provider and model identifier used for text generation.
     provider*: Provider
     id*: string
 
   EmbeddingModel* = object
+    ## Provider and model identifier used for embeddings.
     provider*: Provider
     id*: string
 
   EmbeddingUsage* = object
+    ## Embedding token usage reported by a provider.
     tokens*: int
 
   AgentEventKind* = enum
+    ## Lifecycle event kind emitted during an agent run.
     aeRunStart
     aeStepStart
     aeTextDelta
@@ -262,19 +277,23 @@ type
     aeError
 
   ToolApprovalMode* = enum
+    ## Default decision returned by a tool approval policy.
     tamAllow
     tamAsk
     tamDeny
 
   ToolApproval* = object
+    ## Approval policy decision and optional explanation.
     mode*: ToolApprovalMode
     reason*: string
 
   ToolApprovalDecision* = enum
+    ## Decision resolved on a pending tool approval request.
     tadApprove
     tadDeny
 
   ToolApprovalRequest* = ref object
+    ## Pending request that an application can approve or deny.
     callId*: string
     toolName*: string
     input*: JsonNode
@@ -283,6 +302,7 @@ type
     resolved: bool
 
   AgentEvent* = object
+    ## Normalized lifecycle event emitted during an agent run.
     runId*: string
     sessionId*: string
     turnId*: string
@@ -310,17 +330,21 @@ type
       error*: ref CatchableError
 
   AgentEventCallback* = proc (event: AgentEvent): bool {.closure.}
+    ## Callback that receives agent lifecycle events; return false to cancel.
 
   ToolApprovalPolicy* = proc (step: int, call: ContentBlock,
                               tool: Tool): ToolApproval {.closure.}
+    ## Callback that decides whether a tool call may run.
 
   EmbeddingRequest* = object
+    ## Provider-neutral request for one or more embeddings.
     model*: string
     values*: seq[string]
     ## Escape hatch for provider-specific embedding settings (dimensions, user, ...).
     options*: JsonNode
 
   EmbeddingResponse* = object
+    ## Embedding vectors and usage returned by a provider.
     model*: string
     embeddings*: seq[seq[float]]
     usage*: EmbeddingUsage
@@ -328,6 +352,7 @@ type
     requestId*: string
 
   StreamEventKind* = enum
+    ## Kind of normalized streaming event.
     seTextDelta
     seThinkingDelta
     seToolCallDelta
@@ -335,6 +360,7 @@ type
     seWake          ## Input or periodic cancellation check while waiting on the provider
 
   StreamEvent* = object
+    ## Text, thinking, tool-call, completion, or wake event from a stream.
     case kind*: StreamEventKind
     of seTextDelta, seThinkingDelta:
       text*: string
@@ -346,6 +372,7 @@ type
       discard
 
   ThinkingWire* = enum
+    ## Provider wire format used for reasoning or thinking options.
     twEffort     ## reasoning.effort / thinking.budget_tokens
     twToggle     ## reasoning.enabled / reasoning.effort=medium / thinking high
     twMaxTokens  ## reasoning.max_tokens / reasoning.effort / thinking.budget_tokens
@@ -355,31 +382,36 @@ type
 
 proc newToolApprovalRequest*(call: ContentBlock,
                              reason: string): ToolApprovalRequest =
+  ## Create a pending approval request for a tool call.
   ToolApprovalRequest(callId: call.id, toolName: call.name,
     input: if call.input.isNil: newJNull() else: copy(call.input),
     reason: reason, decision: newFuture[ToolApprovalDecision]("toolApproval"),
     resolved: false)
 
 proc approve*(request: ToolApprovalRequest) =
+  ## Resolve a pending approval request as approved.
   if request.isNil or request.resolved: return
   request.resolved = true
   request.decision.complete(tadApprove)
 
 proc deny*(request: ToolApprovalRequest) =
+  ## Resolve a pending approval request as denied.
   if request.isNil or request.resolved: return
   request.resolved = true
   request.decision.complete(tadDeny)
 
 proc waitDecision*(request: ToolApprovalRequest): Future[ToolApprovalDecision] =
+  ## Wait for an approval request to be resolved.
   if request.isNil:
     return newFuture[ToolApprovalDecision]("nilToolApproval")
   request.decision
 
 proc raiseProviderError*(msg: string, overflow = false, retryable = false,
                          aborted = false, status = 0, retryAfterMs = 0,
-                         requestId = "")
+                         requestId = "") ## Raise a provider error.
 
 proc addUsage*(a: var Usage, b: Usage) =
+  ## Add the counters in `b` to `a`.
   a.inputTokens += b.inputTokens
   a.outputTokens += b.outputTokens
   a.cacheReadTokens += b.cacheReadTokens
@@ -387,24 +419,25 @@ proc addUsage*(a: var Usage, b: Usage) =
   a.cacheReported = a.cacheReported or b.cacheReported
 
 proc model*(provider: Provider, id: string): LanguageModel =
+  ## Create a language model reference for a provider and model ID.
   if provider.isNil: raise newException(ProviderError, "provider must not be nil")
   if id.len == 0: raise newException(ProviderError, "model id must not be empty")
   LanguageModel(provider: provider, id: id)
 
 proc embeddingModel*(provider: Provider, id: string): EmbeddingModel =
+  ## Create an embedding model reference for a provider and model ID.
   if provider.isNil: raise newException(ProviderError, "provider must not be nil")
   if id.len == 0: raise newException(ProviderError, "model id must not be empty")
   EmbeddingModel(provider: provider, id: id)
 
 method embedAsync*(p: Provider, request: EmbeddingRequest): Future[EmbeddingResponse]
     {.base, async.} =
+  ## Execute an embedding request asynchronously.
   raise newException(CatchableError, "provider does not implement embeddings")
 
 proc embed*(p: Provider, request: EmbeddingRequest): EmbeddingResponse =
+  ## Execute an embedding request synchronously.
   waitFor p.embedAsync(request)
-
-proc supports*(provider: Provider, capability: ProviderCapability): bool =
-  not provider.isNil and capability in provider.capabilities
 
 proc contextTokens*(u: Usage): int =
   ## Tokens occupying the context window on the last request.
@@ -444,20 +477,25 @@ proc formatUsageLabels*(usage: Usage): seq[string] =
 
 method generateAsync*(p: Provider, request: ProviderRequest): Future[ProviderResponse]
     {.base, async.} =
+  ## Execute a generation request asynchronously.
   raise newException(CatchableError, "provider does not implement generate")
 
 proc generate*(p: Provider, request: ProviderRequest): ProviderResponse =
+  ## Execute a generation request synchronously.
   waitFor p.generateAsync(request)
 
-const imageOmitted* = "[image omitted: model does not accept images]"
+const imageOmitted* = "[image omitted: model does not accept images]" ## Text used when an image is omitted.
 
 proc text*(s: string): ContentBlock =
+  ## Create a text content block.
   ContentBlock(kind: ckText, text: s)
 
 proc image*(mimeType, data: string, path = ""): ContentBlock =
+  ## Create an image block from base64 data.
   ContentBlock(kind: ckImage, mimeType: mimeType, data: data, path: path)
 
 proc image*(img: ImageContent): ContentBlock =
+  ## Create an image block from `ImageContent`.
   image(img.mimeType, img.data, img.path)
 
 proc imageFromPath*(path, mimeType: string): ContentBlock =
@@ -465,13 +503,16 @@ proc imageFromPath*(path, mimeType: string): ContentBlock =
   image(mimeType, encode(readFile(path)), path)
 
 proc toImage*(part: ContentBlock): ImageContent =
+  ## Extract image data from an image content block.
   ImageContent(mimeType: part.mimeType, data: part.data, path: part.path)
 
 proc file*(mimeType, data: string, path = "", filename = ""): ContentBlock =
+  ## Create a file block from base64 data.
   ContentBlock(kind: ckFile, file: FileContent(mimeType: mimeType, data: data,
     path: path, filename: filename))
 
 proc file*(f: FileContent): ContentBlock =
+  ## Create a file block from `FileContent`.
   ContentBlock(kind: ckFile, file: f)
 
 proc fileFromPath*(path, mimeType: string, filename = ""): ContentBlock =
@@ -481,10 +522,12 @@ proc fileFromPath*(path, mimeType: string, filename = ""): ContentBlock =
 
 proc source*(url: string; title = ""; id = ""; citedText = "";
              raw: JsonNode = nil): ContentBlock =
+  ## Create a source or citation content block.
   ContentBlock(kind: ckSource, source: SourceContent(url: url, title: title,
     id: id, citedText: citedText, raw: raw))
 
 proc fileLabel*(f: FileContent): string =
+  ## Return the filename, path basename, or a generic file label.
   if f.filename.len > 0: return f.filename
   if f.path.len > 0:
     let i = max(f.path.rfind('/'), f.path.rfind('\\'))
@@ -492,6 +535,7 @@ proc fileLabel*(f: FileContent): string =
   "file"
 
 proc fileDataUri*(f: FileContent): string =
+  ## Return file data in a `data:` URI.
   "data:" & f.mimeType & ";base64," & f.data
 
 proc takeFollowingSources*(content: openArray[ContentBlock],
@@ -547,7 +591,7 @@ proc applyCacheBreakpoints*(body: JsonNode) =
       break
 
 proc parseToolArguments*(raw: string): tuple[input: JsonNode, parseError: string] =
-  ## Empty args → `{}`. Invalid JSON is a tool error, not a provider failure.
+  ## Parse tool arguments, returning an error string for invalid JSON.
   if raw.len == 0:
     return (newJObject(), "")
   try:
@@ -557,10 +601,12 @@ proc parseToolArguments*(raw: string): tuple[input: JsonNode, parseError: string
 
 proc toolUse*(id, name: string, input: JsonNode, parseError = "",
               hosted = ""): ContentBlock =
+  ## Create a tool-call content block.
   ContentBlock(kind: ckToolUse, id: id, name: name, input: input,
     parseError: parseError, hosted: hosted)
 
 proc toolUseFromArgs*(id, name, raw: string): ContentBlock =
+  ## Parse raw tool arguments and create a tool-call content block.
   let parsed = parseToolArguments(raw)
   toolUse(id, name, parsed.input, parsed.parseError)
 
@@ -568,6 +614,7 @@ proc toolResult*(toolUseId, output: string, isError = false,
                  images: seq[ImageContent] = @[], hosted = "",
                  value: JsonNode = nil, errorCode = "", errorMessage = "",
                  errorDetails: JsonNode = nil, errorRetryable = false): ContentBlock =
+  ## Create a tool-result content block.
   ContentBlock(kind: ckToolResult, toolUseId: toolUseId, output: output,
     isError: isError, value: value, errorCode: errorCode,
     errorMessage: errorMessage,
@@ -575,15 +622,19 @@ proc toolResult*(toolUseId, output: string, isError = false,
     images: images, hosted: hosted)
 
 proc userMessage*(s: string): Message =
+  ## Create a user message containing text.
   Message(role: roleUser, content: @[text(s)])
 
 proc userMessage*(parts: seq[ContentBlock]): Message =
+  ## Create a user message from content blocks.
   Message(role: roleUser, content: parts)
 
 proc assistantMessage*(s: string): Message =
+  ## Create an assistant message containing text.
   Message(role: roleAssistant, content: @[text(s)])
 
 proc assistantMessage*(parts: seq[ContentBlock]): Message =
+  ## Create an assistant message from content blocks.
   Message(role: roleAssistant, content: parts)
 
 proc dropImages*(messages: seq[Message]): seq[Message] =
@@ -608,28 +659,34 @@ proc dropImages*(messages: seq[Message]): seq[Message] =
     result.add Message(role: msg.role, content: parts)
 
 proc toolCalls*(r: ProviderResponse): seq[ContentBlock] =
+  ## Return local tool calls in a provider response.
   for b in r.content:
     if b.kind == ckToolUse and b.hosted.len == 0:
       result.add b
 
 proc toolCalls*(s: StepResult): seq[ContentBlock] =
+  ## Return local tool calls in one model step.
   for b in s.content:
     if b.kind == ckToolUse and b.hosted.len == 0:
       result.add b
 
 proc textContent*(blocks: openArray[ContentBlock]): string =
+  ## Join the text blocks with newline separators.
   for b in blocks:
     if b.kind == ckText:
       if result.len > 0: result.add "\n"
       result.add b.text
 
 proc text*(r: ProviderResponse): string =
+  ## Return the text content of a provider response.
   textContent(r.content)
 
 proc text*(s: StepResult): string =
+  ## Return the text content of one model step.
   textContent(s.content)
 
 proc mergeRequestOptions*(body, options: JsonNode) =
+  ## Merge a JSON options object into a provider request body.
   if options.isNil or options.kind == JNull: return
   if options.kind != JObject:
     raise newException(ProviderError, "options must be a JSON object")
@@ -663,6 +720,7 @@ method generateStreamAsync*(p: Provider, request: ProviderRequest,
 
 proc generateStream*(p: Provider, request: ProviderRequest,
                      onEvent: StreamCallback): ProviderResponse =
+  ## Synchronously execute a streaming provider request.
   waitFor p.generateStreamAsync(request, onEvent)
 
 proc isContextOverflow*(detail: string): bool =
@@ -680,9 +738,10 @@ proc isContextOverflow*(detail: string): bool =
   "max input tokens" in lower
 
 proc isRetryableStatus*(code: int): bool =
+  ## Return whether an HTTP status normally warrants a retry.
   code == 429 or code >= 500
 
-const retryAfterCapMs* = 30_000  ## ignore wild Retry-After values
+const retryAfterCapMs* = 30_000  ## Maximum Retry-After delay accepted, in milliseconds.
 
 proc parseRetryAfter*(value: string): int =
   ## Milliseconds from a Retry-After header. Integer seconds only; HTTP-date
@@ -714,6 +773,7 @@ proc apiErrorMessage*(raw: string): string =
 proc raiseProviderError*(msg: string, overflow = false, retryable = false,
                          aborted = false, status = 0, retryAfterMs = 0,
                          requestId = "") =
+  ## Raise a provider error with retry, cancellation, and response metadata.
   let e = newException(ProviderError, msg)
   e.overflow = overflow
   e.retryable = retryable or isRetryableStatus(status)
@@ -724,11 +784,13 @@ proc raiseProviderError*(msg: string, overflow = false, retryable = false,
   raise e
 
 proc raiseCancelledError*(msg = "aborted") {.noreturn.} =
+  ## Raise a provider error marked as caller-cancelled.
   let e = newException(CancelledError, msg)
   e.aborted = true
   raise e
 
 proc raiseObjectError*(msg: string, issues: seq[string], raw = "") =
+  ## Raise an object error with validation issues and optional raw output.
   let e = newException(ObjectError, msg)
   for issue in issues:
     let sep = issue.find(": ")
@@ -763,19 +825,24 @@ proc rawTool*(name, description: string, inputSchema: JsonNode,
        hostedOptions: hostedOptions)
 
 proc toolChoiceAuto*(): ToolChoice =
+  ## Let the model decide whether to call a tool.
   ToolChoice(kind: tckAuto)
 
 proc toolChoiceRequired*(): ToolChoice =
+  ## Require the model to call one of the available tools.
   ToolChoice(kind: tckRequired)
 
 proc toolChoiceNone*(): ToolChoice =
+  ## Prevent the model from calling tools.
   ToolChoice(kind: tckNone)
 
 proc toolChoiceSpecific*(name: string): ToolChoice =
+  ## Require the model to call the named tool.
   ToolChoice(kind: tckSpecific, name: name)
 
 proc validateToolChoice*(choice: ToolChoice,
                          tools: openArray[ToolDefinition]) =
+  ## Validate a tool choice against the tools available to a request.
   case choice.kind
   of tckSpecific:
     if choice.name.strip.len == 0:
@@ -807,12 +874,14 @@ proc hostedTool*(name: string, options: JsonNode = nil): Tool =
   Tool(name: name, hosted: name, hostedOptions: options)
 
 proc toDefinitions*(tools: openArray[Tool]): seq[ToolDefinition] =
+  ## Convert executable tools into provider-facing definitions.
   for t in tools:
     result.add ToolDefinition(name: t.name, description: t.description,
       inputSchema: t.inputSchema, hosted: t.hosted,
       hostedOptions: t.hostedOptions)
 
 proc thinkingBudgetTokens*(level: string): int =
+  ## Map a thinking level to a standard token budget.
   case level.toLowerAscii
   of "minimal": 1024
   of "low": 2048
@@ -881,6 +950,7 @@ type
     ## Return a new request. Do not mutate `req` in place: the tool loop and
     ## generateObject repairs reuse one request across turns.
   ResponseMapper* = proc (req: ProviderRequest, resp: var ProviderResponse) {.closure.}
+    ## Inspect or update a provider response after a request completes.
 
   WrapProvider* = ref object of Provider
     ## Provider middleware: forwards every call to `inner` through optional
@@ -893,37 +963,40 @@ proc wrapProvider*(inner: Provider, name = "",
                    mapRequest: RequestMapper = nil,
                    mapResponse: ResponseMapper = nil): WrapProvider =
   ## Wrap `inner` so generate, stream, and generateObject all pass through the
-  ## hooks. Capabilities and the structured-output methods forward, so
-  ## `supports` stays truthful through the wrapper.
+  ## hooks. Structured-output methods forward to the inner provider.
   if inner.isNil:
     raise newException(ProviderError, "provider must not be nil")
   WrapProvider(name: if name.len > 0: name else: inner.name,
-    capabilities: inner.capabilities, inner: inner,
-    mapRequest: mapRequest, mapResponse: mapResponse)
+    inner: inner, mapRequest: mapRequest, mapResponse: mapResponse)
 
 method generateAsync*(p: WrapProvider,
                       request: ProviderRequest): Future[ProviderResponse] {.async.} =
+  ## Forward generation through the wrapper hooks.
   let mapped = if p.mapRequest.isNil: request else: p.mapRequest(request)
   result = await p.inner.generateAsync(mapped)
   if not p.mapResponse.isNil: p.mapResponse(mapped, result)
 
 method generateStreamAsync*(p: WrapProvider, request: ProviderRequest,
                             onEvent: StreamCallback): Future[ProviderResponse] {.async.} =
+  ## Forward streaming through the wrapper hooks.
   let mapped = if p.mapRequest.isNil: request else: p.mapRequest(request)
   result = await p.inner.generateStreamAsync(mapped, onEvent)
   if not p.mapResponse.isNil: p.mapResponse(mapped, result)
 
 method embedAsync*(p: WrapProvider,
                    request: EmbeddingRequest): Future[EmbeddingResponse] {.async.} =
+  ## Forward embeddings to the wrapped provider.
   ## Text-generation mappers intentionally do not alter embedding requests.
   return await p.inner.embedAsync(request)
 
 method nativeObjectOptions*(p: WrapProvider, model, name, description: string,
                             schema: JsonNode): JsonNode =
+  ## Forward native structured-output options to the wrapped provider.
   p.inner.nativeObjectOptions(model, name, description, schema)
 
 method nativeObjectSchemaIssues*(p: WrapProvider, model: string,
                                  schema: JsonNode): seq[string] =
+  ## Forward native schema checks to the wrapped provider.
   p.inner.nativeObjectSchemaIssues(model, schema)
 
 type
@@ -939,12 +1012,11 @@ type
 
 proc routeProvider*(default: Provider, name = "",
                     route: ProviderRouter = nil): RouteProvider =
-  ## Capabilities start as the default's; widen the returned field when the
-  ## routed providers offer more than it does.
+  ## Create a provider that routes requests by model ID.
   if default.isNil:
     raise newException(ProviderError, "provider must not be nil")
   RouteProvider(name: if name.len > 0: name else: default.name,
-    capabilities: default.capabilities, default: default, route: route)
+    default: default, route: route)
 
 proc servingProvider*(p: RouteProvider, model: string): Provider =
   ## The provider a request for `model` goes to.
@@ -954,20 +1026,25 @@ proc servingProvider*(p: RouteProvider, model: string): Provider =
 
 method generateAsync*(p: RouteProvider,
                       request: ProviderRequest): Future[ProviderResponse] {.async.} =
+  ## Route an asynchronous generation request by model ID.
   return await p.servingProvider(request.model).generateAsync(request)
 
 method generateStreamAsync*(p: RouteProvider, request: ProviderRequest,
                             onEvent: StreamCallback): Future[ProviderResponse] {.async.} =
+  ## Route an asynchronous streaming request by model ID.
   return await p.servingProvider(request.model).generateStreamAsync(request, onEvent)
 
 method embedAsync*(p: RouteProvider,
                    request: EmbeddingRequest): Future[EmbeddingResponse] {.async.} =
+  ## Route an asynchronous embedding request by model ID.
   return await p.servingProvider(request.model).embedAsync(request)
 
 method nativeObjectOptions*(p: RouteProvider, model, name, description: string,
                             schema: JsonNode): JsonNode =
+  ## Route native structured-output options by model ID.
   p.servingProvider(model).nativeObjectOptions(model, name, description, schema)
 
 method nativeObjectSchemaIssues*(p: RouteProvider, model: string,
                                  schema: JsonNode): seq[string] =
+  ## Route native schema checks by model ID.
   p.servingProvider(model).nativeObjectSchemaIssues(model, schema)

@@ -13,6 +13,7 @@ type HyperOptions* = object
   includeUsage*: Option[bool] ## Include usage in streamed responses.
 
 proc toProviderJson*(value: HyperOptions): JsonNode =
+  ## Serialize Hyper-specific request options.
   result = newJObject()
   if value.user.isSome: result["user"] = %value.user.get
   if value.parallelToolCalls.isSome:

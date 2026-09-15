@@ -10,16 +10,17 @@ import nimgent/providers/[anthropic, google_transport, provider, stream,
   http_metadata, openai_chat, openai_responses]
 import nimgent/structured_output/jsonschema_validate
 export popLine, buildChatBody, openAiImagePart, buildResponsesBody,
-  parseResponsesOutput, chatObjectOptions, responsesObjectOptions
+  parseResponsesOutput, chatObjectOptions, responsesObjectOptions,
+  ChatReasoning
 
 const
-  defaultOpenAiEndpoint* = "https://api.openai.com/v1/responses"
-  defaultOpenAiChatEndpoint* = "https://api.openai.com/v1/chat/completions"
-  defaultOpenRouterEndpoint* = "https://openrouter.ai/api/v1/chat/completions"
-  defaultHyperEndpoint* = "https://hyper.charm.land/v1/chat/completions"
-  defaultMistralEndpoint* = "https://api.mistral.ai/v1/chat/completions"
-  defaultOpenCodeEndpoint* = "https://opencode.ai/zen/go/v1/chat/completions"
-  defaultOpenCodeZenEndpoint* = "https://opencode.ai/zen/v1/chat/completions"
+  defaultOpenAiEndpoint* = "https://api.openai.com/v1/responses" ## Default OpenAI Responses endpoint.
+  defaultOpenAiChatEndpoint* = "https://api.openai.com/v1/chat/completions" ## Default OpenAI Chat Completions endpoint.
+  defaultOpenRouterEndpoint* = "https://openrouter.ai/api/v1/chat/completions" ## Default OpenRouter endpoint.
+  defaultHyperEndpoint* = "https://hyper.charm.land/v1/chat/completions" ## Default Hyper endpoint.
+  defaultMistralEndpoint* = "https://api.mistral.ai/v1/chat/completions" ## Default Mistral endpoint.
+  defaultOpenCodeEndpoint* = "https://opencode.ai/zen/go/v1/chat/completions" ## Default OpenCode endpoint.
+  defaultOpenCodeZenEndpoint* = "https://opencode.ai/zen/v1/chat/completions" ## Default OpenCode Zen endpoint.
 
 proc gatewayBase*(url: string): string =
   ## The gateway root the protocol paths hang off, or "" when `url` is not a
@@ -43,15 +44,17 @@ type
   ## Per-model surface override for gateways that serve a few models on a
   ## different wire format. Returns the endpoint for that model, or "" for the
   ## provider default. `useResponses` follows from the returned URL.
-  OpenAiRoute* = proc (model: string): string {.closure.}
+  OpenAiRoute* = proc (model: string): string {.closure.} ## Select an endpoint for a model.
 
   OpenCodeProtocol* = enum
+    ## Wire protocol used by an OpenCode gateway.
     ocChat
     ocResponses
     ocMessages
     ocGoogle
 
   OpenAIProvider* = ref object of Provider
+    ## OpenAI-compatible HTTP provider configuration.
     apiKey*: string
     endpoint*: string
     timeoutSeconds*: int
@@ -76,11 +79,13 @@ type
     userAgent*: string
     ## Models this gateway only serves on another surface.
     route*: OpenAiRoute
+    ## Replayed-thinking flavor of this gateway's Chat Completions wire.
+    chatReasoning*: ChatReasoning
 
-  OpenRouterProvider* = OpenAIProvider
-  HyperProvider* = OpenAIProvider
-  MistralProvider* = OpenAIProvider
-  OpenCodeProvider* = OpenAIProvider
+  OpenRouterProvider* = OpenAIProvider ## OpenRouter provider configuration.
+  HyperProvider* = OpenAIProvider ## Hyper provider configuration.
+  MistralProvider* = OpenAIProvider ## Mistral provider configuration.
+  OpenCodeProvider* = OpenAIProvider ## OpenCode provider configuration.
 
 proc initOpenAIProvider(name, displayName, apiKey, endpoint: string,
                       timeoutSeconds: int, siteUrl = "", siteName = "",
@@ -88,23 +93,20 @@ proc initOpenAIProvider(name, displayName, apiKey, endpoint: string,
                       maxTokensField = "max_completion_tokens",
                       useResponses = false, embeddingsEndpoint = "",
                       promptCacheKey = false, sessionHeader = "",
-                      userAgent = "", route: OpenAiRoute = nil): OpenAIProvider =
-  let capabilities = {pcStreaming, pcTools, pcStructuredOutput, pcImages, pcFiles}
-  result = OpenAIProvider(name: name, capabilities:
-                   if useResponses: capabilities + {pcHostedTools}
-                   else: capabilities,
-                 displayName: displayName, apiKey: apiKey,
+                      userAgent = "", route: OpenAiRoute = nil,
+                      chatReasoning = crReasoning): OpenAIProvider =
+  result = OpenAIProvider(name: name, displayName: displayName, apiKey: apiKey,
                  endpoint: endpoint, timeoutSeconds: timeoutSeconds,
                  siteUrl: siteUrl, siteName: siteName,
                  includeSessionId: includeSessionId, applyCache: applyCache,
                  promptCacheKey: promptCacheKey, sessionHeader: sessionHeader,
                  userAgent: userAgent, route: route,
+                 chatReasoning: chatReasoning,
                  maxTokensField: maxTokensField, useResponses: useResponses)
   let base = gatewayBase(endpoint)
   result.embeddingsEndpoint = if embeddingsEndpoint.len > 0: embeddingsEndpoint
     elif base.len > 0: base & "/embeddings"
     else: endpoint & "/embeddings"
-  if name notin ["hyper", "opencode"]: result.capabilities.incl pcEmbeddings
 
 proc openAI*(apiKey: string, endpoint = "", timeoutSeconds = 300,
              userAgent = ""): OpenAIProvider =
@@ -117,6 +119,7 @@ proc openAI*(apiKey: string, endpoint = "", timeoutSeconds = 300,
 
 proc openRouter*(apiKey: string, endpoint = "", timeoutSeconds = 300,
                  siteUrl = "", siteName = "", userAgent = ""): OpenRouterProvider =
+  ## Create an OpenRouter provider.
   let url = if endpoint.len > 0: endpoint else: defaultOpenRouterEndpoint
   initOpenAIProvider("openrouter", "OpenRouter", apiKey, url,
     timeoutSeconds, siteUrl, siteName, includeSessionId = true,
@@ -135,13 +138,15 @@ proc openCodeBase(endpoint: string): string =
 
 proc openCodeChat*(apiKey: string, endpoint = "", timeoutSeconds = 300,
                    userAgent = "nimgent"): OpenCodeProvider =
+  ## Create an OpenCode provider using Chat Completions.
   let url = protocolEndpoint(openCodeBase(endpoint), "/chat/completions")
   initOpenAIProvider("opencode", "OpenCode", apiKey, url, timeoutSeconds,
     maxTokensField = "max_tokens", sessionHeader = "x-opencode-session",
-    userAgent = userAgent)
+    userAgent = userAgent, chatReasoning = crReasoningContent)
 
 proc openCodeResponses*(apiKey: string, endpoint = "", timeoutSeconds = 300,
                         userAgent = "nimgent"): OpenCodeProvider =
+  ## Create an OpenCode provider using the Responses API.
   let url = protocolEndpoint(openCodeBase(endpoint), "/responses")
   initOpenAIProvider("opencode", "OpenCode", apiKey, url, timeoutSeconds,
     maxTokensField = "max_tokens", useResponses = true,
@@ -149,6 +154,7 @@ proc openCodeResponses*(apiKey: string, endpoint = "", timeoutSeconds = 300,
 
 proc openCodeMessages*(apiKey: string, endpoint = "", timeoutSeconds = 300,
                        userAgent = "nimgent"): AnthropicProvider =
+  ## Create an OpenCode provider using the Anthropic Messages API.
   let url = protocolEndpoint(openCodeBase(endpoint), "/messages")
   anthropic(apiKey, url, timeoutSeconds,
     sessionHeader = "x-opencode-session", userAgent = userAgent)
@@ -157,11 +163,9 @@ proc openCodeGoogle*(apiKey: string, endpoint = "", timeoutSeconds = 300,
                      userAgent = "nimgent"): GoogleProvider =
   ## The gateway's Gemini models on the native Google surface: the same key and
   ## gateway root, `/models/<id>:generateContent` instead of an OpenAI path.
-  ## Zen documents no embeddings endpoint, so the capability is dropped.
   let base = openCodeBase(endpoint)
   let root = gatewayBase(base)
   result = google(apiKey, if root.len > 0: root else: base, timeoutSeconds, userAgent)
-  result.capabilities.excl pcEmbeddings
 
 proc openCode*(apiKey: string, endpoint = "", timeoutSeconds = 300,
                userAgent = "nimgent", protocol = ocChat): Provider =
@@ -188,6 +192,7 @@ proc openCodeZen*(apiKey: string, endpoint = "", timeoutSeconds = 300,
 
 proc mistral*(apiKey: string, endpoint = "", timeoutSeconds = 300,
               userAgent = ""): MistralProvider =
+  ## Create a Mistral provider.
   let url = if endpoint.len > 0: endpoint else: defaultMistralEndpoint
   initOpenAIProvider("mistral", "Mistral", apiKey, url, timeoutSeconds,
     maxTokensField = "max_tokens", promptCacheKey = true, userAgent = userAgent)
@@ -243,10 +248,11 @@ proc requestBody(provider: OpenAIProvider, request: ProviderRequest,
     includeSessionId = provider.includeSessionId,
     applyCache = provider.applyCache,
     maxTokensField = provider.maxTokensField,
-    promptCacheKey = cacheKey)
+    promptCacheKey = cacheKey, reasoning = provider.chatReasoning)
 
 method nativeObjectOptions*(provider: OpenAIProvider, model, name,
                             description: string, schema: JsonNode): JsonNode =
+  ## Return native structured-output options for the model's wire format.
   if provider.usesResponsesFor(model):
     responsesObjectOptions(name, description, schema)
   else:
@@ -254,10 +260,12 @@ method nativeObjectOptions*(provider: OpenAIProvider, model, name,
 
 method nativeObjectSchemaIssues*(provider: OpenAIProvider, model: string,
                                  schema: JsonNode): seq[string] =
+  ## Return schema issues for the model's native structured-output format.
   validateOpenAiStrictSchema(schema)
 
 method generateAsync*(provider: OpenAIProvider,
                       request: ProviderRequest): Future[ProviderResponse] {.async.} =
+  ## Send a generation request through an OpenAI-compatible endpoint.
   provider.ensureApiKey()
   let body = provider.requestBody(request, stream = false)
   let sslContext = newContext(verifyMode = CVerifyPeer)
@@ -291,6 +299,7 @@ method generateAsync*(provider: OpenAIProvider,
 
 method embedAsync*(provider: OpenAIProvider,
                    request: EmbeddingRequest): Future[EmbeddingResponse] {.async.} =
+  ## Send an embedding request through an OpenAI-compatible endpoint.
   provider.ensureApiKey()
   var body = if request.options.isNil: newJObject() else: copy(request.options)
   if body.kind != JObject:
@@ -348,6 +357,7 @@ proc streamHandler(provider: OpenAIProvider, responses: bool, state: StreamState
 method generateStreamAsync*(provider: OpenAIProvider,
                             request: ProviderRequest,
                             onEvent: StreamCallback): Future[ProviderResponse] {.async.} =
+  ## Stream a generation request through an OpenAI-compatible endpoint.
   # Sync HttpClient.request() buffers the whole SSE body before returning.
   # AsyncHttpClient starts parseBody without awaiting, so bodyStream.read()
   # yields chunks as they arrive.
@@ -409,6 +419,7 @@ type OpenAIOptions* = object
   dimensions*: Option[int] ## Embedding requests only.
 
 proc toProviderJson*(value: OpenAIOptions): JsonNode =
+  ## Serialize OpenAI-specific request options.
   result = newJObject()
   if value.parallelToolCalls.isSome: result["parallel_tool_calls"] = %value.parallelToolCalls.get
   if value.store.isSome: result["store"] = %value.store.get

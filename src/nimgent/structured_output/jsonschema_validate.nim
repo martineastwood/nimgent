@@ -313,6 +313,7 @@ proc matchesType(value: JsonNode, names: openArray[string]): bool =
   false
 
 proc jsonEqual*(a, b: JsonNode): bool =
+  ## Compare JSON values, treating equivalent integer and float values alike.
   if a.isNil or b.isNil: return a.isNil and b.isNil
   if a.kind != b.kind:
     if a.kind == JInt and isWholeFloat(b): return a.getInt.float == b.getFloat
@@ -542,6 +543,7 @@ proc validateSchemaAt(value, schema: JsonNode, path: string,
       result.add validateSchemaAt(value, schema["else"], path, root, refs)
 
 proc validateSchema*(value, schema: JsonNode, path = "$"): seq[string] =
+  ## Return validation issues for a JSON value and schema.
   validateSchemaAt(value, schema, path, schema, @[])
 
 proc prepareWireSchema*(schema: JsonNode): JsonNode =

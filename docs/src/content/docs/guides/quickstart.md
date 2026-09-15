@@ -1,180 +1,189 @@
 ---
 title: Quickstart
-description: Make your first request, then your first agent — the short path.
+description: Send your first model request and build a small tool-using agent.
 ---
 
-`nimgent` is a Nim client for talking to large language models. You pick a
-provider, bind a model, and call functions that send prompts and receive
-responses. 
-
-This page walks through your first request, then builds it into a
-small agent, the two ideas everything else in nimgent builds on.
+Use nimgent to send a prompt to a language model, then add typed tools when your
+application needs to do more than return text.
 
 ## Install
 
-Install the package with Nimble:
+Install nimgent with Nimble and set an API key for the provider you want to use:
 
 ```sh
 nimble install nimgent
+export OPENAI_API_KEY=...
 ```
 
-You will also need an API key from a provider. This page uses OpenRouter, but
-any of the supported providers will work, the code is identical apart from the import and the
-constructor.
+This guide uses OpenAI. See [Providers](/guides/providers/) for the other
+supported providers and their constructors.
 
-## Your first request
+## Send your first request
 
-Three lines of setup, one call:
+Create `hello.nim`:
 
 ```nim
 import std/os
 import nimgent
-import nimgent/providers/openrouter
+import nimgent/providers/openai
 
-let model = openRouter(getEnv("OPENROUTER_API_KEY")).model(
-  "deepseek/deepseek-v4-flash-0731")
-
+let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
 let response = generateText(model, prompt = "Say hello in one sentence.")
+
 echo response.text
 ```
 
-Save that as `hello.nim` and run it:
+Run it with:
 
 ```sh
-OPENROUTER_API_KEY=... nim c -r hello.nim
+nim c -r hello.nim
 ```
 
-What just happened, piece by piece:
+The three pieces are:
 
-- `openRouter(apiKey)` creates a **provider** - the adapter that knows how to
-  talk to one API.
-- `.model("...")` binds a specific model on that provider into a
-  `LanguageModel` you can pass around.
-- `generateText(model, prompt = ...)` sends the prompt and returns a
-  `ProviderResponse`. The model's reply is `response.text`.
+- `openAI(...)` reads your API key and selects OpenAI.
+- `.model("gpt-4o-mini")` selects the model to call.
+- `generateText(...)` sends the prompt and returns the response.
 
-The prompt is the only required input, but two more are used constantly:
+The generated text is in `response.text`. You can also inspect
+`response.finishReason` and token counts in `response.usage`.
+
+### Add instructions
+
+Use `system` for instructions that should apply across the request:
 
 ```nim
 let response = generateText(
   model,
-  system = "You are a terse systems programmer.",  # standing instructions
+  system = "You are a concise systems programmer.",
   prompt = "Explain what a file descriptor is.")
 
-echo response.usage.totalTokens   # what the call cost
-echo response.finishReason        # why the model stopped (frStop = normal)
+echo response.text
 ```
 
-`system` sets the model's standing instructions (e.g. role, tone, rules) while the
-prompt is the actual question of this turn. Keep system text concise and let it
-apply across many requests.
+Keep the system instructions focused on the model's role and behavior. Put the
+actual question or task in `prompt`.
 
-## Async, the same thing
+## Call a tool with generateText
 
-The blocking `generateText` is a convenience wrapper. The async primitive is
-the same call with `Async` appended and an `await` added - use it in servers or
-anywhere with an event loop:
+For a one-off task, pass local tools directly to `generateText`. The model can
+call a tool, read its result, then write its answer in the same request:
 
 ```nim
-import std/[asyncdispatch, os]
+import std/os
 import nimgent
-import nimgent/providers/openrouter
+import nimgent/providers/openai
 
-let model = openRouter(getEnv("OPENROUTER_API_KEY")).model(
-  "deepseek/deepseek-v4-flash-0731")
-
-proc main() {.async.} =
-  let response = await generateTextAsync(model, prompt = "Hello")
-  echo response.text
-
-waitFor main()
-```
-
-Every blocking helper in nimgent has an `...Async` twin. The rest of this page
-sticks to the blocking form to keep examples short.
-
-## Pick a provider
-
-The provider is confined to two lines - the import and the constructor. Change
-those, keep everything else:
-
-```nim
-import nimgent/providers/[anthropic, google, hyper, openai, openrouter]
-
-let openaiModel = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
-let claudeModel = anthropic(getEnv("ANTHROPIC_API_KEY")).model("claude-sonnet-4-6")
-let geminiModel = google(getEnv("GEMINI_API_KEY")).model("gemini-3.5-flash-lite")
-```
-
-All adapters expose the same `LanguageModel`, and responses are normalized to
-one shape, so switching providers is not a rewrite. Portable generation
-settings belong in `generationOptions`; provider-specific settings belong in
-`providerOptions`. See [Providers](/guides/providers/) for details.
-
-## Your first agent
-
-A single request is one exchange: prompt in, answer out. Many real tasks need
-more, e.g. look something up, then reason about it, then answer. nimgent lets the
-model request **tools**: ordinary Nim functions the model can call by name,
-with arguments it invents. The loop of *model asks → your code runs → model
-continues* is an agent.
-
-Define a tool by giving nimgent a typed function:
-
-```nim
 type WeatherInput = object
   city: string
 
 let weather = tool(
   "get_weather",
-  "Get the current weather for a city",
+  "Return a sample weather report for a city.",
   proc (_: ToolContext, input: WeatherInput): string =
     input.city & ": 16C and cloudy")
-```
 
-The type becomes a JSON Schema the provider enforces; the string the tool
-returns goes back to the model. Then hand the tool to `generateText` and raise
-the step limit so the loop has room to work:
-
-```nim
+let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
 let response = generateText(
   model,
-  prompt = "What's the weather like in Paris?",
+  prompt = "Should I bring an umbrella to Paris?",
   tools = @[weather],
   maxSteps = 5)
 
 echo response.text
 ```
 
-The model calls `get_weather` with `{"city": "Paris"}`, your function runs, and
-the model folds the result into its answer.
+The `WeatherInput` type describes the tool's input. The model can request
+`get_weather` with a city, your handler runs, and the result is sent back so the
+model can finish its answer.
 
-When the exchange grows beyond one prompt, package the model, instructions, and
-tools into a reusable `Agent` instead:
+`maxSteps` limits how many model steps one request can take. The
+limit prevents an accidental tool loop from running forever.
+
+## Make a simple agent
+
+Use an `Agent` when you want to reuse the same model, instructions, and tools
+across many requests. It keeps the setup in one value, so each call only needs
+the new task.
+
+Add `nimgent/agent` to the imports above, then replace the `generateText` call
+with this:
 
 ```nim
-import nimgent/agent
-
 let researcher = newAgent(
   model,
   instructions = "You are a concise research assistant.",
   tools = @[weather],
   maxSteps = 5)
 
-let answer = researcher.run("Should I bring an umbrella to Paris tomorrow?")
-echo answer.text
-echo "model turns: ", answer.steps.len
+let first = researcher.run("What's the weather like in Paris?")
+let second = researcher.run("What's the weather like in Tokyo?")
+
+echo first.text
+echo second.text
 ```
 
-The agent is configuration, not state: create it once and run it many times.
-Add a `Session` when runs should remember each other. See
-[Sessions](/guides/sessions/).
+## Keep a conversation with a session
 
-## Where to next
+Without a session, each agent run starts fresh. Use a session when a follow-up
+question needs the earlier prompt, answer, or tool result:
 
-- [Tools and agents](/guides/tools-and-agents/): richer tools, errors the
-  model can handle, approval gates, and the event stream for UIs.
-- [Structured output](/guides/structured-output/): get typed, validated Nim
-  values back instead of prose.
-- [Streaming](/guides/streaming/): render tokens as they arrive.
-- [Core API](/reference/core-api/): the types and entry points, on one page.
+```nim
+import nimgent/session
+
+let conversation = newSession(researcher)
+discard conversation.run("What's the weather like in Paris?")
+let response = conversation.run("What should I wear?")
+
+echo response.text
+```
+
+The second request includes the earlier weather result, so the model can answer
+the follow-up without asking for the city again. See [Sessions](/guides/sessions/)
+to persist or inspect a conversation.
+
+## Use nimgent asynchronously
+
+The `Async` form fits servers and applications that already use Nim's event
+loop:
+
+```nim
+import std/[asyncdispatch, os]
+import nimgent
+import nimgent/providers/openai
+
+let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
+
+proc main() {.async.} =
+  let response = await generateTextAsync(model, prompt = "Say hello.")
+  echo response.text
+
+waitFor main()
+```
+
+Use the blocking helpers for scripts and command-line programs. Do not call
+them from inside an existing async event loop.
+
+## Use another provider
+
+The request and agent code stays the same when you switch providers. Change the
+import, constructor, API key, and model id:
+
+```nim
+import std/os
+import nimgent
+import nimgent/providers/anthropic
+
+let model = anthropic(getEnv("ANTHROPIC_API_KEY")).model("claude-sonnet-4-6")
+let response = generateText(model, prompt = "Say hello.")
+
+echo response.text
+```
+
+## Where to go next
+
+- [Providers](/guides/providers/): choose a provider and configure its options.
+- [Streaming](/guides/streaming/): display text as it arrives.
+- [Tools and agents](/guides/tools-and-agents/): handle richer tools, failures, and approvals.
+- [Structured output](/guides/structured-output/): receive validated Nim values.
+- [Sessions](/guides/sessions/): keep a transcript across runs.

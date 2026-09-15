@@ -6,15 +6,15 @@ import nimgent/structured_output/jsonschema_validate
 ## Optional field annotations understood by `jsonSchema`. They are declared
 ## as pragmas so they can be used directly on object fields without generating
 ## runtime code.
-template jsonDescription*(value: static[string]) {.pragma.}
-template jsonMinimum*(value: static[int]) {.pragma.}
-template jsonMaximum*(value: static[int]) {.pragma.}
-template jsonMinLength*(value: static[int]) {.pragma.}
-template jsonMaxLength*(value: static[int]) {.pragma.}
-template jsonMinItems*(value: static[int]) {.pragma.}
-template jsonMaxItems*(value: static[int]) {.pragma.}
-template jsonPattern*(value: static[string]) {.pragma.}
-template jsonOptional*() {.pragma.}
+template jsonDescription*(value: static[string]) {.pragma.} ## Add a JSON Schema description.
+template jsonMinimum*(value: static[int]) {.pragma.} ## Set a numeric minimum.
+template jsonMaximum*(value: static[int]) {.pragma.} ## Set a numeric maximum.
+template jsonMinLength*(value: static[int]) {.pragma.} ## Set a string minimum length.
+template jsonMaxLength*(value: static[int]) {.pragma.} ## Set a string maximum length.
+template jsonMinItems*(value: static[int]) {.pragma.} ## Set an array minimum length.
+template jsonMaxItems*(value: static[int]) {.pragma.} ## Set an array maximum length.
+template jsonPattern*(value: static[string]) {.pragma.} ## Set a string pattern.
+template jsonOptional*() {.pragma.} ## Mark an object field as optional.
 
 proc schemaName*(s: string): string =
   ## OpenAI structured-output names: at most 64 `[a-zA-Z0-9_-]` characters.

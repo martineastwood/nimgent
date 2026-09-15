@@ -1,193 +1,111 @@
 ---
 title: Files and images
-description: Send documents and pictures, and read back the citations that come with them.
+description: Ask a model to read a document or inspect an image.
 ---
 
-Prompts do not have to be text. A model that can read a PDF, a screenshot, or a
-spreadsheet answers questions that no amount of prose can pin down — "what is
-the mascot's name?", "what changed in this chart?", "extract the totals from
-this invoice".
+You can attach a local document or image to a message, then ask the model about it. This is useful for summarizing PDFs, extracting details from reports, or describing a chart or screenshot.
 
-Multimodal content is just another content block. You build a message out of
-parts, and the adapter encodes each one the way its provider expects.
+## Ask about a PDF
 
-## Attach a file
+This example sends a PDF from the command line and prints the answer.
 
-Read a local file, hand it to `userMessage` alongside the question:
-
-```nim
+```nim title="pdf_question.nim"
 import std/os
 import nimgent
 import nimgent/providers/openai
 
 let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4.1-mini")
+let pdfPath = paramStr(1)
 
 let response = generateText(
   model,
   messages = @[userMessage(@[
-    fileFromPath("spec.pdf", "application/pdf"),
-    text("Summarize the failure modes in section 3.")])])
+    fileFromPath(pdfPath, "application/pdf"),
+    text("What are the main risks described in this document?")
+  ])]
+)
 
 echo response.text
 ```
 
-`fileFromPath(path, mimeType, filename = "")` reads the file, base64-encodes it,
-and defaults the filename to the path's basename. The MIME type is yours to
-declare — nimgent does not guess it, because a wrong type is a provider-side
-error that is harder to read than the one you get for omitting it.
+Run it with a path to your PDF:
 
-`file(mimeType, data, path = "", filename = "")` is the same thing when you
-already hold the bytes, or when they came from somewhere other than the disk.
+```sh
+OPENAI_API_KEY=... nim c -r pdf_question.nim report.pdf
+```
 
-## Images
+`fileFromPath` reads the file and attaches it to the message. Pass the file's MIME type so the provider knows how to handle it. Its filename is inferred from the path unless you provide one.
 
-Images work the same way, with `imageFromPath` and `image(ImageContent)`:
+The text in the same message gives the model a clear task. Be specific about what you want to find, summarize, compare, or extract.
+
+## Ask about an image
+
+Use `imageFromPath` for images. The rest of the request works the same way.
 
 ```nim
 let response = generateText(
   model,
   messages = @[userMessage(@[
     imageFromPath("chart.png", "image/png"),
-    text("What trend does this chart show?")])])
+    text("What trend does this chart show?")
+  ])]
+)
+
+echo response.text
 ```
 
-Order matters as much as content: the text part tells the model what to do with
-the attachment. An image alone gets a generic description; an image followed by
-a specific question gets an answer.
+Common image MIME types include `image/png`, `image/jpeg`, and `image/webp`.
 
-Blocks are values, so you can build them anywhere and pass them around:
+## Attach data you already have
 
-```nim
-let parts = @[
-  image("image/png", base64Data, path = "diagram.png"),
-  text("Explain the protocol this diagram shows.")]
-```
-
-## Where files are supported
-
-Capabilities advertise what an adapter will accept, and they are worth checking
-when your application takes input of any kind:
-
-```nim
-if model.provider.supports(pcFiles):
-  # safe to attach a document
-  discard
-```
-
-| Adapter | Images | Files | Encoded as |
-| --- | --- | --- | --- |
-| OpenAI (Responses) | yes | yes | `input_image`, `input_file` with a data URI |
-| OpenAI (Chat Completions) | yes | yes | `image_url` data URI, `{"type": "file"}` payload |
-| Anthropic | yes | yes | native `image` and `document` blocks |
-| Google Gemini | yes | yes | `inlineData` parts |
-
-Two caveats that are easy to trip over:
-
-- **Capability flags describe nimgent's encoding, not a vendor's promise.** The
-  OpenAI-compatible adapters (OpenRouter, Hyper, Mistral, OpenCode) inherit the
-  same flags, but whether a given upstream model accepts a document is between
-  you and that model. A rejected attachment is a provider error with a status
-  code.
-- **Base64 is bigger than the file.** Inline attachments inflate the request
-  payload by roughly a third, so a large PDF costs latency before it costs
-  tokens. Where a provider has a native file upload, that is usually the better
-  route — but it is provider-specific and out of nimgent's scope.
-
-## Citations come back as blocks
-
-A model that read a document can tell you *where* it read something. Providers
-surface that as citations, and nimgent normalizes them into `ckSource` blocks
-alongside the text:
+If your application already has base64-encoded content, use `file` or `image` instead of writing it to disk first.
 
 ```nim
 let response = generateText(
   model,
   messages = @[userMessage(@[
-    fileFromPath("spec.pdf", "application/pdf"),
-    text("What are the failure modes?")])])
-
-echo response.text                  # the prose only
-for part in response.content:
-  if part.kind == ckSource:
-    echo part.source.url, " — ", part.source.title
-    echo part.source.citedText     # when the provider reports it
+    file("application/pdf", encodedPdf, filename = "report.pdf"),
+    image("image/png", encodedChart),
+    text("Compare the report with the chart.")
+  ])]
+)
 ```
 
-A source block carries `url`, `title`, `id`, `citedText`, and `raw` — the
-provider's original citation object, kept verbatim. Note that `response.text`
-contains only text blocks: render citations by walking `response.content`, not
-by parsing the prose.
+`encodedPdf` and `encodedChart` should contain base64 data without a data URL prefix.
 
-Which fields get filled depends on the provider:
+## Show citations when they are available
 
-| Provider | Citation shape |
-| --- | --- |
-| OpenAI Responses | `url_citation` and `file_citation` annotations (web and uploaded files) |
-| Anthropic | native citations, including quoted `citedText` |
-| Google Gemini | web sources from grounding metadata come back as `ckSource` |
-
-## Hosted tools and grounded answers
-
-Google's and Anthropic's server-side search tools are declared like any other
-tool, and their findings arrive as citations rather than as content you have to
-extract:
+Some providers include sources with their answers. You can read them from the response content and show links alongside the model's text.
 
 ```nim
-import nimgent/providers/google
-
-let model = google(getEnv("GEMINI_API_KEY")).model("gemini-3.5-flash-lite")
-
-let response = generateText(
-  model,
-  prompt = "What changed in Nim's latest release? Cite the pages you used.",
-  tools = @[hostedTool("web_search"), hostedTool("url_context")])
-
 for part in response.content:
   if part.kind == ckSource:
+    echo part.source.title
     echo part.source.url
 ```
 
-`hostedTool(name, options)` declares a tool the *provider* runs; there is no
-local function and no callback. OpenAI Responses, Anthropic, and native Gemini
-support them — Chat Completions has no wire format for it, so a hosted tool
-there is rejected rather than silently downgraded.
+Citations are provider and model dependent. An answer without `ckSource` parts is still a valid response.
 
-For Gemini, grounding metadata and URL-context statuses are preserved as hosted
-tool results — a `web_search` result whose output is the grounding metadata JSON
-(citation spans, the queries that were run, and Search Suggestions HTML), and a
-`url_context` result carrying each URL's retrieval status. A UI can render
-Google's own citation affordances from those instead of reconstructing them.
-Only successfully retrieved URLs also appear as `ckSource` blocks.
+## Continue without images
 
-## Keeping history replayable
-
-Some providers sign their content and reject a conversation whose signatures
-were lost in transit. Two fields exist for exactly that, and both are populated
-automatically when responses come back:
-
-- `ContentBlock.googlePart` — the original Gemini part, retained so a tool call
-  can be replayed with its `thoughtSignature` intact.
-- `SourceContent.raw` — the provider's citation object, replayed when a message
-  is sent back as history.
-
-If you serialize conversation history yourself, **preserve these fields**.
-Dropping them produces a request the provider can reject, and the rejection does
-not always point at the missing signature — which is why nimgent keeps them on
-the block rather than re-deriving them. Sessions do this for you.
-
-## Dropping attachments
-
-When a provider or a turn cannot take images, `dropImages(messages)` replaces
-image blocks with a short text note without touching what a session stores:
+If you switch a conversation to a model that does not accept images, remove image attachments before sending its history.
 
 ```nim
-let response = generateText(model, messages = dropImages(history), prompt = "Continue.")
+let response = generateText(
+  model,
+  messages = dropImages(history),
+  prompt = "Continue the conversation."
+)
 ```
 
-That is the intended way to degrade — keep the transcript honest, sanitize at
-the boundary. It also composes as a `mapRequest` hook in
-[Middleware and routing](/guides/middleware-and-routing/).
+`dropImages` replaces each image with a short note. It only removes images, not files.
 
-Related: [Providers](/guides/providers/) for capability checks and the typed
-options that accompany these requests, and [Tools and agents](/guides/tools-and-agents/)
-for hosted tools in the agent loop.
+## Troubleshooting
+
+- **The provider rejects the attachment:** Check that the MIME type matches the file and that the selected model accepts that kind of attachment.
+- **Large files fail or give incomplete answers:** Attachments use part of the request size and model context. Try a smaller file, fewer pages, or a more focused question.
+- **The model ignores the attachment:** Put a clear instruction in the same message, such as "List the action items in this PDF."
+
+## Next steps
+
+Learn how to choose a provider in the [Providers](/guides/providers/) guide, or keep a multi-turn conversation with attachments in the [Sessions](/guides/sessions/) guide.

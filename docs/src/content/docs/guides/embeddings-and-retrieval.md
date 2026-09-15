@@ -1,175 +1,106 @@
 ---
 title: Embeddings and retrieval
-description: Turn text into vectors, search them, and keep the store on disk.
+description: Search your own notes and use the relevant passages in a model answer.
 ---
 
-An **embedding** is a model's opinion about what a piece of text means, rendered
-as a list of floating-point numbers. Text that means similar things lands at
-similar coordinates, so "closest vector" becomes a workable stand-in for
-"most relevant document".
+Embeddings let you find the parts of your own content that are most relevant to a question. You can embed your documents once, search them for each question, then give the best matches to a model as context.
 
-That is the whole trick behind retrieval: embed your corpus once, embed the
-question, return the nearest neighbours, and put them in the prompt. The model
-answers from text you chose rather than from memory.
+## Build a small retrieval flow
 
-nimgent covers both halves — embedding calls and a small vector store to search.
+This complete example stores three notes in memory, finds the notes closest to a question, and answers using only those notes.
 
-## Embed
-
-Bind an embedding model the same way you bind a chat model, then call `embed` or
-`embedMany`:
-
-```nim
-import std/[os, strformat]
+```nim title="answer_from_notes.nim"
+import std/[json, os, strutils]
 import nimgent
 import nimgent/providers/openai
-
-let embeddings = openAI(getEnv("OPENAI_API_KEY")).embeddingModel(
-  "text-embedding-3-small")
-
-let batch = embedMany(embeddings, @[
-  "sunny day at the beach",
-  "warm afternoon by the ocean",
-  "debugging a compiler error"])
-
-echo batch.usage.tokens
-echo &"similarity: {cosineSimilarity(batch.embeddings[0], batch.embeddings[1]):.3f}"
-```
-
-`embedMany` sends the whole batch in one provider call and preserves input
-order, so `batch.embeddings[i]` is the vector for `batch.values[i]`. `embed`
-is the single-string convenience:
-
-```nim
-let one = embed(embeddings, "warm beach weather")
-echo one.value              # the string you passed
-echo one.embedding          # seq[float]
-echo one.usage.tokens
-```
-
-Both have async twins (`embedAsync`, `embedManyAsync`) and both retry transient
-failures the same way generation does. `embedMany` rejects an empty list up
-front rather than sending a pointless request.
-
-## Compare and search
-
-`cosineSimilarity(a, b)` is the standard comparison — `1.0` for identical
-direction, `0.0` for unrelated, `-1.0` for opposite:
-
-```nim
-let score = cosineSimilarity(vectorA, vectorB)
-```
-
-It is exported from `nimgent` and is also what the vector store uses internally.
-Both vectors must be non-empty and the same length; a zero vector has no
-direction and raises rather than returning a plausible-looking number.
-
-## The vector store
-
-`nimgent/vector_store` is a small in-memory store: enough to build retrieval
-into an application or a demo without adding a database dependency.
-
-```nim
-import std/os
-import nimgent
 import nimgent/vector_store
-import nimgent/providers/openai
 
-let embeddings = openAI(getEnv("OPENAI_API_KEY")).embeddingModel(
-  "text-embedding-3-small")
+let provider = openAI(getEnv("OPENAI_API_KEY"))
+let embeddings = provider.embeddingModel("text-embedding-3-small")
+let model = provider.model("gpt-4.1-mini")
 
 let documents = @[
-  "The compiler rejects implicit conversions.",
-  "Nim compiles to C, C++, or JavaScript.",
-  "Destructors run deterministically at scope exit."]
+  "Nim destructors run deterministically when a value leaves its scope.",
+  "Nim can compile to C, C++, JavaScript, or Objective-C.",
+  "Nim uses indentation to define blocks."
+]
 
 let store = newInMemoryVectorStore()
-let vectors = embedMany(embeddings, documents)
-
+let indexed = embedMany(embeddings, documents)
 for i, document in documents:
-  store.upsert($i, vectors.embeddings[i], %*{"text": document})
+  store.upsert($i, indexed.embeddings[i], %*{"text": document})
 
-let question = embed(embeddings, "When does a destructor run?")
-for match in store.search(question.embedding, limit = 2):
-  echo match.score, "  ", match.metadata["text"].getStr
-```
+let question = "When does a Nim destructor run?"
+let query = embed(embeddings, question)
 
-The four operations are `upsert`, `search`, `delete`, and `save`/`load`:
-
-| Call | Behaviour |
-| --- | --- |
-| `upsert(id, embedding, metadata)` | Insert, or replace the record with that id. Empty ids are rejected. |
-| `search(embedding, limit)` | Nearest records, best score first, ties broken by insertion order. |
-| `delete(id)` | Remove one record; returns whether it existed. |
-| `save(path)` / `loadInMemoryVectorStore(path)` | Write or read a versioned JSON document. |
-
-`metadata` is a free-form `JsonNode` — put the source text, a file path, a URL,
-whatever you will need once you have a hit. `search` returns `VectorMatch`
-values with `id`, `score`, and the `metadata` you stored.
-
-The store is stricter than it looks, on purpose:
-
-- **One dimension per store.** The first `upsert` fixes it, and any later vector
-  of a different length is rejected. Mixing models in one store is an error, not
-  a subtle ranking bug.
-- **Deterministic order.** Equal scores fall back to insertion order, so tests
-  and demos do not shuffle between runs.
-- **Versioned files.** `save` writes a document carrying a schema version;
-  `loadInMemoryVectorStore` refuses a file it does not understand, or one whose
-  records disagree with the recorded dimension, instead of loading garbage.
-
-## Retrieval into a prompt
-
-A minimal retrieval-augmented turn is: embed the question, take the top matches,
-put their text in the prompt.
-
-```nim
-var context = ""
-for match in store.search(question.embedding, limit = 3):
-  context.add "- " & match.metadata["text"].getStr & "\n"
+var notes: seq[string]
+for match in store.search(query.embedding, limit = 2):
+  notes.add match.metadata["text"].getStr
 
 let answer = generateText(
   model,
-  system = "Answer only from the notes below. Say so if they do not cover it.\n\n" & context,
-  prompt = "When does a destructor run?")
+  system = "Answer only from these notes. If they do not answer the question, say so.\n\n" &
+    notes.join("\n\n"),
+  prompt = question
+)
+
+echo answer.text
 ```
 
-Keeping that instruction explicit is what stops retrieval from turning into
-confident guesswork: retrieval gives the model material, not an obligation to
-use it.
+Run it with an API key:
 
-## Tracing
+```sh
+OPENAI_API_KEY=... nim c -r answer_from_notes.nim
+```
 
-Both embedding helpers accept a `TraceSink`, so retrieval shows up in your spans
-alongside generation:
+The answer is based on the retrieved notes, not on the model's general knowledge.
+
+## How retrieval works
+
+`embedMany` turns each document into a sequence of numbers called an embedding. The result keeps the same order as the input, so `indexed.embeddings[i]` belongs to `documents[i]`.
+
+`upsert` stores each embedding with an ID and metadata. In this example, the metadata holds the original text so it is available after a search.
+
+For each question, `embed` creates one query embedding. `search` returns the closest records, with the best match first. The example joins those records into context and asks the model to answer from that context only.
+
+Use a clear instruction like this whenever you retrieve context. Retrieval makes relevant material available, but the instruction tells the model when it should rely on it and what to do when the material is incomplete.
+
+## Add, update, and save documents
+
+Give each document a stable ID. Calling `upsert` again with the same ID replaces its embedding and metadata, which is useful when a document changes.
 
 ```nim
-var spans: seq[TraceSpan]
-discard embedMany(embeddings, documents,
-  trace = proc (span: TraceSpan) = spans.add span)
+let updated = embed(embeddings, "The updated note text.")
+store.upsert("handbook-intro", updated.embedding, %*{
+  "text": updated.value,
+  "source": "handbook.md"
+})
 ```
 
-Embedding spans are `skEmbedding`, nested under their own operation span, and
-retries appear as separate attempts — the same shape as model spans.
+You can save the in-memory store and restore it later:
 
-## Notes and limits
+```nim
+store.save("notes.json")
 
-- **Provider support is capability-based.** Check
-  `model.provider.supports(pcEmbeddings)` rather than assuming from the adapter
-  name. `openAI` and `openRouter` expose embedding endpoints, native `google`
-  does too, and `hyper` and `openCode` deliberately do not claim the capability.
-  `mistral` inherits the flag from the shared OpenAI-compatible transport, but
-  only the first three are exercised by the repository's fixtures — treat an
-  unexercised combination as your own integration to verify.
-- **Provider-specific knobs go in `providerOptions`.** OpenAI's reduced
-  `dimensions` is the typed one:
-  `providerOptions = ProviderOptions(openai: OpenAIOptions(dimensions: some(512)))`.
-  Note that changing dimensions changes the vector space — re-embed the corpus.
-- **This is not a database.** Search is a linear scan over every record in
-  memory, and persistence is an explicit `save`. It is built for local retrieval
-  and examples; a corpus that outgrows memory wants a real vector index behind
-  the same three calls.
+let restored = loadInMemoryVectorStore("notes.json")
+let matches = restored.search(query.embedding, limit = 2)
+```
 
-Related: [Core API](/reference/core-api/) for the embedding entry points, and
-[Structured output](/guides/structured-output/) when the retrieved answer must
-be typed rather than prose.
+The saved store includes the vectors and metadata. Keep the original documents separately if you need to rebuild the index.
+
+## Choose a useful document size
+
+Embed passages that are small enough to be useful as answer context. A whole handbook chapter can match a question but still be too broad for a good answer. Split longer content into sections or paragraphs, then store each passage with metadata such as its document title, URL, and section name.
+
+Start with a small search limit, such as `2` or `3`. More matches give the model more context, but they also make the prompt larger and can add unrelated material.
+
+## Troubleshooting and limits
+
+- **A search result is irrelevant:** Split your documents into smaller passages, store better metadata, or try fewer matches.
+- **Search fails after changing embedding models:** Every vector in a store must have the same dimensions. Create a new store and re-embed the full corpus when you change models or embedding dimensions.
+- **The provider rejects an embedding request:** Embedding availability varies by model and provider. Handle the provider error if the model you choose does not offer embeddings.
+- **Your corpus is large:** `InMemoryVectorStore` searches records in memory. It is a good fit for local content and small applications. Use an external vector index when your corpus outgrows memory or needs shared, persistent search.
+
+## Next steps
+
+See the [Core API](/reference/core-api/) for embedding options, or use [Structured output](/guides/structured-output/) when the answer should match a typed schema.

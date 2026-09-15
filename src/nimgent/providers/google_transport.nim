@@ -4,24 +4,33 @@
 ## `x-goog-api-key`, `/v1beta/models/<id>:generateContent`. Vertex AI is a
 ## different service — OAuth service accounts, a project and location in the
 ## path — and needs its own provider.
-import std/[asyncdispatch, httpclient, json, net, strutils, tables, uri]
+import std/[asyncdispatch, httpclient, json, net, options, strutils, tables, uri]
 import nimgent/providers/[provider, stream, http_metadata]
 
-const defaultGoogleEndpoint* = "https://generativelanguage.googleapis.com/v1beta"
+const defaultGoogleEndpoint* = "https://generativelanguage.googleapis.com/v1beta" ## Default Google Generative Language endpoint.
 
 type GoogleProvider* = ref object of Provider
+  ## Google Gemini provider configuration.
   apiKey: string
   endpoint*: string
   timeoutSeconds: int
   userAgent*: string
 
+type GoogleOptions* = object
+  ## Optional settings for Google embedding requests.
+  taskType*: Option[string]
+
+proc toProviderJson*(value: GoogleOptions): JsonNode =
+  ## Serialize Google-specific request options.
+  result = newJObject()
+  if value.taskType.isSome: result["taskType"] = %value.taskType.get
+
 proc google*(apiKey: string, endpoint = defaultGoogleEndpoint,
              timeoutSeconds = 300, userAgent = ""): GoogleProvider =
+  ## Create a Google Gemini provider.
   GoogleProvider(name: "google", apiKey: apiKey,
     endpoint: endpoint.strip(trailing = true, chars = {'/'}),
-    timeoutSeconds: timeoutSeconds, userAgent: userAgent,
-    capabilities: {pcStreaming, pcTools, pcStructuredOutput, pcImages, pcFiles,
-      pcHostedTools, pcEmbeddings})
+    timeoutSeconds: timeoutSeconds, userAgent: userAgent)
 
 proc makeHeaders(p: GoogleProvider): HttpHeaders =
   result = newHttpHeaders({"x-goog-api-key": p.apiKey,
@@ -30,10 +39,12 @@ proc makeHeaders(p: GoogleProvider): HttpHeaders =
 
 method nativeObjectOptions*(p: GoogleProvider, model, name, description: string,
                            schema: JsonNode): JsonNode =
+  ## Return Google native structured-output options.
   %*{"generationConfig": {"responseMimeType": "application/json",
     "responseJsonSchema": schema}}
 
 proc buildGoogleBody*(request: ProviderRequest): JsonNode =
+  ## Build a Google Gemini generateContent request body.
   validateToolChoice(request.toolChoice, request.tools)
   result = %*{"contents": []}
   var names = initTable[string, string]()
@@ -128,6 +139,7 @@ proc buildGoogleBody*(request: ProviderRequest): JsonNode =
     raiseProviderError("Google does not support the user option")
 
 proc parseGoogleOutput*(data: JsonNode): ProviderResponse =
+  ## Parse a Google Gemini response.
   if data.isNil or data.kind != JObject:
     raiseProviderError("Google returned an invalid response")
   if data.hasKey("error"):
@@ -201,6 +213,7 @@ proc parseGoogleOutput*(data: JsonNode): ProviderResponse =
 
 proc handleGoogleEvent*(response: var ProviderResponse, data: JsonNode,
                               onEvent: StreamCallback): SseAction =
+  ## Consume one Google Gemini streaming event.
   let chunk = parseGoogleOutput(data)
   if chunk.model.len > 0: response.model = chunk.model
   if data.hasKey("usageMetadata"): response.usage = chunk.usage
@@ -296,14 +309,17 @@ proc requestNative(p: GoogleProvider, request: ProviderRequest,
 
 method generateAsync*(p: GoogleProvider,
                       request: ProviderRequest): Future[ProviderResponse] =
+  ## Send a request through the Google Gemini API.
   requestNative(p, request, nil)
 
 method generateStreamAsync*(p: GoogleProvider, request: ProviderRequest,
                            onEvent: StreamCallback): Future[ProviderResponse] =
+  ## Stream a request through the Google Gemini API.
   requestNative(p, request, onEvent)
 
 method embedAsync*(p: GoogleProvider,
                    request: EmbeddingRequest): Future[EmbeddingResponse] {.async.} =
+  ## Send an embedding request through the Google Gemini API.
   if p.apiKey.len == 0: raiseProviderError("GOOGLE API key is not configured")
   var model = request.model
   model.removePrefix("models/")

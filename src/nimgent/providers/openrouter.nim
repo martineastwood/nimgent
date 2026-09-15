@@ -13,6 +13,7 @@ proc buildBody*(request: ProviderRequest, stream: bool): JsonNode =
 
 type
   OpenRouterRouting* = object
+    ## Optional provider routing rules for an OpenRouter request.
     order*: Option[seq[string]]
     only*: Option[seq[string]]
     ignore*: Option[seq[string]]
@@ -20,9 +21,11 @@ type
     requireParameters*: Option[bool]
     sort*: Option[string]
   OpenRouterOptions* = object
+    ## OpenRouter-specific routing settings.
     routing*: Option[OpenRouterRouting]
 
 proc toProviderJson*(value: OpenRouterOptions): JsonNode =
+  ## Serialize OpenRouter-specific request options.
   result = newJObject()
   if value.routing.isSome:
     let routing = value.routing.get

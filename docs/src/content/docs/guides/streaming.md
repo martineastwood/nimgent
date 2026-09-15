@@ -1,33 +1,26 @@
 ---
 title: Streaming
-description: Render tokens as they arrive instead of waiting for the full response.
+description: Show model output as it arrives, while keeping the completed response.
 ---
 
-A model can take many seconds to answer. Without streaming, your program waits
-for the entire response before showing anything. **Streaming** delivers the
-answer in pieces as the model produces them — which is what makes chat UIs,
-long generations, and live tool activity feel responsive.
-
-nimgent streams through a callback. You pass a proc, nimgent calls it with each
-event, and when the stream ends you still get the complete, normalized
-`ProviderResponse` — the same object `generateText` would have returned, with
-`text`, `usage`, and `finishReason` assembled from the stream.
+Streaming lets your program show a response while the model is still writing
+it. Use it for command-line tools, chat interfaces, and any task where waiting
+for the full answer would feel slow.
 
 ## Stream text
 
-The streaming counterpart to `generateText` is `streamText`, which takes an
-`onEvent` callback:
+`streamText` calls your callback as text arrives, then returns the complete
+response when the stream finishes:
 
 ```nim
-import std/[os, strutils]
+import std/os
 import nimgent
 import nimgent/providers/openai
 
 let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
-
 let response = streamText(
   model,
-  prompt = "Count to three.",
+  prompt = "Explain why the sky is blue in one paragraph.",
   onEvent = proc (event: StreamEvent): bool =
     if event.kind == seTextDelta:
       stdout.write event.text
@@ -35,58 +28,103 @@ let response = streamText(
     true)
 
 echo ""
-echo response.finishReason   # the full response is still available
+echo "Finished: ", response.finishReason
 ```
 
-Two details worth noticing in that callback:
+Save the example as `stream.nim`, then run it with:
 
-- It **returns a bool**. Return `true` to keep going, `false` to cancel the
-  stream early — the run then raises `CancelledError`.
-- Events arrive for more than text. The case you don't handle is skipped, so a
-  minimal callback is fine; handle more kinds when you need them.
+```sh
+OPENAI_API_KEY=... nim c -r stream.nim
+```
 
-## The event kinds
+Return `true` from the callback to continue streaming. `response.text` contains
+the complete answer after `streamText` returns, and `response.usage` contains
+the reported token counts.
 
-`StreamEvent` has one `kind`, and the fields it carries depend on that kind:
+## Cancel a stream
 
-| Kind | Carries | What it means |
-| --- | --- | --- |
-| `seTextDelta` | `text` | A fragment of the visible answer |
-| `seThinkingDelta` | `text` | A fragment of the model's reasoning (reasoning models) |
-| `seToolCallDelta` | `toolCallId`, `toolName`, `toolArgs` | A fragment of a tool call's arguments |
-| `seWake` | — | A file descriptor you're watching became readable |
-| `seFinished` | — | The stream ended (emitted once, at the end) |
-
-Thinking deltas are useful to show a "reasoning…" panel; tool-call deltas let a
-UI show what the agent is about to do before it finishes asking. `seWake` is
-specialized: when you pass a `wakeFd` (a file descriptor, stdin is `0`), nimgent
-emits `seWake` whenever it becomes readable — a way to inject input or trigger
-cancellation mid-stream on the local side.
-
-## Async streaming
-
-The async form is the primitive; `streamText` is a thin wrapper. In a server or
-any program with an event loop, prefer it:
+Return `false` from the callback when your application wants to stop. nimgent
+then raises `CancelledError`:
 
 ```nim
-let response = await streamTextAsync(
+var stopRequested = false
+
+try:
+  discard streamText(
+    model,
+    prompt = "Write a long story.",
+    onEvent = proc (event: StreamEvent): bool =
+      if event.kind == seTextDelta:
+        stdout.write event.text
+      not stopRequested)
+except CancelledError:
+  echo "\nStopped."
+```
+
+Set `stopRequested` from your UI, signal handler, or surrounding application.
+Keep stream callbacks short so rendering or other slow work does not delay the
+next event.
+
+## Handle more than text
+
+Most programs only need `seTextDelta`. When you stream a request with tools,
+you can also show progress as the model prepares a tool call:
+
+```nim
+let response = streamText(
   model,
-  prompt = "Write a short haiku.",
+  prompt = "Should I bring an umbrella to Paris?",
+  tools = @[weather],
+  maxSteps = 5,
   onEvent = proc (event: StreamEvent): bool =
-    if event.kind == seTextDelta:
+    case event.kind
+    of seTextDelta:
       stdout.write event.text
+      flushFile(stdout)
+    of seToolCallDelta:
+      echo "\nCalling ", event.toolName
+    else:
+      discard
     true)
 ```
 
-Keep callbacks fast — they run on your event loop, so a slow callback delays
-everything else. Buffer or hand off expensive work (parsing, rendering,
-database writes) to the surrounding application rather than doing it inline.
+`seThinkingDelta` is available when a provider returns visible reasoning.
+`seToolCallDelta` contains tool-call progress, so use it to update your UI
+rather than to run a tool yourself. See [Tools and agents](/guides/tools-and-agents/)
+to define `weather` and other local tools.
 
-## Streaming an agent
+## Stream asynchronously
 
-Agents and sessions stream with the same callback shape. Tool calls appear as
-they're requested, which is the quickest way to make an agent legible to a
-user:
+Use `streamTextAsync` in servers and applications that already run Nim's event
+loop:
+
+```nim
+import std/[asyncdispatch, os]
+import nimgent
+import nimgent/providers/openai
+
+let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
+
+proc main() {.async.} =
+  let response = await streamTextAsync(
+    model,
+    prompt = "Write a short haiku.",
+    onEvent = proc (event: StreamEvent): bool =
+      if event.kind == seTextDelta:
+        stdout.write event.text
+      true)
+  echo "\nFinished: ", response.finishReason
+
+waitFor main()
+```
+
+Use `streamText` for scripts and command-line programs. Do not call the
+blocking helper from inside an existing async event loop.
+
+## Stream an agent
+
+An agent streams with the same callback shape. This is useful when you want to
+show both the answer and the tools it is using:
 
 ```nim
 let response = researcher.stream(
@@ -96,25 +134,30 @@ let response = researcher.stream(
     of seTextDelta:
       stdout.write event.text
     of seToolCallDelta:
-      echo "\n→ ", event.toolName, "(", event.toolArgs, ")"
+      echo "\nCalling ", event.toolName
     else:
       discard
     true)
 ```
 
-When text deltas alone aren't enough — approvals, step boundaries, run start
-and finish — agents also emit a richer normalized event stream:
+`researcher` can be any `Agent` you created with `newAgent`. Use
+`researcher.events(...)` when your interface also needs approval requests, run
+boundaries, tool results, or errors. See [Tools and agents](/guides/tools-and-agents/)
+for that flow.
 
-```nim
-let events = researcher.events("What should I deploy?")
-while true:
-  let (available, event) = await events.read()
-  if not available: break
-  handle(event)   # event.kind: aeRunStart, aeTextDelta, aeToolCall, ...
+## Troubleshooting
 
-let response = await events.result
-```
+- **Nothing appears until the end:** write `seTextDelta` text to your output
+  and call `flushFile(stdout)` for a command-line program.
+- **The stream stops unexpectedly:** returning `false` raises `CancelledError`.
+- **A callback makes streaming sluggish:** move slow rendering, parsing, or
+  database work outside the callback.
+- **Your provider does not stream:** handle the provider error and offer a
+  non-streaming fallback if your application needs one.
 
-See [Tools and agents](/guides/tools-and-agents/) for the full event list and
-approval handling, and [Structured output](/guides/structured-output/) for
-streaming a *validated object* as it forms.
+## Next steps
+
+- [Tools and agents](/guides/tools-and-agents/) to stream tool-using runs.
+- [Structured output](/guides/structured-output/) to stream a validated object.
+- [Sessions](/guides/sessions/) to keep a conversation across runs.
+- [Providers](/guides/providers/) to choose and configure a provider.

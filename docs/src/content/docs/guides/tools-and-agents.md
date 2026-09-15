@@ -1,62 +1,70 @@
 ---
 title: Tools and agents
-description: Let the model call your functions, and keep the loop bounded.
+description: Let a model call your Nim code, then reuse that setup as an agent.
 ---
 
-A model can only produce text. It cannot look something up, write a file, or
-call your API — unless you give it a way to ask. A **tool** is that way: a
-function in your program that the model can request by name, with arguments it
-invents from your description.
+Tools let a model ask your application to look up data, call an API, or perform
+another action before it answers. You can use a tool for one `generateText`
+request, then create an `Agent` when the same model, instructions, and tools
+should be reused across many requests.
 
-nimgent runs the exchange for you. When the model asks for a tool, nimgent
-checks the arguments against the tool's schema, calls your function, and hands
-the result back to the model so it can decide what to do next:
+## Call a typed tool
 
-1. The model sees your tools and either answers or requests one, with arguments.
-2. nimgent validates the arguments against the tool's JSON Schema.
-3. Your function runs and returns a result.
-4. The result becomes part of the conversation and the model continues.
+Start with a typed input and a handler. nimgent uses the input type to tell the
+model what arguments the tool accepts:
 
-This loop — model, tool, model — is what an **agent** is. This page covers
-writing tools, then the agent that drives them.
-
-## Define a typed tool
-
-The simplest tool takes a typed input and returns a string:
+Typed inputs keep the contract in one place. nimgent derives the JSON Schema
+the model sees and decodes the arguments into `WeatherInput` before calling
+your handler, so you can use `input.city` directly instead of parsing JSON by
+hand. Invalid or missing fields become tool errors that the model can respond
+to.
 
 ```nim
+import std/os
+import nimgent
+import nimgent/providers/openai
+
 type WeatherInput = object
   city: string
 
 let weather = tool(
   "get_weather",
-  "Get the current weather for a city",
+  "Return a sample weather report for a city.",
   proc (_: ToolContext, input: WeatherInput): string =
     input.city & ": 16C and cloudy")
+
+let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
+let response = generateText(
+  model,
+  prompt = "Should I bring an umbrella to Paris?",
+  tools = @[weather],
+  maxSteps = 5)
+
+echo response.text
 ```
 
-The name and description matter as much as the code. The model reads both to
-decide *when* and *how* to call the tool — write the description like a prompt
-for a new colleague, not a code comment:
+Save the example as `weather.nim`, then run it with:
 
-```nim
-tool(
-  "get_weather",
-  "Get current weather for a city name. Returns temperature and conditions. "
-  "Use for any question about current conditions; do not use for forecasts.",
-  handler)
+```sh
+OPENAI_API_KEY=... nim c -r weather.nim
 ```
 
-From the type, nimgent derives a JSON Schema and advertises it to the provider.
-Every schema feature described in [Structured output](/guides/structured-output/)
-applies to tool inputs too — enums, `Option`, pragmas like `jsonMinimum`,
-nested objects, all of it.
+The model decides whether to call `get_weather`. When it does, your handler
+receives a `WeatherInput`, returns a result, and the model uses that result to
+finish its answer.
 
-## Returning richer results
+`maxSteps` limits how many model steps this request can take. Set it above `1`
+when a local tool should run and the model should continue with its result. The
+limit prevents an accidental tool loop from running forever.
 
-Your tool can return anything Nim can serialize. A string is sent to the model
-as-is; other values are serialized to JSON, and the same value is kept on the
-result for your application to read:
+## Write useful tools
+
+The tool name and description tell the model when to use the tool. Describe the
+task, expected input, and important limits. For example: "Get the current
+weather for a city. Returns temperature and conditions. Use this for current
+conditions, not forecasts."
+
+Return a Nim object when the model needs several related values:
 
 ```nim
 type ForecastInput = object
@@ -67,92 +75,51 @@ type Forecast = object
   celsius: float
   raining: bool
 
-tool(
+let forecast = tool(
   "get_forecast",
-  "Get a structured forecast for a city",
+  "Get a forecast for a city.",
   proc (_: ToolContext, input: ForecastInput): Forecast =
     Forecast(city: input.city, celsius: 16.0, raining: false))
 ```
 
-The model sees `{"city": "Paris", "celsius": 16.0, "raining": false}` and can
-reason over it; your code can later read the same structured value from
-`response.steps` without re-parsing anything.
+nimgent serializes the returned value for the model. Your handler receives only
+inputs that match the declared type.
 
-## When things go wrong
+## Handle tool failures
 
-Two things can fail inside the loop, and both become *structured tool
-failures* the model can read and react to — it will typically try again or
-explain the problem to the user:
+Tool errors become results the model can read. This lets it retry with different
+arguments or explain the problem to the user instead of ending the whole run.
 
-- **Bad arguments.** The model calls the tool with arguments that don't match
-  the schema. nimgent rejects the call before your function runs.
-- **Your function raises.** Any exception becomes a tool failure carrying the
-  message.
-
-You can also fail deliberately with a machine-readable error, which is better
-than an exception because the model gets a stable code to reason about:
+Return `toolFailure` when your application knows why a request cannot succeed:
 
 ```nim
-tool(
+import std/json
+import nimgent
+
+type LookupInput = object
+  city: string
+
+let supportedForecast = tool(
   "get_forecast",
-  "Get a forecast for a known city",
-  proc (_: ToolContext, input: ForecastInput): ToolResult =
-    if input.city notin knownCities:
+  "Get a forecast for a supported city.",
+  proc (_: ToolContext, input: LookupInput): ToolResult =
+    if input.city != "Paris":
       return toolFailure(
         "unknown_city",
-        "No forecast for '" & input.city & "'. Try one of: Paris, Tokyo.",
+        "No forecast is available for " & input.city & ". Try Paris.",
+        %*{"city": input.city},
         retryable = false)
-    # ... normal path
-    )
+    ToolResult(output: "Paris: 16C and cloudy"))
 ```
 
-The `message` is what the model sees; `details` (a `JsonNode`) is for your
-application. `retryable = true` hints that a retry with different arguments
-might work.
+If a handler raises an exception or the model supplies invalid arguments,
+nimgent also returns a tool failure to the model. Use exceptions for unexpected
+problems and `toolFailure` for expected application outcomes.
 
-## Long-running tools
+## Make a reusable agent
 
-Every tool receives a `ToolContext` with per-call state. The most useful field
-is `abort` — a callback that returns `true` when the caller has cancelled the
-run. Check it between chunks of work so a slow tool can stop early:
-
-```nim
-proc search(context: ToolContext, input: SearchInput): SearchOutput =
-  for page in searchPages(input.query):
-    if context.abort():
-      raise newException(CancelledError, "search cancelled")
-    results.add page
-```
-
-The context also carries `callId`, `sessionId`, `turnId`, and `metadata` for
-logging and correlation.
-
-## Running tools in parallel
-
-If the model asks for several tools at once, nimgent runs them one after
-another by default. Pass `parallel = true` to tools that are safe to run
-concurrently, and compile with `--threads:on` for the synchronous path:
-
-```nim
-tool("get_weather", "...", handler, parallel = true)
-```
-
-Async tools are a natural fit here — independent I/O overlaps without threads:
-
-```nim
-let forecast = tool(
-  "get_forecast",
-  "Get a forecast for a city",
-  proc (_: ToolContext, input: ForecastInput): Future[Forecast] {.async.} =
-    let response = await fetch(input.city)
-    return parseForecast(response))
-```
-
-## Run a bounded agent
-
-Calling `generateText` with tools runs one exchange. An **agent** packages the
-model, instructions, and tools into a reusable object whose `run` keeps the
-loop going until the model stops asking for tools:
+Use an `Agent` when several requests need the same model, instructions, and
+tools. It saves you from passing that setup to every call:
 
 ```nim
 import nimgent/agent
@@ -160,88 +127,73 @@ import nimgent/agent
 let researcher = newAgent(
   model,
   instructions = "You are a concise research assistant.",
-  tools = @[weather, forecast],
+  tools = @[weather],
   maxSteps = 5)
 
-let response = researcher.run("Plan a picnic in Paris on Saturday.")
-echo response.text
-echo "turns: ", response.steps.len
+let paris = researcher.run("What's the weather like in Paris?")
+let tokyo = researcher.run("What's the weather like in Tokyo?")
+
+echo paris.text
+echo tokyo.text
 ```
 
-`maxSteps` counts **model turns**, not tool calls — one turn can request
-several tools. The default is 8; the cap exists so an accidental tool cycle
-(ask → run → ask → run) cannot run forever. When the cap is hit, the response's
-`finishReason` is `frStepLimit` and you get whatever the model produced so far.
+Each `researcher.run(...)` call gets its own `maxSteps` limit. You can reuse the
+agent as often as you need. Use a [Session](/guides/sessions/) when later runs
+should remember earlier messages and tool results.
 
-Because an `Agent` is configuration, you can create it once and `run` it many
-times; each run is independent. See
-[Sessions](/guides/sessions/) when runs should share a transcript.
+### Choose how tools are used
 
-## Steering tool use
-
-By default the model chooses whether to call tools. To force a behavior, pass a
-`toolChoice`:
+By default, the model decides whether to call a tool. Set `toolChoice` when a
+task requires a different rule:
 
 ```nim
-researcher.run("Summarize the day.", toolChoice = toolChoiceRequired())
+let weatherOnly = newAgent(
+  model,
+  tools = @[weather],
+  toolChoice = toolChoiceSpecific("get_weather"))
 ```
 
 | Choice | Effect |
 | --- | --- |
-| `toolChoiceAuto()` | Model decides (default) |
-| `toolChoiceRequired()` | The model must call *some* tool |
-| `toolChoiceSpecific("get_weather")` | The model must call that tool |
-| `toolChoiceNone()` | Tools are hidden; the model answers in text |
+| `toolChoiceAuto()` | The model decides, this is the default. |
+| `toolChoiceRequired()` | The model must call one of the available tools. |
+| `toolChoiceSpecific("get_weather")` | The model must call the named tool. |
+| `toolChoiceNone()` | The model answers without seeing tools. |
 
-## Watch the loop as it happens
+## Stream an agent run
 
-For UIs, `stream` gives you text deltas plus complete tool events:
+Use `stream` to display text as it arrives. You still receive the complete
+response when the run finishes:
 
 ```nim
+import std/[os, strutils]
+
 let response = researcher.stream(
   "Plan a picnic in Paris.",
   proc (event: StreamEvent): bool =
-    case event.kind
-    of seTextDelta:
+    if event.kind == seTextDelta:
       stdout.write event.text
-    of seToolCallDelta:
-      echo "\n→ ", event.toolName, "(", event.toolArgs, ")"
-    else:
-      discard
-    true)   # return false to cancel
+      flushFile(stdout)
+    true)
+
+echo ""
+echo response.finishReason
 ```
 
-The richer `AgentEvent` stream adds lifecycle boundaries — run start, each
-step, tool results, errors — which is what the approval flow below builds on:
+See [Streaming](/guides/streaming/) when your UI also needs tool-call updates
+or cancellation.
 
-```nim
-let events = researcher.events("Plan a picnic.")
-while true:
-  let (available, event) = await events.read()
-  if not available: break
-  case event.kind
-  of aeToolCall:
-    echo "→ ", event.call.name
-  of aeToolResult:
-    echo "← ", event.toolResult.output
-  of aeStepFinish:
-    echo "-- step ", event.step, " done"
-  else:
-    discard
-discard await events.result
-```
+## Ask for approval before a tool runs
 
-## Human approval
-
-Some tools should not run just because the model asked. An approval policy
-inspects every call before execution and returns `tamAllow`, `tamAsk`, or
-`tamDeny`:
+Use `approvalPolicy` for actions that need a person to approve them. Return
+`tamAsk` for calls that should pause, `tamAllow` for safe calls, or `tamDeny`
+to reject a call immediately. For an existing `deleteFile` tool in your
+application:
 
 ```nim
 let cleaner = newAgent(
   model,
-  instructions = "Tidy up the workspace.",
-  tools = @[deleteTool],
+  tools = @[deleteFile],
   approvalPolicy = proc (_: int, call: ContentBlock, _: Tool): ToolApproval =
     if call.name == "delete_file":
       ToolApproval(mode: tamAsk, reason: "This deletes a file.")
@@ -249,47 +201,49 @@ let cleaner = newAgent(
       ToolApproval(mode: tamAllow))
 ```
 
-When the policy says `tamAsk`, the event stream emits an
-`aeToolApprovalRequired` event. Your application decides — here, auto-denying
-after showing the user the reason:
+When a call needs approval, `cleaner.events(...)` emits
+`aeToolApprovalRequired`. Call `event.approval.approve()` or
+`event.approval.deny()` from your event handler. No tool from that batch runs
+until you decide.
+
+## Use provider-hosted tools
+
+Some providers can run tools such as web search themselves. Declare one with
+`hostedTool`; it has no local Nim handler:
 
 ```nim
-of aeToolApprovalRequired:
-  echo "\nApprove ", event.approval.toolName, "? ", event.approval.reason
-  echo event.approval.input          # the arguments the model chose
-  event.approval.deny()              # or .approve()
+import std/os
+import nimgent
+import nimgent/providers/google
+
+let model = google(getEnv("GEMINI_API_KEY")).model("gemini-3.5-flash-lite")
+let response = generateText(
+  model,
+  prompt = "Find the Nim language homepage.",
+  tools = @[hostedTool("web_search")],
+  maxSteps = 3)
+
+echo response.text
 ```
 
-While the decision is pending, no other tool in that batch starts — sibling
-side effects cannot race ahead of the user's answer. A denial is returned to
-the model as a structured `approval_denied` failure, and the model continues
-with that knowledge.
+Hosted tools vary by provider and model. Handle a provider error if the selected
+model does not offer the hosted tool you request.
 
-## Escape hatches
+## Troubleshooting
 
-Two lower-level constructors cover the cases the typed helper does not:
+- **The model does not call a tool:** generally, this means you need to make the tool's description
+more specific so the model has a better understanding of when to call it. Use
+  `toolChoiceRequired()` or `toolChoiceSpecific(...)` when a tool is mandatory.
+- **The model stops after calling a tool:** set `maxSteps` above `1` so it can
+  continue with the tool result.
+- **A tool receives unexpected input:** make the input type and description
+  match the values your handler accepts.
+- **A sensitive action ran unexpectedly:** add an `approvalPolicy` before you
+  expose that tool to the model.
 
-- **`rawTool`** builds a tool from a hand-written `JsonNode` schema — useful
-  when the schema is loaded at runtime or generated dynamically. Schema
-  validation still runs before your `JsonNode`-based handler executes. It is
-  also the right constructor for a handler that takes a `JsonNode`: the typed
-  `tool` helper needs a concrete Nim type to derive a schema from, and
-  `JsonNode` has none.
-- **`hostedTool("web_search")`** declares a tool the *provider* executes
-  server-side (Anthropic and Gemini's web search, for example). There is no
-  local function at all; results arrive as normal content.
+## Next steps
 
-```nim
-let webSearch = hostedTool("web_search")
-let agent = newAgent(model, tools = @[webSearch], maxSteps = 4)
-```
-
-## Instrumenting runs
-
-`RunCallbacks` adds observability to any run without touching the event
-stream: `onRetry` for retries, `onToolStart`/`onToolFinish` with durations,
-`onStepFinish` per model turn, and `onFinish` for the final response. Tools
-and agents share the same failure philosophy as everything else in nimgent —
-problems become structured values the model can handle; see
-[Structured output](/guides/structured-output/) for the type-first alternative
-to free text.
+- [Sessions](/guides/sessions/) to keep a conversation across agent runs.
+- [Streaming](/guides/streaming/) to render responses while they are generated.
+- [Structured output](/guides/structured-output/) to receive validated Nim values.
+- [Providers](/guides/providers/) to configure provider-specific features.

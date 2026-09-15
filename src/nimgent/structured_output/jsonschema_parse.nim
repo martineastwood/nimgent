@@ -64,6 +64,7 @@ proc extractJson*(s: string): JsonNode =
 
 type
   PartialParse* = enum
+    ## Result of parsing or repairing a partial JSON value.
     ppUndefined
     ppSuccess
     ppRepaired

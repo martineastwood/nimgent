@@ -1,8 +1,8 @@
 ## Portable and provider-scoped request options.
 import std/[json, options]
-import nimgent/providers/[provider, openai, anthropic, openrouter, hyper]
+import nimgent/providers/[provider, openai, anthropic, google_transport, openrouter, hyper]
 export OpenAIOptions, AnthropicOptions, AnthropicThinking, OpenRouterOptions,
-  OpenRouterRouting, HyperOptions
+  OpenRouterRouting, HyperOptions, GoogleOptions
 
 type GenerationOptions* = object
   ## Provider-neutral generation controls. Providers map these canonical
@@ -17,10 +17,11 @@ type GenerationOptions* = object
   reasoning*: Option[string]
 
 type ProviderOptions* = object
-  ## Provider-specific extensions. Use `extra` for a provider without a typed
+  ## Provider-specific extensions. Use `extra` for settings without a typed
   ## namespace; its keys are always namespaced by provider name.
   openai*: OpenAIOptions
   anthropic*: AnthropicOptions
+  google*: GoogleOptions
   openrouter*: OpenRouterOptions
   hyper*: HyperOptions
   extra*: JsonNode ## Additional native namespaces, e.g. {"google": {...}}.
@@ -71,6 +72,7 @@ proc mergeProviderNamespaces(result: var JsonNode, scoped: ProviderOptions,
   case providerName
   of "openai": mergeRequestOptions(result, scoped.openai.toProviderJson)
   of "anthropic": mergeRequestOptions(result, scoped.anthropic.toProviderJson)
+  of "google": mergeRequestOptions(result, scoped.google.toProviderJson)
   of "openrouter": mergeRequestOptions(result, scoped.openrouter.toProviderJson)
   of "hyper": mergeRequestOptions(result, scoped.hyper.toProviderJson)
   else: discard
@@ -78,6 +80,7 @@ proc mergeProviderNamespaces(result: var JsonNode, scoped: ProviderOptions,
 proc resolveGenerationOptions*(options: GenerationOptions,
                                scoped: ProviderOptions,
                                providerName: string): JsonNode =
+  ## Merge provider-specific and provider-neutral generation settings.
   result = newJObject()
   mergeProviderNamespaces(result, scoped, providerName)
   result = result.copy

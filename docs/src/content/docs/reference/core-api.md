@@ -7,7 +7,7 @@ description: The small set of types and entry points used by most applications.
 
 | Type | Purpose |
 | --- | --- |
-| `Provider` | Provider adapter and capability set |
+| `Provider` | Provider adapter and model factory |
 | `LanguageModel` | A text-generation model bound to a provider |
 | `EmbeddingModel` | An embedding model bound to a provider |
 | `ProviderRequest` | Provider-neutral request for direct adapter use |
@@ -20,6 +20,8 @@ Create models through a provider:
 let chat = openAI(apiKey).model("gpt-4o-mini")
 let embeddings = openAI(apiKey).embeddingModel("text-embedding-3-small")
 ```
+
+For every exported type and procedure, see the [generated API reference](/reference/api/nimgent/).
 
 ## Generation
 
@@ -41,6 +43,7 @@ Set `RunCallbacks.trace` to a `TraceSink` to receive completed spans for runs,
 steps, provider attempts, and local tools. The core has no telemetry dependency
 and omits prompts, tool arguments, and model output by default. Embeddings accept
 the same sink through their `trace` parameter, as do structured-output calls.
+See [Tracing](/guides/tracing/) for the span names and attributes.
 
 ## Embeddings
 
