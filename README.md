@@ -6,9 +6,7 @@ streaming, tools, structured output, agents, sessions, retrieval, and MCP
 clients.
 
 You can use the same generation code with OpenAI, Anthropic, Google Gemini,
-OpenRouter, Hyper, Mistral, OpenCode, OpenCode Zen, or your own provider. The
-library runs in your Nim application and does not require a hosted nimgent
-service.
+OpenRouter, Hyper, Mistral, OpenCode, OpenCode Zen, or your own provider. 
 
 ## Install
 
