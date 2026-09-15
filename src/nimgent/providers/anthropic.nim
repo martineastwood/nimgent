@@ -421,12 +421,9 @@ type
   AnthropicOptions* = object
     thinking*: Option[AnthropicThinking]
     budgetTokens*: Option[int] ## Required with EnabledThinking.
-    effort*: Option[string]
-    extra*: JsonNode ## Native API fields; typed fields take precedence.
 
 proc toProviderJson*(value: AnthropicOptions): JsonNode =
   result = newJObject()
-  mergeRequestOptions(result, value.extra)
   if value.budgetTokens.isSome and
       (value.thinking.isNone or value.thinking.get != EnabledThinking):
     raiseProviderError("budgetTokens requires EnabledThinking")
@@ -436,4 +433,3 @@ proc toProviderJson*(value: AnthropicOptions): JsonNode =
       if value.budgetTokens.isNone or value.budgetTokens.get < 1024:
         raiseProviderError("EnabledThinking requires budgetTokens >= 1024")
       result["thinking"]["budget_tokens"] = %value.budgetTokens.get
-  if value.effort.isSome: result["output_config"] = %*{"effort": value.effort.get}

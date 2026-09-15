@@ -4,7 +4,7 @@ description: Runnable examples shipped with the nimgent repository.
 ---
 
 The repository keeps complete examples in
-[`examples/`](https://github.com/martineastwoodtree/main/examples).
+[`examples/`](https://github.com/martineastwood/nimgent/tree/main/examples).
 
 | Example | Demonstrates |
 | --- | --- |
@@ -14,12 +14,17 @@ The repository keeps complete examples in
 | `tool_call.nim` | A typed local tool |
 | `agent.nim` | A bounded reusable agent |
 | `agent_events.nim` | Lifecycle events and approval |
+| `lifecycle_callbacks.nim` | Retries, tool timing, and step hooks |
 | `structured_output.nim` | Typed JSON output |
 | `stream_object.nim` | Partial structured output |
 | `session.nim` | Persisted multi-turn conversations |
 | `embeddings.nim` | Batch embeddings and similarity |
 | `provider_options.nim` | Typed provider settings |
 | `wrap_provider.nim` | Request and response middleware |
+| `chat_with_pdf.nim` | File input and source citations |
+| `mcp_client.nim` | Tools served by an MCP server |
+| `anthropic_smoke.nim` | Live Anthropic streaming and structured output |
+| `google_smoke.nim` | Live Gemini search, URL context, and tool loops |
 
 Run one from the repository root:
 

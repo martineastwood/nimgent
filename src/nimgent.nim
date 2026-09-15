@@ -110,14 +110,14 @@ proc finishError(e: ref CatchableError): tuple[status: SpanStatus, message: stri
   result.message = e.msg
 
 proc embedManyAsync*(model: EmbeddingModel, values: seq[string],
-                     options: JsonNode = nil, maxRetries = 2,
+                     maxRetries = 2,
                      abort: AbortCheck = nil,
                      providerOptions = ProviderOptions(),
                      trace: TraceSink = nil): Future[EmbedManyResult] {.async.} =
   ## Embed strings in one provider batch, preserving input order.
   if values.len == 0: raiseProviderError("values must not be empty")
   if maxRetries < 0: raiseProviderError("maxRetries must be at least 0")
-  let resolved = resolveOptions(options, providerOptions, model.provider.name)
+  let resolved = resolveOptions(nil, providerOptions, model.provider.name)
   let traceState = newTraceState(trace,
     if trace.isNil: "" else: "embedding:" & $traceNowNs())
   var operationSpan: TraceSpan
@@ -176,28 +176,28 @@ proc embedManyAsync*(model: EmbeddingModel, values: seq[string],
     raise
 
 proc embedMany*(model: EmbeddingModel, values: seq[string],
-                options: JsonNode = nil, maxRetries = 2,
+                maxRetries = 2,
                 abort: AbortCheck = nil,
                 providerOptions = ProviderOptions(),
                 trace: TraceSink = nil): EmbedManyResult =
-  waitFor embedManyAsync(model, values, options, maxRetries, abort, providerOptions,
+  waitFor embedManyAsync(model, values, maxRetries, abort, providerOptions,
     trace)
 
 proc embedAsync*(model: EmbeddingModel, value: string,
-                 options: JsonNode = nil, maxRetries = 2,
+                 maxRetries = 2,
                  abort: AbortCheck = nil,
                  providerOptions = ProviderOptions(),
                  trace: TraceSink = nil): Future[EmbedResult] {.async.} =
-  let response = await embedManyAsync(model, @[value], options, maxRetries, abort,
+  let response = await embedManyAsync(model, @[value], maxRetries, abort,
     providerOptions, trace)
   return EmbedResult(value: value, embedding: response.embeddings[0],
     usage: response.usage)
 
-proc embed*(model: EmbeddingModel, value: string, options: JsonNode = nil,
+proc embed*(model: EmbeddingModel, value: string,
             maxRetries = 2, abort: AbortCheck = nil,
             providerOptions = ProviderOptions(),
             trace: TraceSink = nil): EmbedResult =
-  waitFor embedAsync(model, value, options, maxRetries, abort, providerOptions,
+  waitFor embedAsync(model, value, maxRetries, abort, providerOptions,
     trace)
 
 proc buildRequest(
@@ -787,7 +787,7 @@ proc generateTextAsync*(
   tools: seq[Tool] = @[],
   maxTokens = 0,
   sessionId = "",
-  options: JsonNode = nil,
+  generationOptions = GenerationOptions(),
   maxRetries = 2,
   maxSteps = 1,
   abort: AbortCheck = nil,
@@ -797,7 +797,8 @@ proc generateTextAsync*(
   turnId = "",
   toolChoice = toolChoiceAuto()
 ): Future[ProviderResponse] {.async.} =
-  let resolved = resolveOptions(options, providerOptions, model.provider.name)
+  let resolved = resolveGenerationOptions(generationOptions, providerOptions,
+    model.provider.name)
   return await generateTextAsync(model.provider, model.id, prompt, messages, system, tools,
     maxTokens, sessionId, resolved, maxRetries, maxSteps, abort, callbacks,
     turnId, metadata, toolChoice)
@@ -805,14 +806,15 @@ proc generateTextAsync*(
 proc generateText*(model: LanguageModel, prompt = "",
                    messages: seq[Message] = @[], system = "",
                    tools: seq[Tool] = @[], maxTokens = 0, sessionId = "",
-                   options: JsonNode = nil, maxRetries = 2, maxSteps = 1,
+                   generationOptions = GenerationOptions(), maxRetries = 2,
+                   maxSteps = 1,
                    abort: AbortCheck = nil,
                    callbacks = RunCallbacks(),
                    providerOptions = ProviderOptions(),
                    metadata: JsonNode = nil, turnId = "",
                    toolChoice = toolChoiceAuto()): ProviderResponse =
   waitFor generateTextAsync(model, prompt, messages, system, tools, maxTokens,
-    sessionId, options, maxRetries, maxSteps, abort, callbacks, providerOptions,
+    sessionId, generationOptions, maxRetries, maxSteps, abort, callbacks, providerOptions,
     metadata, turnId, toolChoice)
 
 proc generateTextAsync*(
@@ -875,7 +877,7 @@ proc streamTextAsync*(
   tools: seq[Tool] = @[],
   maxTokens = 0,
   sessionId = "",
-  options: JsonNode = nil,
+  generationOptions = GenerationOptions(),
   wakeFd: cint = -1,
   maxRetries = 2,
   maxSteps = 1,
@@ -886,7 +888,8 @@ proc streamTextAsync*(
   turnId = "",
   toolChoice = toolChoiceAuto()
 ): Future[ProviderResponse] {.async.} =
-  let resolved = resolveOptions(options, providerOptions, model.provider.name)
+  let resolved = resolveGenerationOptions(generationOptions, providerOptions,
+    model.provider.name)
   return await streamTextAsync(model.provider, model.id, onEvent, prompt,
     messages, system, tools,
     maxTokens, sessionId, resolved, wakeFd, maxRetries, maxSteps, abort, callbacks,
@@ -895,14 +898,15 @@ proc streamTextAsync*(
 proc streamText*(model: LanguageModel, onEvent: StreamCallback, prompt = "",
                  messages: seq[Message] = @[], system = "",
                  tools: seq[Tool] = @[], maxTokens = 0, sessionId = "",
-                 options: JsonNode = nil, wakeFd: cint = -1, maxRetries = 2,
+                 generationOptions = GenerationOptions(), wakeFd: cint = -1,
+                 maxRetries = 2,
                  maxSteps = 1, abort: AbortCheck = nil,
                  callbacks = RunCallbacks(),
                  providerOptions = ProviderOptions(),
                  metadata: JsonNode = nil, turnId = "",
                  toolChoice = toolChoiceAuto()): ProviderResponse =
   waitFor streamTextAsync(model, onEvent, prompt, messages, system, tools,
-    maxTokens, sessionId, options, wakeFd, maxRetries, maxSteps, abort,
+    maxTokens, sessionId, generationOptions, wakeFd, maxRetries, maxSteps, abort,
     callbacks, providerOptions, metadata, turnId, toolChoice)
 
 proc streamTextAsync*(
@@ -936,7 +940,7 @@ proc generateAgentTextAsync*(model: LanguageModel,
                              tools: seq[Tool] = @[],
                              maxTokens = 0,
                              sessionId = "",
-                             options: JsonNode = nil,
+                             generationOptions = GenerationOptions(),
                              maxRetries = 2,
                              maxSteps = 1,
                              abort: AbortCheck = nil,
@@ -948,7 +952,8 @@ proc generateAgentTextAsync*(model: LanguageModel,
                              onEvent: AgentEventCallback = nil,
                              approvalPolicy: ToolApprovalPolicy = nil
                              ): Future[ProviderResponse] {.async.} =
-  let resolved = resolveOptions(options, providerOptions, model.provider.name)
+  let resolved = resolveGenerationOptions(generationOptions, providerOptions,
+    model.provider.name)
   validateRun(tools, maxRetries, maxSteps)
   let request = buildRequest(model.id, prompt, messages, system,
     toDefinitions(tools), maxTokens, sessionId, resolved,
@@ -963,7 +968,7 @@ proc streamAgentTextAsync*(model: LanguageModel,
                            tools: seq[Tool] = @[],
                            maxTokens = 0,
                            sessionId = "",
-                           options: JsonNode = nil,
+                           generationOptions = GenerationOptions(),
                            wakeFd: cint = -1,
                            maxRetries = 2,
                            maxSteps = 1,
@@ -976,7 +981,8 @@ proc streamAgentTextAsync*(model: LanguageModel,
                            onEvent: AgentEventCallback = nil,
                            approvalPolicy: ToolApprovalPolicy = nil
                            ): Future[ProviderResponse] {.async.} =
-  let resolved = resolveOptions(options, providerOptions, model.provider.name)
+  let resolved = resolveGenerationOptions(generationOptions, providerOptions,
+    model.provider.name)
   validateRun(tools, maxRetries, maxSteps)
   let request = buildRequest(model.id, prompt, messages, system,
     toDefinitions(tools), maxTokens, sessionId, resolved, wakeFd,
@@ -1008,7 +1014,7 @@ proc generateTextAsync*(model: LanguageModel,
                         tools: seq[Tool] = @[],
                         maxTokens = 0,
                         sessionId = "",
-                        options: JsonNode = nil,
+                        generationOptions = GenerationOptions(),
                         maxRetries = 2,
                         maxSteps = 1,
                         abort: AbortCheck = nil,
@@ -1020,26 +1026,27 @@ proc generateTextAsync*(model: LanguageModel,
                         approvalPolicy: ToolApprovalPolicy = nil
                         ): Future[ProviderResponse] {.async.} =
   return await generateAgentTextAsync(model, prompt, messages, system, tools,
-    maxTokens, sessionId, options, maxRetries, maxSteps, abort, callbacks,
+    maxTokens, sessionId, generationOptions, maxRetries, maxSteps, abort, callbacks,
     providerOptions, metadata, turnId, toolChoice, onEvent, approvalPolicy)
 
 proc generateText*(model: LanguageModel, onEvent: AgentEventCallback,
                    prompt = "", messages: seq[Message] = @[], system = "",
                    tools: seq[Tool] = @[], maxTokens = 0, sessionId = "",
-                   options: JsonNode = nil, maxRetries = 2, maxSteps = 1,
+                   generationOptions = GenerationOptions(), maxRetries = 2,
+                   maxSteps = 1,
                    abort: AbortCheck = nil, callbacks = RunCallbacks(),
                    providerOptions = ProviderOptions(),
                    metadata: JsonNode = nil, turnId = "",
                    toolChoice = toolChoiceAuto(),
                    approvalPolicy: ToolApprovalPolicy = nil): ProviderResponse =
   waitFor generateTextAsync(model, onEvent, prompt, messages, system, tools,
-    maxTokens, sessionId, options, maxRetries, maxSteps, abort, callbacks,
+    maxTokens, sessionId, generationOptions, maxRetries, maxSteps, abort, callbacks,
     providerOptions, metadata, turnId, toolChoice, approvalPolicy)
 
 proc streamTextAsync*(model: LanguageModel, onEvent: AgentEventCallback,
                       prompt = "", messages: seq[Message] = @[], system = "",
                       tools: seq[Tool] = @[], maxTokens = 0, sessionId = "",
-                      options: JsonNode = nil, wakeFd: cint = -1,
+                      generationOptions = GenerationOptions(), wakeFd: cint = -1,
                       maxRetries = 2, maxSteps = 1,
                       abort: AbortCheck = nil,
                       callbacks = RunCallbacks(),
@@ -1049,14 +1056,14 @@ proc streamTextAsync*(model: LanguageModel, onEvent: AgentEventCallback,
                       approvalPolicy: ToolApprovalPolicy = nil
                       ): Future[ProviderResponse] {.async.} =
   return await streamAgentTextAsync(model, prompt, messages, system, tools,
-    maxTokens, sessionId, options, wakeFd, maxRetries, maxSteps, abort,
+    maxTokens, sessionId, generationOptions, wakeFd, maxRetries, maxSteps, abort,
     callbacks, providerOptions, metadata, turnId, toolChoice, onEvent,
     approvalPolicy)
 
 proc streamText*(model: LanguageModel, onEvent: AgentEventCallback,
                  prompt = "", messages: seq[Message] = @[], system = "",
                  tools: seq[Tool] = @[], maxTokens = 0, sessionId = "",
-                 options: JsonNode = nil, wakeFd: cint = -1,
+                 generationOptions = GenerationOptions(), wakeFd: cint = -1,
                  maxRetries = 2, maxSteps = 1,
                  abort: AbortCheck = nil, callbacks = RunCallbacks(),
                  providerOptions = ProviderOptions(),
@@ -1064,7 +1071,7 @@ proc streamText*(model: LanguageModel, onEvent: AgentEventCallback,
                  toolChoice = toolChoiceAuto(),
                  approvalPolicy: ToolApprovalPolicy = nil): ProviderResponse =
   waitFor streamTextAsync(model, onEvent, prompt, messages, system, tools,
-    maxTokens, sessionId, options, wakeFd, maxRetries, maxSteps, abort,
+    maxTokens, sessionId, generationOptions, wakeFd, maxRetries, maxSteps, abort,
     callbacks, providerOptions, metadata, turnId, toolChoice, approvalPolicy)
 
 proc generateTextAsync*(provider: Provider, request: ProviderRequest,
@@ -1110,7 +1117,8 @@ proc streamText*(provider: Provider, request: ProviderRequest,
 proc events*(model: LanguageModel, prompt = "",
              messages: seq[Message] = @[], system = "",
              tools: seq[Tool] = @[], maxTokens = 0, sessionId = "",
-             options: JsonNode = nil, maxRetries = 2, maxSteps = 1,
+             generationOptions = GenerationOptions(), maxRetries = 2,
+             maxSteps = 1,
              abort: AbortCheck = nil, callbacks = RunCallbacks(),
              providerOptions = ProviderOptions(), metadata: JsonNode = nil,
              turnId = "", toolChoice = toolChoiceAuto(),
@@ -1118,7 +1126,7 @@ proc events*(model: LanguageModel, prompt = "",
   eventStream(proc (callback: AgentEventCallback): Future[ProviderResponse]
               {.closure.} =
     streamAgentTextAsync(model, prompt, messages, system, tools, maxTokens,
-      sessionId, options, -1, maxRetries, maxSteps, abort, callbacks,
+      sessionId, generationOptions, -1, maxRetries, maxSteps, abort, callbacks,
       providerOptions, metadata, turnId, toolChoice, callback, approvalPolicy))
 
 type
@@ -1416,7 +1424,7 @@ proc generateObjectAsync*(
   description = "",
   maxTokens = 0,
   sessionId = "",
-  options: JsonNode = nil,
+  generationOptions = GenerationOptions(),
   maxRetries = 2,
   maxRepairs = 0,
   mode = omAuto,
@@ -1425,7 +1433,8 @@ proc generateObjectAsync*(
   truncation = otReject,
   trace: TraceSink = nil
 ): Future[ObjectResult[JsonNode]] {.async.} =
-  let resolved = resolveOptions(options, providerOptions, model.provider.name)
+  let resolved = resolveGenerationOptions(generationOptions, providerOptions,
+    model.provider.name)
   return await generateObjectAsync(model.provider, model.id, schema,
     prompt = prompt, messages = messages, system = system, name = name,
     description = description, maxTokens = maxTokens, sessionId = sessionId,
@@ -1435,7 +1444,8 @@ proc generateObjectAsync*(
 proc generateObject*(model: LanguageModel, schema: JsonNode, prompt = "",
                      messages: seq[Message] = @[], system = "",
                      name = "object", description = "", maxTokens = 0,
-                     sessionId = "", options: JsonNode = nil, maxRetries = 2,
+                     sessionId = "", generationOptions = GenerationOptions(),
+                     maxRetries = 2,
                      maxRepairs = 0, mode = omAuto,
                      abort: AbortCheck = nil,
                      providerOptions = ProviderOptions(),
@@ -1444,7 +1454,8 @@ proc generateObject*(model: LanguageModel, schema: JsonNode, prompt = "",
   waitFor generateObjectAsync(model, schema, prompt = prompt,
     messages = messages, system = system, name = name,
     description = description, maxTokens = maxTokens, sessionId = sessionId,
-    options = options, maxRetries = maxRetries, maxRepairs = maxRepairs,
+    generationOptions = generationOptions, maxRetries = maxRetries,
+    maxRepairs = maxRepairs,
     mode = mode, abort = abort, providerOptions = providerOptions,
     truncation = truncation, trace = trace)
 
@@ -1528,7 +1539,7 @@ proc streamObjectAsync*(
   description = "",
   maxTokens = 0,
   sessionId = "",
-  options: JsonNode = nil,
+  generationOptions = GenerationOptions(),
   wakeFd: cint = -1,
   maxRetries = 2,
   maxRepairs = 0,
@@ -1540,7 +1551,8 @@ proc streamObjectAsync*(
   truncation = otReject,
   trace: TraceSink = nil
 ): Future[ObjectResult[JsonNode]] {.async.} =
-  let resolved = resolveOptions(options, providerOptions, model.provider.name)
+  let resolved = resolveGenerationOptions(generationOptions, providerOptions,
+    model.provider.name)
   return await streamObjectAsync(model.provider, model.id, schema,
     prompt = prompt, messages = messages, system = system, name = name,
     description = description, maxTokens = maxTokens, sessionId = sessionId,
@@ -1552,7 +1564,8 @@ proc streamObjectAsync*(
 proc streamObject*(model: LanguageModel, schema: JsonNode, prompt = "",
                    messages: seq[Message] = @[], system = "",
                    name = "object", description = "", maxTokens = 0,
-                   sessionId = "", options: JsonNode = nil, wakeFd: cint = -1,
+                   sessionId = "", generationOptions = GenerationOptions(),
+                   wakeFd: cint = -1,
                    maxRetries = 2, maxRepairs = 0, mode = omAuto,
                    abort: AbortCheck = nil,
                    onPartial: PartialObjectCallback = nil,
@@ -1563,7 +1576,7 @@ proc streamObject*(model: LanguageModel, schema: JsonNode, prompt = "",
   waitFor streamObjectAsync(model, schema, prompt = prompt,
     messages = messages, system = system, name = name,
     description = description, maxTokens = maxTokens, sessionId = sessionId,
-    options = options, wakeFd = wakeFd, maxRetries = maxRetries,
+    generationOptions = generationOptions, wakeFd = wakeFd, maxRetries = maxRetries,
     maxRepairs = maxRepairs, mode = mode, abort = abort,
     onPartial = onPartial, onEvent = onEvent,
     providerOptions = providerOptions, truncation = truncation, trace = trace)
@@ -1593,7 +1606,7 @@ proc generateObjectAsync*[T](
   description = "",
   maxTokens = 0,
   sessionId = "",
-  options: JsonNode = nil,
+  generationOptions = GenerationOptions(),
   maxRetries = 2,
   maxRepairs = 0,
   mode = omAuto,
@@ -1609,14 +1622,15 @@ proc generateObjectAsync*[T](
   return toObject[T](await generateObjectAsync(model, jsonSchema(T),
     prompt = prompt, messages = messages, system = system, name = nm,
     description = description, maxTokens = maxTokens, sessionId = sessionId,
-    options = options, maxRetries = maxRetries, maxRepairs = maxRepairs,
+    generationOptions = generationOptions, maxRetries = maxRetries,
+    maxRepairs = maxRepairs,
     mode = mode, abort = abort, providerOptions = providerOptions,
     truncation = truncation, trace = trace))
 
 proc generateObject*[T](model: LanguageModel, prompt = "",
                         messages: seq[Message] = @[], system = "", name = "",
                         description = "", maxTokens = 0, sessionId = "",
-                        options: JsonNode = nil, maxRetries = 2,
+                        generationOptions = GenerationOptions(), maxRetries = 2,
                         maxRepairs = 0, mode = omAuto,
                         abort: AbortCheck = nil,
                         providerOptions = ProviderOptions(),
@@ -1624,7 +1638,8 @@ proc generateObject*[T](model: LanguageModel, prompt = "",
                         trace: TraceSink = nil): ObjectResult[T] =
   waitFor generateObjectAsync[T](model, prompt = prompt, messages = messages,
     system = system, name = name, description = description,
-    maxTokens = maxTokens, sessionId = sessionId, options = options,
+    maxTokens = maxTokens, sessionId = sessionId,
+    generationOptions = generationOptions,
     maxRetries = maxRetries, maxRepairs = maxRepairs, mode = mode,
     abort = abort, providerOptions = providerOptions, truncation = truncation,
     trace = trace)
@@ -1638,7 +1653,7 @@ proc streamObjectAsync*[T](
   description = "",
   maxTokens = 0,
   sessionId = "",
-  options: JsonNode = nil,
+  generationOptions = GenerationOptions(),
   wakeFd: cint = -1,
   maxRetries = 2,
   maxRepairs = 0,
@@ -1656,7 +1671,7 @@ proc streamObjectAsync*[T](
   return toObject[T](await streamObjectAsync(model, jsonSchema(T),
     prompt = prompt, messages = messages, system = system, name = nm,
     description = description, maxTokens = maxTokens, sessionId = sessionId,
-    options = options, wakeFd = wakeFd, maxRetries = maxRetries,
+    generationOptions = generationOptions, wakeFd = wakeFd, maxRetries = maxRetries,
     maxRepairs = maxRepairs, mode = mode, abort = abort,
     onPartial = onPartial, onEvent = onEvent,
     providerOptions = providerOptions, truncation = truncation, trace = trace))
@@ -1664,7 +1679,7 @@ proc streamObjectAsync*[T](
 proc streamObject*[T](model: LanguageModel, prompt = "",
                       messages: seq[Message] = @[], system = "", name = "",
                       description = "", maxTokens = 0, sessionId = "",
-                      options: JsonNode = nil, wakeFd: cint = -1,
+                      generationOptions = GenerationOptions(), wakeFd: cint = -1,
                       maxRetries = 2, maxRepairs = 0, mode = omAuto,
                       abort: AbortCheck = nil,
                       onPartial: PartialObjectCallback = nil,
@@ -1674,7 +1689,8 @@ proc streamObject*[T](model: LanguageModel, prompt = "",
                       trace: TraceSink = nil): ObjectResult[T] =
   waitFor streamObjectAsync[T](model, prompt = prompt, messages = messages,
     system = system, name = name, description = description,
-    maxTokens = maxTokens, sessionId = sessionId, options = options,
+    maxTokens = maxTokens, sessionId = sessionId,
+    generationOptions = generationOptions,
     wakeFd = wakeFd, maxRetries = maxRetries, maxRepairs = maxRepairs,
     mode = mode, abort = abort, onPartial = onPartial, onEvent = onEvent,
     providerOptions = providerOptions, truncation = truncation, trace = trace)

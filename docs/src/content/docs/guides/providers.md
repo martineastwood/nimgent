@@ -1,163 +1,258 @@
 ---
 title: Providers
-description: One API surface for every provider — and where provider specifics live.
+description: Connect nimgent to a model provider, switch models, and configure provider-specific features.
 ---
 
-nimgent talks to several LLM providers through one shape. You import an
-adapter, create the provider with your API key, and bind a model. From there,
-every function in the library — generation, streaming, tools, structured
-output — works identically no matter which adapter is underneath.
+Use nimgent with OpenAI, Anthropic, Google Gemini, OpenRouter, Hyper, Mistral, OpenCode and more. 
+You create a provider with an API key, bind a model, and pass that model to nimgent's generation APIs.
 
-That's the point of the design: **the adapter is a translation layer**. It owns
-authentication, request encoding, streaming, and response normalization, so
-your application code deals with models, not HTTP payloads. Switching
-providers is a two-line change, and the rest of your code doesn't notice.
+Once you have a model, the rest of your code can use `generateText`,
+`streamText`, tools, and structured output without changing its call shape.
 
-## Supported adapters
+## Make your first request
 
-```nim
-import nimgent/providers/[anthropic, google, hyper, mistral, openai, openrouter]
+Install nimgent with Nimble and set the API key for the provider you want to
+use. This example uses OpenAI:
+
+```sh
+nimble install nimgent
+export OPENAI_API_KEY=...
 ```
 
-| Adapter | Constructor | API surface |
-| --- | --- | --- |
-| OpenAI | `openAI(apiKey)` | Responses API and Chat Completions compatibility |
-| Anthropic | `anthropic(apiKey)` | Native Messages API and streaming |
-| Google | `google(apiKey)` | Gemini API (Google AI Studio): native generation, hosted tools, and embeddings |
-| OpenRouter | `openRouter(apiKey)` | OpenAI-compatible routing and models |
-| Hyper | `hyper(apiKey)` | OpenAI-compatible Chat Completions endpoint |
-| Mistral | `mistral(apiKey)` | OpenAI-compatible Chat Completions, tools, and streaming |
-| OpenCode | `openCode(apiKey, protocol)` | OpenCode Go subscription: explicit Chat Completions, Responses, Anthropic Messages, or native Gemini |
-| OpenCode Zen | `openCodeZen(apiKey, protocol)` | OpenCode Zen's full catalog, same protocols on `/zen/v1` |
+Create `hello.nim`:
 
 ```nim
+import std/os
+import nimgent
+import nimgent/providers/openai
+
 let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
-let response = generateText(model, prompt = "Explain this function.")
+let response = generateText(model, prompt = "Say hello in one sentence.")
 
-let goModel = openCode(getEnv("OPENCODE_API_KEY"), protocol = ocMessages)
-let goResponse = generateText(goModel.model("qwen3.8-flash"), prompt = "Hello")
-
-let zenModel = openCodeZen(getEnv("OPENCODE_API_KEY"), protocol = ocResponses)
-let zenResponse = generateText(zenModel.model("gpt-5.6-luna"), prompt = "Hello")
-
-# Gemini models live on the same gateway root under Google's own paths.
-let zenGemini = openCodeZen(getEnv("OPENCODE_API_KEY"), protocol = ocGoogle)
-let gemini = generateText(zenGemini.model("gemini-3.8-flash"), prompt = "Hello")
+echo response.text
 ```
 
-A `LanguageModel` is just a provider plus a model id — it's a value, so you can
-store it, pass it around, and create several for the same provider.
+Run it with:
 
-## Two layers of settings
+```sh
+nim c -r hello.nim
+```
 
-Provider-specific settings come in two forms, and knowing which to reach for
-solves most configuration questions:
+`openAI(...)` selects the provider, and `.model(...)` selects a model offered by
+that provider. The model id is provider-specific; nimgent checks that the id is
+not empty, while the provider checks whether the model is available when you
+make the request.
 
-- **Typed options** (`providerOptions`) — settings nimgent models with Nim
-  types. Compile-time checked, discoverable in your editor.
-- **Raw options** (`options`) — a `JsonNode` escape hatch using the provider's
-  native field names. Anything nimgent doesn't model yet goes here.
+## Choose a provider
 
-Both end up in the same request; if a field is set in both, raw `options` are
-applied first and typed options win.
-
-### Typed options
-
-Each adapter has a namespace on `ProviderOptions`:
+Change the provider and model id. The generation call stays the same:
 
 ```nim
-import std/options
+import std/os
+import nimgent
+import nimgent/providers/anthropic
+
+let model = anthropic(getEnv("ANTHROPIC_API_KEY")).model("claude-sonnet-4-6")
+let response = generateText(model, prompt = "Explain Nim in one sentence.")
+
+echo response.text
+```
+
+Here are the available providers and constructors:
+
+| Provider | Import | Constructor | Use it for |
+| --- | --- | --- | --- |
+| OpenAI | `nimgent/providers/openai` | `openAI(apiKey)` | OpenAI models and Responses API features |
+| Anthropic | `nimgent/providers/anthropic` | `anthropic(apiKey)` | Claude models and Anthropic features |
+| Google Gemini | `nimgent/providers/google` | `google(apiKey)` | Gemini through Google AI Studio |
+| OpenRouter | `nimgent/providers/openrouter` | `openRouter(apiKey)` | Multiple model providers through one key |
+| Hyper | `nimgent/providers/hyper` | `hyper(apiKey)` | Hyper's OpenAI-compatible API |
+| Mistral | `nimgent/providers/mistral` | `mistral(apiKey)` | Mistral's Chat Completions API |
+| OpenCode | `nimgent/providers/openai` | `openCode(apiKey, protocol = ocChat)` | OpenCode Go's model catalog |
+| OpenCode Zen | `nimgent/providers/openai` | `openCodeZen(apiKey, protocol = ocChat)` | OpenCode Zen's model catalog |
+
+You can keep several models ready and choose between them at runtime:
+
+```nim
+import std/os
+import nimgent
+import nimgent/providers/[openai, openrouter]
+
+let fast = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
+let fallback = openRouter(getEnv("OPENROUTER_API_KEY")).model(
+  "deepseek/deepseek-v4-flash-0731")
+
+let useFallback = false
+let model = if useFallback: fallback else: fast
+echo generateText(model, prompt = "Summarize this file.").text
+```
+
+### OpenCode protocols
+
+OpenCode exposes its catalog through several request formats. Choose the
+protocol that matches the model or gateway you are using:
+
+- `ocChat` - Chat Completions; the default
+- `ocResponses` - OpenAI Responses
+- `ocMessages` - Anthropic Messages
+- `ocGoogle` - native Google Gemini paths
+
+For example:
+
+```nim
+import std/os
+import nimgent
+import nimgent/providers/openai
+
+let chatModel = openCode(getEnv("OPENCODE_API_KEY"), protocol = ocChat).model(
+  "model-id")
+let responsesModel = openCodeZen(getEnv("OPENCODE_API_KEY"),
+  protocol = ocResponses).model("model-id")
+```
+
+Replace `model-id` with the id from the OpenCode catalog. Use `ocGoogle` when
+the gateway serves a Gemini model on its native Google API paths.
+
+## Set common generation options
+
+Use `GenerationOptions` for controls you want to keep when switching providers:
+
+```nim
+import std/[options, os]
+import nimgent
+import nimgent/providers/openai
+
+let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
+let response = generateText(
+  model,
+  prompt = "Explain Nim in one paragraph.",
+  maxTokens = 200,
+  generationOptions = GenerationOptions(
+    temperature: some(0.3),
+    topP: some(0.9)))
+
+echo response.text
+```
+
+`GenerationOptions` includes `temperature`, `topP`, `topK`, presence and
+frequency penalties, `stopSequences`, `seed`, and portable `reasoning`.
+`maxTokens`, messages, tools, streaming, and structured output are also
+provider-neutral nimgent arguments.
+
+Providers map these settings to their own APIs where supported. A provider may
+reject a setting that its model does not support, so check that provider's
+model documentation when you use less common controls.
+
+## Add provider-specific settings
+
+Use `providerOptions` for behavior that exists only on one provider. Typed
+namespaces give you completion and validation for supported extensions:
+
+```nim
+import std/[options, os]
 import nimgent
 import nimgent/providers/openai
 
 let response = generateText(
   openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini"),
   prompt = "Explain this code.",
+  generationOptions = GenerationOptions(reasoning: some("high")),
   providerOptions = ProviderOptions(
-    openai: OpenAIOptions(
-      reasoningEffort: some("high"),
-      store: some(false))))
+    openai: OpenAIOptions(store: some(false))))
+
+echo response.text
 ```
 
-Only the namespace matching the provider is applied — an `OpenAIOptions` on a
-Google model is ignored. Every field is an `Option[T]` with a deliberate rule:
+The available typed namespaces are:
 
-- **Unset (`none`)** fields are omitted from the request entirely.
-- **Set fields are sent exactly**, including explicit `false`, `0`, and empty
-  sequences. Setting them matters; nimgent won't second-guess you.
-
-Typed options also validate combinations before the request: Anthropic's
-`budgetTokens`, for example, requires `thinking = some(EnabledThinking)` and a
-budget of at least 1024 — you get that error locally, not as a 400 from the
-API.
-
-The namespaces mirror each adapter's real capabilities:
-
-| Namespace | Modeled settings |
+| Namespace | Examples |
 | --- | --- |
-| `OpenAIOptions` | `reasoningEffort`, `parallelToolCalls`, `store`, `user`, `dimensions` (embeddings) |
-| `AnthropicOptions` | `thinking`, `budgetTokens`, `effort` |
-| `GoogleOptions` | `reasoningEffort` |
-| `OpenRouterOptions` | `routing` (model `order`, `only`, `ignore`) |
+| `OpenAIOptions` | `parallelToolCalls`, `store`, `user`, embedding `dimensions` |
+| `AnthropicOptions` | `thinking`, `budgetTokens` |
+| `OpenRouterOptions` | routing order, provider allow/deny lists, and fallback behavior |
+| `HyperOptions` | `user`, `parallelToolCalls`, streamed `includeUsage` |
 
-### Raw options
+Only the namespace for the selected provider is used. An `OpenAIOptions` value
+does not configure a Google or Anthropic model.
 
-For anything not modeled — a brand-new API field, a niche flag, a Hyper-only
-setting — pass JSON with the provider's native field names:
+Every typed field is optional. Leave it unset to omit it; use `some(false)`,
+`some(0)`, or `some(@[])` when you need to send an explicit value. For example,
+OpenRouter routing can be configured like this:
 
 ```nim
-let response = generateText(
-  model,
-  prompt = "Be concise.",
-  options = %*{"temperature": 0.2})
+import std/[options, os]
+import nimgent
+import nimgent/providers/openrouter
+
+let settings = ProviderOptions(
+  openrouter: OpenRouterOptions(
+    routing: some(OpenRouterRouting(
+      sort: some("latency"),
+      allowFallbacks: some(false)))))
+
+let model = openRouter(getEnv("OPENROUTER_API_KEY")).model(
+  "deepseek/deepseek-v4-flash-0731")
+let response = generateText(model, prompt = "Hello", providerOptions = settings)
 ```
 
-Options must be a JSON object. Your JSON is copied before the adapter touches
-it, so provider encoding never mutates application-owned values. Raw options
-are also the only route for the `hyper` namespace, which has no typed form —
-or set `ProviderOptions(extra = %*{"hyper": {...}})` to keep it beside the
-other typed namespaces.
+Anthropic thinking budgets have one validation rule worth knowing: a
+`budgetTokens` value requires `thinking: some(EnabledThinking)` and must be at
+least `1024`.
 
-## Capabilities
-
-Applications that pick providers at runtime — a settings screen, a fallback
-chain — can ask what a model's provider supports instead of hard-coding it:
+For a provider field that nimgent does not model yet, use `ProviderOptions.extra`
+with the provider name as the namespace:
 
 ```nim
-if model.provider.supports(pcStructuredOutput):
-  # safe to use generateObject with omNative
-  discard
+import std/json
+import nimgent
+
+let settings = ProviderOptions(
+  extra: %*{"google": {"generationConfig": {"responseMimeType": "text/plain"}}})
+```
+
+Portable `generationOptions` take precedence when they target the same setting.
+
+## Check provider capabilities
+
+Providers do not all offer the same optional features. If your application lets
+users choose a provider at runtime, check the model before enabling one:
+
+```nim
+if model.provider.supports(pcStreaming):
+  echo "This model can use streamText."
 
 if model.provider.supports(pcHostedTools):
-  tools.add hostedTool("web_search")
+  echo "This model can use provider-hosted tools."
 ```
 
-| Capability | Meaning |
+The capability names correspond to these nimgent features:
+
+| Capability | Feature |
 | --- | --- |
-| `pcStreaming` | Token streaming via `streamText` |
-| `pcTools` | Local tool definitions |
-| `pcStructuredOutput` | Native structured output (`generateObject`) |
-| `pcImages` / `pcFiles` | Image or file inputs |
-| `pcHostedTools` | Provider-executed tools like `web_search` |
-| `pcEmbeddings` | `embed` / `embedMany` |
+| `pcStreaming` | `streamText` |
+| `pcTools` | Local tools |
+| `pcStructuredOutput` | Native `generateObject` |
+| `pcImages` / `pcFiles` | Image or file input |
+| `pcHostedTools` | Tools such as provider-hosted web search |
+| `pcEmbeddings` | `embed` and `embedMany` |
 
-## Which adapter should I pick?
+## Troubleshooting
 
-All of them speak the same protocol, so the honest answer is: the one matching
-the key you have. Practical guidance:
+- **Authentication fails:** make sure the environment variable matches the
+  constructor you selected and that the key is available to the process.
+- **The model is not found:** model ids belong to the provider. Copy the id
+  exactly from that provider's catalog.
+- **An option has no effect:** common controls belong in `GenerationOptions`;
+  provider extensions belong in the matching `ProviderOptions` namespace.
+- **Google authentication or endpoints do not work:** `google(...)` targets
+  the Gemini API from Google AI Studio. Vertex AI uses different credentials
+  and endpoints and is not supported by this constructor.
+- **OpenCode requests fail:** confirm that the protocol (`ocChat`,
+  `ocResponses`, `ocMessages`, or `ocGoogle`) matches the model's gateway.
 
-- **OpenAI** and **Anthropic** when you want first-class support for that
-  vendor's newest features (native structured output, thinking, hosted tools).
-- **Google** for the Gemini API (Google AI Studio), including hosted tools and
-  embeddings. This is the key-based `generativelanguage` service; Vertex AI is a
-  different endpoint and authentication model and is not this adapter.
-- **OpenRouter** to reach many models — including non-OpenAI ones — through
-  one key, with routing controls.
-- **Hyper** for an OpenAI-compatible self-hosted or alternative endpoint.
-- **OpenCode** for the OpenCode Go subscription, **OpenCode Zen** for the
-  pay-per-use catalog. Both gateways serve each model on one wire format;
-  choose `ocChat`, `ocResponses`, `ocMessages`, or `ocGoogle` explicitly when
-  constructing the provider.
+## Next steps
 
-Since the surface is shared, testing against OpenRouter and shipping on OpenAI
-(and vice versa) is a supported pattern, not a migration.
+- [Streaming](/guides/streaming/) - show text as it arrives.
+- [Tools and agents](/guides/tools-and-agents/) - let models call Nim code.
+- [Structured output](/guides/structured-output/) - receive validated Nim values.
+- [Embeddings and retrieval](/guides/embeddings-and-retrieval/) - create and search embeddings.

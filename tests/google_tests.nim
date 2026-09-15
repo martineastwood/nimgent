@@ -26,7 +26,8 @@ suite "native Gemini":
   test "native batch embeddings preserve order and options":
     fixture("embed", proc (p: GoogleProvider) =
       let response = embedMany(p.embeddingModel("fixture"), @["one", "two"],
-        options = %*{"taskType": "RETRIEVAL_DOCUMENT"}, maxRetries = 0)
+        providerOptions = ProviderOptions(extra: %*{
+          "google": {"taskType": "RETRIEVAL_DOCUMENT"}}), maxRetries = 0)
       check response.embeddings == @[@[1.0, 0.0], @[0.0, 1.0]])
 
   test "native generation options are not mutated and URL sources retain retrieval metadata":

@@ -3,10 +3,12 @@ title: Quickstart
 description: Make your first request, then your first agent — the short path.
 ---
 
-nimgent is a Nim client for talking to large language models. You pick a
+`nimgent` is a Nim client for talking to large language models. You pick a
 provider, bind a model, and call functions that send prompts and receive
-responses. This page walks through your first request, then builds it into a
-small agent — the two ideas everything else in nimgent builds on.
+responses. 
+
+This page walks through your first request, then builds it into a
+small agent, the two ideas everything else in nimgent builds on.
 
 ## Install
 
@@ -16,15 +18,8 @@ Install the package with Nimble:
 nimble install nimgent
 ```
 
-For a sibling checkout during development, add the source directory to
-`nim.cfg`:
-
-```text
---path:"..src"
-```
-
 You will also need an API key from a provider. This page uses OpenRouter, but
-any of them works — the code is identical apart from the import and the
+any of the supported providers will work, the code is identical apart from the import and the
 constructor.
 
 ## Your first request
@@ -51,7 +46,7 @@ OPENROUTER_API_KEY=... nim c -r hello.nim
 
 What just happened, piece by piece:
 
-- `openRouter(apiKey)` creates a **provider** — the adapter that knows how to
+- `openRouter(apiKey)` creates a **provider** - the adapter that knows how to
   talk to one API.
 - `.model("...")` binds a specific model on that provider into a
   `LanguageModel` you can pass around.
@@ -70,14 +65,14 @@ echo response.usage.totalTokens   # what the call cost
 echo response.finishReason        # why the model stopped (frStop = normal)
 ```
 
-`system` sets the model's standing instructions — role, tone, rules — while the
-prompt is the actual question of this turn. Keep system text short and let it
+`system` sets the model's standing instructions (e.g. role, tone, rules) while the
+prompt is the actual question of this turn. Keep system text concise and let it
 apply across many requests.
 
 ## Async, the same thing
 
 The blocking `generateText` is a convenience wrapper. The async primitive is
-the same call with `Async` appended and an `await` added — use it in servers or
+the same call with `Async` appended and an `await` added - use it in servers or
 anywhere with an event loop:
 
 ```nim
@@ -100,7 +95,7 @@ sticks to the blocking form to keep examples short.
 
 ## Pick a provider
 
-The provider is confined to two lines — the import and the constructor. Change
+The provider is confined to two lines - the import and the constructor. Change
 those, keep everything else:
 
 ```nim
@@ -112,14 +107,14 @@ let geminiModel = google(getEnv("GEMINI_API_KEY")).model("gemini-3.5-flash-lite"
 ```
 
 All adapters expose the same `LanguageModel`, and responses are normalized to
-one shape, so switching providers is not a rewrite. Provider-specific settings
-belong in `providerOptions` or the raw `options` escape hatch — see
-[Providers](/guides/providers/) for the typed form.
+one shape, so switching providers is not a rewrite. Portable generation
+settings belong in `generationOptions`; provider-specific settings belong in
+`providerOptions`. See [Providers](/guides/providers/) for details.
 
 ## Your first agent
 
 A single request is one exchange: prompt in, answer out. Many real tasks need
-more — look something up, then reason about it, then answer. nimgent lets the
+more, e.g. look something up, then reason about it, then answer. nimgent lets the
 model request **tools**: ordinary Nim functions the model can call by name,
 with arguments it invents. The loop of *model asks → your code runs → model
 continues* is an agent.
@@ -152,8 +147,7 @@ echo response.text
 ```
 
 The model calls `get_weather` with `{"city": "Paris"}`, your function runs, and
-the model folds the result into its answer. `maxSteps` counts model turns, not
-tool calls — it is the safety cap that stops a tool loop from running forever.
+the model folds the result into its answer.
 
 When the exchange grows beyond one prompt, package the model, instructions, and
 tools into a reusable `Agent` instead:
@@ -173,14 +167,14 @@ echo "model turns: ", answer.steps.len
 ```
 
 The agent is configuration, not state: create it once and run it many times.
-Add a `Session` when runs should remember each other — see
+Add a `Session` when runs should remember each other. See
 [Sessions](/guides/sessions/).
 
 ## Where to next
 
-- [Tools and agents](/guides/tools-and-agents/) — richer tools, errors the
+- [Tools and agents](/guides/tools-and-agents/): richer tools, errors the
   model can handle, approval gates, and the event stream for UIs.
-- [Structured output](/guides/structured-output/) — get typed, validated Nim
+- [Structured output](/guides/structured-output/): get typed, validated Nim
   values back instead of prose.
-- [Streaming](/guides/streaming/) — render tokens as they arrive.
-- [Core API](/reference/core-api/) — the types and entry points, on one page.
+- [Streaming](/guides/streaming/): render tokens as they arrive.
+- [Core API](/reference/core-api/): the types and entry points, on one page.

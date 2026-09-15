@@ -2,8 +2,9 @@
 ##
 ## Provider adapters translate between this representation and their own wire
 ## format. The representation is deliberately close to a superset of what the
-## supported APIs need, so provider-specific features stay reachable through
-## `ProviderRequest.options`.
+## supported APIs need. Low-level callers can reach provider-specific wire
+## fields through `ProviderRequest.options`; the high-level generation API
+## resolves `GenerationOptions` and `ProviderOptions`.
 
 import std/[asyncdispatch, base64, json, os, strutils]
 
@@ -142,7 +143,8 @@ type
     ## Provider-neutral tool selection. The default is automatic selection.
     toolChoice*: ToolChoice
     maxTokens*: int
-    ## Escape hatch for provider-specific knobs (thinking, routing, TTL, ...).
+    ## Raw wire escape hatch for low-level provider integrations. High-level
+    ## calls use GenerationOptions and ProviderOptions instead.
     options*: JsonNode
     ## When >= 0, emit seWake when this fd becomes readable during streaming.
     ## Default -1 means no side-channel wake (stdin is 0 when used).

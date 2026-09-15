@@ -88,9 +88,17 @@ Anthropic supports native streaming with tool arguments, thinking signatures,
 citations, cache usage, and cancellation. Run `nim c -r examples/anthropic_smoke.nim`
 with `ANTHROPIC_API_KEY` exported to check live streaming and structured output.
 
-Provider-specific knobs (thinking, routing, cache TTL) go in
-`ProviderRequest.options` / the `options` argument on `generateText` /
-`streamText`. Options must be a JSON object.
+Portable generation controls go in `GenerationOptions`; provider-specific
+extensions go in `providerOptions`. The high-level generation APIs do not take
+a second raw JSON options argument.
+
+```nim
+import std/options
+
+let answer = generateText(model, prompt = "Explain this code",
+  generationOptions = GenerationOptions(
+    temperature: some(0.3), topP: some(0.9)))
+```
 
 ### Typed provider options
 
@@ -103,12 +111,13 @@ import nimgent
 import nimgent/providers/openai
 
 let answer = generateText(openAI(apiKey).model(modelId), prompt = "Explain this code",
+  generationOptions = GenerationOptions(reasoning: some("high")),
   providerOptions = ProviderOptions(
-    openai: OpenAIOptions(reasoningEffort: some("high"), store: some(false)),
+    openai: OpenAIOptions(store: some(false)),
     anthropic: AnthropicOptions(thinking: some(AdaptiveThinking)),
     openrouter: OpenRouterOptions(routing: some(OpenRouterRouting(
       order: some(@["Anthropic"]), allowFallbacks: some(false)))),
-    google: GoogleOptions(reasoningEffort: some("high")))))
+    extra: %*{"google": {"some_google_extension": true}}))
 ```
 
 Only the selected provider's namespace is used. OpenRouter, Hyper, and OpenCode
@@ -116,34 +125,47 @@ do not consume OpenAI settings despite sharing its transport implementation.
 `Option[T]` fields omit unset values; `some(false)`, `some(0)`, and empty
 sequences remain explicit. Model-specific supported values are checked by the API.
 
-The initial types cover OpenAI reasoning effort, parallel tool calls, storage,
-user identifiers and embedding dimensions; Anthropic thinking mode, budget and
-effort; OpenRouter routing; and Google Gemini reasoning effort. Mistral-specific
-fields can be passed through `ProviderOptions.extra`.
+`GenerationOptions` covers portable sampling, stopping, seeding, and reasoning
+controls. Provider types cover extensions such as OpenAI storage and parallel
+tool calls, Anthropic thinking, OpenRouter routing, Hyper request identity and
+stream usage, and embedding dimensions. Native fields that nimgent does not
+model yet can be passed through `ProviderOptions.extra`.
+
+Hyper's documented Chat Completions settings are standard OpenAI-compatible
+fields, so use `GenerationOptions` for them. Its remaining controls are typed:
+
+```nim
+let hyperSettings = ProviderOptions(hyper: HyperOptions(
+  user: some("agent-123"), includeUsage: some(true)))
+```
+
 `dimensions` is for embedding calls only.
 For manual Anthropic thinking, use `thinking: some(EnabledThinking)` with
 `budgetTokens: some(2048)` (at least 1024); adaptive/disabled thinking omit budgets.
 
-Each provider object has an `extra: JsonNode` escape hatch using native API field
-names. `ProviderOptions.extra` accepts additional namespaces, for example
-`%*{"hyper": {"temperature": 0.5}}`. Merge order is request `options`, namespaced
-`extra`, the provider object's `extra`, then its typed fields. Merges are shallow:
-a later nested object replaces the earlier object. Typed OpenAI reasoning effort
-also overrides an effort supplied through the native Responses `reasoning` object.
+`ProviderOptions.extra` accepts additional namespaces using native API field
+names. For example, `%*{"google": {"generationConfig": {"responseMimeType":
+"text/plain"}}}` keeps an unmodeled Google field next to the typed namespaces.
+Merge order is namespaced `extra` then the selected typed namespace. Merges are
+shallow: a later nested object replaces the earlier object.
+Portable `GenerationOptions` are applied after provider options, so common
+settings win collisions with provider-native values.
 Structured-output schema and forced-tool settings are applied after these options.
 Caller JSON is copied before adapter processing.
 
 Ready-made requests can use `generateText(provider, request, providerOptions = ...)`
 and `streamText(provider, request, callback, providerOptions = ...)`. Direct adapter
-calls continue to use raw `ProviderRequest.options`; `resolveOptions(raw, scoped,
-provider.name)` is available when building those requests yourself.
+calls may use raw `ProviderRequest.options`; this is the low-level integration
+escape hatch, not a second high-level generation API.
 Message/content-block options and explicit cache controls are deferred.
 
 For Claude, `anthropicThinkingOptions(modelId, "high")` selects adaptive thinking
 on known modern models and explicit budgets on older models. Supported efforts
 follow [Anthropic's model-specific effort levels](https://platform.claude.com/docs/en/build-with-claude/effort).
-Pass the result as `options`; manual budgets are added once to `maxTokens`,
-while adaptive thinking shares the requested output limit with the answer.
+Use `AnthropicOptions` for high-level calls; the helper returns native JSON for
+low-level `ProviderRequest.options` integrations. Manual budgets are added once
+to `maxTokens`, while adaptive thinking shares the requested output limit with
+the answer.
 Foreign JSON reasoning metadata and unsigned thinking are omitted on Anthropic
 replay; native signed thinking is preserved.
 
@@ -181,16 +203,19 @@ For deterministic application tests, `import nimgent/testing` and use
 OpenAI and OpenRouter expose text embedding models with AI-SDK-style `embed`
 and `embedMany` helpers. Both have async variants, retry transient failures,
 and return input-token usage. Provider-specific settings such as reduced
-dimensions go in `options`.
+dimensions go in `providerOptions`.
 
 ```nim
+import std/options
+
 let embeddingModel = openAI(getEnv("OPENAI_API_KEY")).embeddingModel(
   "text-embedding-3-small")
 
 let result = embedMany(
   embeddingModel,
   @["sunny day at the beach", "rainy afternoon in the city"],
-  options = %*{"dimensions": 512})
+  providerOptions = ProviderOptions(openai: OpenAIOptions(
+    dimensions: some(512))))
 
 echo result.usage.tokens
 echo cosineSimilarity(result.embeddings[0], result.embeddings[1])
@@ -425,8 +450,8 @@ are rejected.
 JSON, images and files. Its endpoint override is an API root (default
 `https://generativelanguage.googleapis.com/v1beta`).
 
-Native options go in `GoogleOptions.extra` using Gemini field names such as
-`generationConfig`. The typed `reasoningEffort` maps to native thinking settings.
+Native Google fields go in `ProviderOptions.extra` using Gemini field names such
+as `generationConfig`; portable reasoning uses `GenerationOptions.reasoning`.
 Model support and quotas determine which tool combinations can run.
 
 Web sources are returned as `ckSource`. Complete `groundingMetadata`, including

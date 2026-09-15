@@ -12,6 +12,7 @@ description: The small set of types and entry points used by most applications.
 | `EmbeddingModel` | An embedding model bound to a provider |
 | `ProviderRequest` | Provider-neutral request for direct adapter use |
 | `ProviderResponse` | Normalized model response, usage, and steps |
+| `GenerationOptions` | Portable sampling, stopping, seeding, and reasoning settings |
 
 Create models through a provider:
 
@@ -31,6 +32,8 @@ streamTextAsync(model, prompt = "Hello", onEvent = callback)
 
 The response exposes `text`, `content`, `usage`, `finishReason`, `requestId`,
 and `steps`. A multi-turn tool run aggregates usage in `totalUsage`.
+Pass portable generation controls through `generationOptions` and provider
+extensions through `providerOptions`; see [Providers](/guides/providers/).
 
 ## Tracing
 
@@ -47,6 +50,10 @@ let many = embedMany(embeddings, @["sunny day", "rainy day"])
 let similarity = cosineSimilarity(many.embeddings[0], many.embeddings[1])
 ```
 
+`nimgent/vector_store` adds an in-memory store — `upsert`, `search`, `delete`,
+`save`, and `loadInMemoryVectorStore` — for local retrieval. See
+[Embeddings and retrieval](/guides/embeddings-and-retrieval/).
+
 ## Cancellation and retries
 
 Pass `abort` to stop before the next provider attempt or tool call:
@@ -60,10 +67,42 @@ let response = await generateTextAsync(
 
 Transient HTTP and transport failures are retried by default. Configure the
 limit with `maxRetries`. Context overflow, ordinary client errors, and a
-started stream are not retried.
+started stream are not retried. See
+[Errors and retries](/guides/errors-and-retries/) for the `ProviderError`
+fields and backoff rules.
+
+## MCP clients
+
+```nim
+import nimgent/mcp
+
+let client = await connectMcpStdioAsync(@["./my-mcp-server"])
+let remoteTools = await client.asToolsAsync(prefix = "fs_")
+```
+
+See [MCP tools](/guides/mcp/).
+
+## Composing providers
+
+`wrapProvider(inner, mapRequest, mapResponse)` intercepts every request and
+response; `routeProvider(default, route)` sends each model to the provider that
+serves it. See [Middleware and routing](/guides/middleware-and-routing/).
+
+## Testing
+
+```nim
+import nimgent/testing
+
+let model = scriptedModel(@[textResponse("hello")])
+```
+
+`FakeProvider` records every request it received. See
+[Testing](/guides/testing/).
 
 ## Direct provider requests
 
 Use a ready-made `ProviderRequest` when the application owns the request
 shape. `generateText(provider, request)` and `streamText(provider, request,`
-`callback)` provide retrying wrappers without running a local tool loop.
+`callback)` provide retrying wrappers without running a local tool loop. Its
+`options` field is raw provider wire JSON for low-level integrations; normal
+generation calls use `generationOptions` and `providerOptions` instead.

@@ -14,6 +14,7 @@ type
     instructions*: string
     tools*: seq[Tool]
     maxTokens*: int
+    generationOptions*: GenerationOptions
     maxRetries*: int
     ## Maximum number of model turns. The agent defaults to a small bounded
     ## loop so an accidental tool cycle cannot run forever.
@@ -23,7 +24,8 @@ type
     approvalPolicy*: ToolApprovalPolicy
 
 proc newAgent*(model: LanguageModel, instructions = "",
-               tools: seq[Tool] = @[], maxTokens = 0, maxRetries = 2,
+               tools: seq[Tool] = @[], maxTokens = 0,
+               generationOptions = GenerationOptions(), maxRetries = 2,
                maxSteps = 8,
                providerOptions = ProviderOptions(),
                toolChoice = toolChoiceAuto(),
@@ -39,7 +41,8 @@ proc newAgent*(model: LanguageModel, instructions = "",
   if maxSteps < 1:
     raiseProviderError("agent maxSteps must be at least 1")
   Agent(model: model, instructions: instructions, tools: tools,
-    maxTokens: maxTokens, maxRetries: maxRetries, maxSteps: maxSteps,
+    maxTokens: maxTokens, generationOptions: generationOptions,
+    maxRetries: maxRetries, maxSteps: maxSteps,
     toolChoice: toolChoice, providerOptions: providerOptions,
     approvalPolicy: approvalPolicy)
 
@@ -54,6 +57,7 @@ proc runAsync*(agent: Agent, prompt = "", messages: seq[Message] = @[],
   return await generateAgentTextAsync(agent.model, prompt = prompt,
     messages = messages, system = agent.instructions, tools = agent.tools,
     maxTokens = agent.maxTokens, maxRetries = agent.maxRetries,
+    generationOptions = agent.generationOptions,
     maxSteps = agent.maxSteps, abort = abort, callbacks = callbacks,
     providerOptions = agent.providerOptions, sessionId = sessionId,
     metadata = metadata, turnId = turnId, toolChoice = agent.toolChoice,
@@ -80,6 +84,7 @@ proc streamAsync*(agent: Agent, prompt: string, onEvent: StreamCallback,
   return await streamAgentTextAsync(agent.model, prompt = prompt,
     messages = messages, system = agent.instructions, tools = agent.tools,
     maxTokens = agent.maxTokens, maxRetries = agent.maxRetries,
+    generationOptions = agent.generationOptions,
     maxSteps = agent.maxSteps, abort = abort, callbacks = callbacks,
     providerOptions = agent.providerOptions, sessionId = sessionId,
     metadata = metadata, turnId = turnId, toolChoice = agent.toolChoice,
@@ -117,6 +122,7 @@ proc runEventsAsync*(agent: Agent, prompt = "", messages: seq[Message] = @[],
   return await generateAgentTextAsync(agent.model, prompt = prompt,
     messages = messages, system = agent.instructions, tools = agent.tools,
     maxTokens = agent.maxTokens, maxRetries = agent.maxRetries,
+    generationOptions = agent.generationOptions,
     maxSteps = agent.maxSteps, abort = abort, callbacks = callbacks,
     providerOptions = agent.providerOptions, sessionId = sessionId,
     metadata = metadata, turnId = turnId, toolChoice = agent.toolChoice,
@@ -134,6 +140,7 @@ proc streamAsync*(agent: Agent, prompt: string, onEvent: AgentEventCallback,
   return await streamAgentTextAsync(agent.model, prompt = prompt,
     messages = messages, system = agent.instructions, tools = agent.tools,
     maxTokens = agent.maxTokens, maxRetries = agent.maxRetries,
+    generationOptions = agent.generationOptions,
     maxSteps = agent.maxSteps, abort = abort, callbacks = callbacks,
     providerOptions = agent.providerOptions, sessionId = sessionId,
     metadata = metadata, turnId = turnId, toolChoice = agent.toolChoice,

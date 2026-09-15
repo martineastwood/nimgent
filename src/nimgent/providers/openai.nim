@@ -402,18 +402,14 @@ method generateStreamAsync*(provider: OpenAIProvider,
 
 
 type OpenAIOptions* = object
-  ## Optional request settings. `extra` uses native API field names.
-  reasoningEffort*: Option[string]
+  ## Optional OpenAI-specific request settings.
   parallelToolCalls*: Option[bool]
   store*: Option[bool]
   user*: Option[string]
   dimensions*: Option[int] ## Embedding requests only.
-  extra*: JsonNode
 
 proc toProviderJson*(value: OpenAIOptions): JsonNode =
   result = newJObject()
-  mergeRequestOptions(result, value.extra)
-  if value.reasoningEffort.isSome: result["reasoning_effort"] = %value.reasoningEffort.get
   if value.parallelToolCalls.isSome: result["parallel_tool_calls"] = %value.parallelToolCalls.get
   if value.store.isSome: result["store"] = %value.store.get
   if value.user.isSome: result["user"] = %value.user.get

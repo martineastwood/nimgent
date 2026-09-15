@@ -20,8 +20,8 @@ import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
 <CardGrid stagger={true}>
 	<Card title="Provider-native" icon="rocket">
-		OpenAI Responses, Anthropic, Google Gemini, OpenRouter, Hyper, and OpenCode
-		adapters share one provider-neutral request model.
+		OpenAI Responses, Anthropic, Google Gemini, Mistral, OpenRouter, Hyper,
+		and OpenCode adapters share one provider-neutral request model.
 	</Card>
 	<Card title="Streaming first" icon="pencil">
 		Stream text, thinking, tool calls, structured objects, and normalized agent
@@ -43,5 +43,7 @@ import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 	<LinkCard title="Quickstart" description="Make your first request in a few lines." href="/guides/quickstart/" />
 	<LinkCard title="Tools and agents" description="Add typed tools and bounded model-to-tool loops." href="/guides/tools-and-agents/" />
 	<LinkCard title="Structured output" description="Turn model responses into validated Nim values." href="/guides/structured-output/" />
+	<LinkCard title="MCP tools" description="Borrow tools from an MCP server at runtime." href="/guides/mcp/" />
+	<LinkCard title="Embeddings and retrieval" description="Embed a corpus, search it, and ground your prompts." href="/guides/embeddings-and-retrieval/" />
 	<LinkCard title="Core API" description="Keep the main types and entry points close at hand." href="/reference/core-api/" />
 </CardGrid>

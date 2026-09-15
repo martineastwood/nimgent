@@ -211,7 +211,8 @@ suite "embeddings":
       check provider.supports(pcEmbeddings)
       let model = provider.embeddingModel("text-embedding-3-small")
       let batch = embedMany(model, @["alpha", "beta"],
-        options = %*{"dimensions": 2})
+        providerOptions = ProviderOptions(openai: OpenAIOptions(
+          dimensions: some(2))))
       check batch.values == @["alpha", "beta"]
       check batch.embeddings == @[@[1.0, 0.0], @[0.0, 1.0]]
       check batch.usage.tokens == 3
@@ -607,8 +608,20 @@ suite "generateText retries, abort, and tools":
     check assistantMessage("hi").role == roleAssistant
     check assistantMessage(@[text("hi")]).content[0].text == "hi"
     expect ProviderError:
-      discard generateText(ScriptProvider().model("m"), prompt = "hi",
-        options = %*[1, 2])
+      discard generateText(ScriptProvider(), ProviderRequest(
+        model: "m", messages: @[userMessage("hi")], options: %*[1, 2]))
+
+  test "common generation options use one portable surface":
+    let p = ScriptProvider(name: "hyper")
+    discard generateText(p.model("m"), prompt = "hi",
+      generationOptions = GenerationOptions(temperature: some(0.3),
+        topP: some(0.9), stopSequences: some(@["DONE"])),
+      providerOptions = ProviderOptions(extra: %*{
+        "hyper": {"future_flag": true}}))
+    check p.last.options["temperature"].getFloat == 0.3
+    check p.last.options["top_p"].getFloat == 0.9
+    check p.last.options["stop"].len == 1
+    check p.last.options["future_flag"].getBool
 
   test "bound models, typed tools, and async primitive":
     let p = ScriptProvider()
@@ -1928,11 +1941,12 @@ suite "generateObject":
     check p.calls == 0
 
   test "native Google options preserve generation config siblings":
-    let p = GoogleObjectScript(replies: @["""{"ok":true}"""])
+    let p = GoogleObjectScript(name: "google", replies: @["""{"ok":true}"""])
     discard generateObject(p.model("m"),
       %*{"type": "object", "properties": {"ok": {"type": "boolean"}},
         "required": ["ok"]},
-      prompt = "x", options = %*{"generationConfig": {"temperature": 0.2}},
+      prompt = "x", generationOptions = GenerationOptions(
+        temperature: some(0.2)),
       maxRetries = 0)
     check p.last.options["generationConfig"]["temperature"].getFloat == 0.2
     check p.last.options["generationConfig"]["responseMimeType"].getStr ==
@@ -2250,25 +2264,24 @@ suite "typed provider options":
 
   test "shallow precedence and caller JSON ownership":
     let requestOptions = %*{"store": true, "metadata": {"old": "value"}}
-    let extra = %*{"store": true, "metadata": {"new": "value"}}
-    let scoped = ProviderOptions(openai: OpenAIOptions(store: some(false), extra: extra),
-      extra: %*{"openai": {"user": "test"}, "hyper": {"temperature": 0}})
+    let extra = %*{"openai": {"store": true, "metadata": {"new": "value"},
+      "user": "test"}, "hyper": {"temperature": 0}}
+    let scoped = ProviderOptions(openai: OpenAIOptions(store: some(false)),
+      extra: extra)
     let resolved = resolveOptions(requestOptions, scoped, "openai")
     check resolved == %*{"store": false, "metadata": {"new": "value"}, "user": "test"}
     resolved["metadata"]["new"] = %"changed"
-    check extra["metadata"]["new"].getStr == "value"
+    check extra["openai"]["metadata"]["new"].getStr == "value"
     check requestOptions["store"].getBool
     check resolveOptions(nil, scoped, "hyper") == %*{"temperature": 0}
-    expect ProviderError:
-      discard resolveOptions(nil, ProviderOptions(openai: OpenAIOptions(extra: %*[1])), "openai")
     expect ProviderError:
       discard resolveOptions(nil, ProviderOptions(extra: %*[1]), "openai")
     expect ProviderError:
       discard resolveOptions(nil, ProviderOptions(extra: %*{"openai": 1}), "openai")
 
   test "reasoning serializes for both OpenAI APIs":
-    let opts = resolveOptions(nil, ProviderOptions(openai: OpenAIOptions(
-      reasoningEffort: some("high"), parallelToolCalls: some(false))), "openai")
+    let opts = resolveGenerationOptions(GenerationOptions(reasoning: some("high")),
+      ProviderOptions(openai: OpenAIOptions(parallelToolCalls: some(false))), "openai")
     let req = ProviderRequest(model: "test", messages: @[userMessage("hello")], options: opts)
     let responses = buildResponsesBody(req, false)
     check responses["reasoning"]["effort"].getStr == "high"
@@ -2276,6 +2289,14 @@ suite "typed provider options":
     check not responses["parallel_tool_calls"].getBool
     let chat = buildChatBody(req, false)
     check chat["reasoning_effort"].getStr == "high"
+
+  test "Hyper-specific options are typed":
+    let opts = resolveGenerationOptions(
+      GenerationOptions(temperature: some(0.2)),
+      ProviderOptions(hyper: HyperOptions(user: some("agent-123"),
+        parallelToolCalls: some(false), includeUsage: some(true))), "hyper")
+    check opts == %*{"user": "agent-123", "parallel_tool_calls": false,
+      "stream_options": {"include_usage": true}, "temperature": 0.2}
 
   test "Anthropic thinking validates and budgets once":
     let opts = resolveOptions(nil, ProviderOptions(anthropic: AnthropicOptions(
@@ -2313,10 +2334,10 @@ suite "typed provider options":
       check response.embeddings == @[@[1.0, 0.0], @[0.0, 1.0]]
       check embed(model, "single", providerOptions = ProviderOptions()).embedding == @[0.5, 0.5])
 
-  test "typed effort overrides native Responses effort without mutation":
+  test "portable effort overrides native Responses effort without mutation":
     let requestOptions = %*{"reasoning": {"effort": "low", "summary": "auto"}}
-    let opts = resolveOptions(requestOptions, ProviderOptions(openai: OpenAIOptions(
-      reasoningEffort: some("high"))), "openai")
+    let opts = resolveGenerationOptions(GenerationOptions(reasoning: some("high")),
+      ProviderOptions(extra: %*{"openai": requestOptions}), "openai")
     let body = buildResponsesBody(ProviderRequest(model: "test", options: opts), false)
     check body["reasoning"] == %*{"effort": "high", "summary": "auto"}
     check requestOptions["reasoning"]["effort"].getStr == "low"
@@ -2327,8 +2348,9 @@ suite "typed provider options":
     let p = ChatObjectScript(name: "openai", replies: @["{\"ok\":true}"])
     let model = p.model("test")
     let schema = jsonSchema(Answer)
-    let scoped = ProviderOptions(openai: OpenAIOptions(store: some(false),
-      extra: %*{"response_format": {"type": "text"}, "tool_choice": "none"}))
+    let scoped = ProviderOptions(openai: OpenAIOptions(store: some(false)),
+      extra: %*{"openai": {"response_format": {"type": "text"},
+        "tool_choice": "none"}})
     discard generateObject(model, schema, prompt = "x", providerOptions = scoped)
     check p.last.options["response_format"]["type"].getStr == "json_schema"
     discard generateObject[Answer](model, prompt = "x", providerOptions = scoped)

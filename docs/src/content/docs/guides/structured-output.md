@@ -52,9 +52,10 @@ type Recipe = object
 ```
 
 `notes` stays in the schema's `required` list but accepts `null`. That sounds
-backwards, but it's what OpenAI's strict structured-output mode demands: every
-declared property must be required, and optionality is expressed as "the value
-may be null". A field marked `jsonOptional` (see below) behaves the same way.
+backwards, but it's what strict native structured output demands: every declared
+property must be required, and optionality is expressed as "the value may be
+null". `jsonOptional` (see below) is the other flavour — a field the model may
+omit entirely.
 
 ## Constraining fields with pragmas
 
@@ -78,6 +79,12 @@ type Review = object
 | `jsonMinLength` / `jsonMaxLength` | `minLength` / `maxLength` |
 | `jsonMinItems` / `jsonMaxItems` | `minItems` / `maxItems` |
 | `jsonOptional` | removes the field from `required` |
+
+`jsonOptional` is the one pragma that costs you something: strict native mode
+requires every property to be required, so a schema using it is no longer
+native-compatible. `omAuto` falls back to JSON extracted from the model's text,
+and `omNative` raises with the offending field. Reach for `Option[T]` when you
+want optionality *and* native enforcement.
 
 The `description` pragma is worth using liberally — it's the cheapest way to
 steer the model toward the output you actually want.

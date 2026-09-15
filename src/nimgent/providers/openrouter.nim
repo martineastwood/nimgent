@@ -21,11 +21,9 @@ type
     sort*: Option[string]
   OpenRouterOptions* = object
     routing*: Option[OpenRouterRouting]
-    extra*: JsonNode ## Native API fields; typed fields take precedence.
 
 proc toProviderJson*(value: OpenRouterOptions): JsonNode =
   result = newJObject()
-  mergeRequestOptions(result, value.extra)
   if value.routing.isSome:
     let routing = value.routing.get
     var node = newJObject()

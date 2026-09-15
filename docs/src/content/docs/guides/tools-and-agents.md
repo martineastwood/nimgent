@@ -271,7 +271,10 @@ Two lower-level constructors cover the cases the typed helper does not:
 
 - **`rawTool`** builds a tool from a hand-written `JsonNode` schema — useful
   when the schema is loaded at runtime or generated dynamically. Schema
-  validation still runs before your `JsonNode`-based handler executes.
+  validation still runs before your `JsonNode`-based handler executes. It is
+  also the right constructor for a handler that takes a `JsonNode`: the typed
+  `tool` helper needs a concrete Nim type to derive a schema from, and
+  `JsonNode` has none.
 - **`hostedTool("web_search")`** declares a tool the *provider* executes
   server-side (Anthropic and Gemini's web search, for example). There is no
   local function at all; results arrive as normal content.
