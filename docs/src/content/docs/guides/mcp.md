@@ -189,6 +189,6 @@ pending request with that error. You do not get a hang.
   Windows nimgent still launches the process (`poUsePath`) but without that
   setup, so treat stdio MCP on Windows as untested.
 
-Related: [Tools and agents](/nimgent/guides/tools-and-agents/) for the loop these tools
-run inside, and [Error Handling](/nimgent/guides/error-handling/) for how a
+Related: [Tools and agents](/guides/tools-and-agents/) for the loop these tools
+run inside, and [Error Handling](/guides/error-handling/) for how a
 failing tool call reaches the model.

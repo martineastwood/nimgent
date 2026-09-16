@@ -90,4 +90,4 @@ Implement `embedAsync` when the provider offers embeddings. Without it, embeddin
 
 ## Next steps
 
-Use [Tools and agents](/nimgent/guides/tools-and-agents/) to support tool calls, and [Testing](/nimgent/guides/testing/) to test application behavior with deterministic model responses.
+Use [Tools and agents](/guides/tools-and-agents/) to support tool calls, and [Testing](/guides/testing/) to test application behavior with deterministic model responses.

@@ -106,4 +106,4 @@ Start with a small search limit, such as `2` or `3`. More matches give the model
 
 ## Next steps
 
-See the [Core API](/nimgent/reference/core-api/) for embedding options, or use [Structured output](/nimgent/guides/structured-output/) when the answer should match a typed schema.
+See the [Core API](/reference/core-api/) for embedding options, or use [Structured output](/guides/structured-output/) when the answer should match a typed schema.

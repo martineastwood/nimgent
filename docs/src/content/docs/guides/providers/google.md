@@ -38,4 +38,4 @@ For a Google-native setting without a typed option, use `ProviderOptions.extra` 
 
 ## Next steps
 
-See [Settings](/nimgent/guides/providers/settings/) for portable controls, or [Tools and agents](/nimgent/guides/tools-and-agents/) for provider-hosted tools such as web search.
+See [Settings](/guides/providers/settings/) for portable controls, or [Tools and agents](/guides/tools-and-agents/) for provider-hosted tools such as web search.

@@ -4,8 +4,7 @@ import starlight from '@astrojs/starlight';
 import starlightThemeNext from 'starlight-theme-next';
 
 export default defineConfig({
-	site: 'https://martineastwood.github.io',
-	base: '/nimgent',
+	site: 'https://nimgent.niminal.dev',
 	integrations: [
 		starlight({
 			title: 'nimgent',

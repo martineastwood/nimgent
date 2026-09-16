@@ -128,6 +128,6 @@ telemetry matters to you.
 
 ## Next steps
 
-See [Error Handling](/nimgent/guides/error-handling/) for retry behavior, or
-[Testing](/nimgent/guides/testing/) for deterministic model calls you can use to test
+See [Error Handling](/guides/error-handling/) for retry behavior, or
+[Testing](/guides/testing/) for deterministic model calls you can use to test
 your tracing code.

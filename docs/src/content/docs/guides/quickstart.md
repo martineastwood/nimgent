@@ -23,7 +23,7 @@ export OPENAI_API_KEY=...
 ```
 
 You can use another provider by changing the provider import, constructor, API
-key, and model ID. See [Providers](/nimgent/guides/providers/) for the setup
+key, and model ID. See [Providers](/guides/providers/) for the setup
 for each supported provider.
 
 ## 3. Build your first agent
@@ -68,10 +68,10 @@ async APIs when your application already runs Nim's event loop.
 
 ## Next steps
 
-- [Tools and agents](/nimgent/guides/tools-and-agents/): let the model call typed Nim functions.
-- [Streaming](/nimgent/guides/streaming/): render text, tool calls, and agent events as they arrive.
-- [Structured output](/nimgent/guides/structured-output/): decode model responses into validated Nim values.
-- [Embeddings & RAG](/nimgent/guides/embeddings-rag/): build RAG applications over your own documents.
-- [Conversations](/nimgent/guides/conversations/): keep conversation history across requests.
-- [Providers](/nimgent/guides/providers/): switch providers and configure provider-specific options.
-- [Examples](/nimgent/examples/): copy complete programs for common tasks.
+- [Tools and agents](/guides/tools-and-agents/): let the model call typed Nim functions.
+- [Streaming](/guides/streaming/): render text, tool calls, and agent events as they arrive.
+- [Structured output](/guides/structured-output/): decode model responses into validated Nim values.
+- [Embeddings & RAG](/guides/embeddings-rag/): build RAG applications over your own documents.
+- [Conversations](/guides/conversations/): keep conversation history across requests.
+- [Providers](/guides/providers/): switch providers and configure provider-specific options.
+- [Examples](/examples/): copy complete programs for common tasks.

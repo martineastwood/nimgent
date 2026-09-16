@@ -113,4 +113,4 @@ The request mapping runs before the router chooses a provider.
 
 ## Next steps
 
-See [Providers](/nimgent/guides/providers/) for provider setup and options, or [Error Handling](/nimgent/guides/error-handling/) for handling failed requests.
+See [Providers](/guides/providers/) for provider setup and options, or [Error Handling](/guides/error-handling/) for handling failed requests.

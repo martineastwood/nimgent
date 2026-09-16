@@ -115,7 +115,7 @@ decodes it into `T`.
 
 Use embeddings to index your documents, retrieve the most relevant content for
 a question, and include that content in the model prompt. The
-[Embeddings & RAG guide](/nimgent/guides/embeddings-rag/)
+[Embeddings & RAG guide](/guides/embeddings-rag/)
 walks through a complete local RAG flow.
 
 ### Keep conversations
@@ -137,10 +137,10 @@ nimgent lets you keep that work in Nim, with:
 
 ## Where to go next
 
-- [Quickstart](/nimgent/guides/quickstart/): build a small application step by step.
-- [Providers](/nimgent/guides/providers/): connect a provider and choose a model.
-- [Streaming](/nimgent/guides/streaming/): render responses and agent events as they arrive.
-- [Tools and agents](/nimgent/guides/tools-and-agents/): add typed tools, approvals, and reusable agents.
-- [Structured output](/nimgent/guides/structured-output/): turn model responses into validated Nim values.
-- [Conversations](/nimgent/guides/conversations/): preserve and manage conversation history.
-- [Examples](/nimgent/examples/): copy complete programs for common tasks.
+- [Quickstart](/guides/quickstart/): build a small application step by step.
+- [Providers](/guides/providers/): connect a provider and choose a model.
+- [Streaming](/guides/streaming/): render responses and agent events as they arrive.
+- [Tools and agents](/guides/tools-and-agents/): add typed tools, approvals, and reusable agents.
+- [Structured output](/guides/structured-output/): turn model responses into validated Nim values.
+- [Conversations](/guides/conversations/): preserve and manage conversation history.
+- [Examples](/examples/): copy complete programs for common tasks.

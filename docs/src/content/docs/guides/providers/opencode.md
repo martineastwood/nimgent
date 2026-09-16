@@ -48,4 +48,4 @@ If a request fails, confirm that the selected protocol matches the model's gatew
 
 ## Next steps
 
-See [Settings](/nimgent/guides/providers/settings/) for portable controls, or [Middleware and routing](/nimgent/guides/middleware-and-routing/) to choose providers from a model ID.
+See [Settings](/guides/providers/settings/) for portable controls, or [Middleware and routing](/guides/middleware-and-routing/) to choose providers from a model ID.

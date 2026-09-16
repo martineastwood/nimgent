@@ -78,4 +78,4 @@ Portable `generationOptions` win when both option types set the same behavior.
 
 ## Next steps
 
-See the setup page for your [provider](/nimgent/guides/providers/), or use [Structured output](/nimgent/guides/structured-output/) for schema-specific output settings.
+See the setup page for your [provider](/guides/providers/), or use [Structured output](/guides/structured-output/) for schema-specific output settings.

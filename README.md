@@ -73,7 +73,7 @@ echo "\nFinished: ", response.finishReason
 
 Return `false` from the callback to cancel a stream. Use the `Async` variants
 in applications that already run Nim's event loop. See the
-[streaming guide](https://martineastwood.github.io/nimgent/guides/streaming/)
+[streaming guide](https://nimgent.niminal.dev/guides/streaming/)
 for text, tool-call, and agent streaming.
 
 ## Give the model typed tools
@@ -108,7 +108,7 @@ echo response.text
 nimgent derives the tool's input schema from `WeatherInput`, runs the callback
 when the model requests it, and sends the result back to the model. Set
 `maxSteps` above `1` when a request is allowed to continue through multiple
-model and tool turns. See [Tools and agents](https://martineastwood.github.io/nimgent/guides/tools-and-agents/)
+model and tool turns. See [Tools and agents](https://nimgent.niminal.dev/guides/tools-and-agents/)
 for typed results, failures, approvals, and hosted tools.
 
 ## Receive structured output
@@ -137,7 +137,7 @@ echo recipe.value.ingredients.join(", ")
 
 The type supplies the JSON Schema. nimgent validates the model response and
 returns the decoded value in `recipe.value`. Use `streamObject` for partial
-structured output, or read the [structured output guide](https://martineastwood.github.io/nimgent/guides/structured-output/)
+structured output, or read the [structured output guide](https://nimgent.niminal.dev/guides/structured-output/)
 for schema annotations, native provider modes, and repairs.
 
 ## Build agents and conversations
@@ -174,8 +174,8 @@ transcript with `messages` and install a shorter one with `replaceEvents`.
 
 Agent runs have blocking and async forms, plus normalized events for rendering
 text, thinking, tool calls, and approvals. Conversations can be serialized and
-restored with the same agent configuration. See the [conversations guide](https://martineastwood.github.io/nimgent/guides/conversations/)
-and [agent examples](https://martineastwood.github.io/nimgent/examples/agent/).
+restored with the same agent configuration. See the [conversations guide](https://nimgent.niminal.dev/guides/conversations/)
+and [agent examples](https://nimgent.niminal.dev/examples/agent/).
 
 ## Embeddings and retrieval
 
@@ -196,7 +196,7 @@ echo cosineSimilarity(result.embeddings[0], result.embeddings[1])
 ```
 
 The optional `nimgent/vector_store` module provides an in-memory vector store
-with search, metadata, and JSON save/load. Read [Embeddings & RAG](https://martineastwood.github.io/nimgent/guides/embeddings-rag/)
+with search, metadata, and JSON save/load. Read [Embeddings & RAG](https://nimgent.niminal.dev/guides/embeddings-rag/)
 for a complete retrieval example.
 
 ## Providers
@@ -213,24 +213,24 @@ let model = anthropic(getEnv("ANTHROPIC_API_KEY")).model("claude-sonnet-4-6")
 echo generateText(model, prompt = "Say hello in one sentence.").text
 ```
 
-Available providers and setup instructions are in the [provider guide](https://martineastwood.github.io/nimgent/guides/providers/).
+Available providers and setup instructions are in the [provider guide](https://nimgent.niminal.dev/guides/providers/).
 Use `GenerationOptions` for portable controls such as temperature and stop
 sequences. Use typed `ProviderOptions` for provider-specific settings. The
-[provider settings guide](https://martineastwood.github.io/nimgent/guides/providers/settings/)
+[provider settings guide](https://nimgent.niminal.dev/guides/providers/settings/)
 explains both.
 
 ## More capabilities
 
-- [Files and images](https://martineastwood.github.io/nimgent/guides/files-and-images/): ask questions about PDFs and images.
-- [MCP clients](https://martineastwood.github.io/nimgent/guides/mcp/): discover remote tools, resources, prompts, and tasks.
-- [Middleware and routing](https://martineastwood.github.io/nimgent/guides/middleware-and-routing/): wrap providers or choose one from a model ID.
-- [Error Handling](https://martineastwood.github.io/nimgent/guides/error-handling/): handle cancellation, rate limits, and context overflow.
-- [Observability](https://martineastwood.github.io/nimgent/guides/observability/): observe model runs, tools, retries, and embeddings without recording content.
-- [Testing](https://martineastwood.github.io/nimgent/guides/testing/): use deterministic scripted models without an API key or network access.
-- [Examples](https://martineastwood.github.io/nimgent/examples/): copyable programs for common tasks.
-- [API reference](https://martineastwood.github.io/nimgent/reference/core-api/): core types and the generated procedure reference.
+- [Files and images](https://nimgent.niminal.dev/guides/files-and-images/): ask questions about PDFs and images.
+- [MCP clients](https://nimgent.niminal.dev/guides/mcp/): discover remote tools, resources, prompts, and tasks.
+- [Middleware and routing](https://nimgent.niminal.dev/guides/middleware-and-routing/): wrap providers or choose one from a model ID.
+- [Error Handling](https://nimgent.niminal.dev/guides/error-handling/): handle cancellation, rate limits, and context overflow.
+- [Observability](https://nimgent.niminal.dev/guides/observability/): observe model runs, tools, retries, and embeddings without recording content.
+- [Testing](https://nimgent.niminal.dev/guides/testing/): use deterministic scripted models without an API key or network access.
+- [Examples](https://nimgent.niminal.dev/examples/): copyable programs for common tasks.
+- [API reference](https://nimgent.niminal.dev/reference/core-api/): core types and the generated procedure reference.
 
-For a guided first project, start with the [Quickstart](https://martineastwood.github.io/nimgent/guides/quickstart/).
+For a guided first project, start with the [Quickstart](https://nimgent.niminal.dev/guides/quickstart/).
 
 ## License
 
