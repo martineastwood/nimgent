@@ -1,49 +1,49 @@
 ## Event-backed conversation state for reusable agents.
 ##
-## A Session owns the transcript and usage for one conversation. Agent remains
-## immutable configuration; a session can be used for independent runs and is
+## A Conversation owns the transcript and usage for one interaction. Agent remains
+## immutable configuration; a conversation can be used for independent runs and is
 ## not safe for concurrent mutation from multiple callers.
 
 import std/[asyncdispatch, json, strutils, times]
 import nimgent
 import nimgent/agent
 
-const sessionSchemaVersion* = 1 ## Current serialized session format version.
+const conversationSchemaVersion* = 1 ## Current serialized conversation format version.
 
 type
-  SessionEventKind* = enum
-    ## Kind of event stored in a session transcript.
-    sekUser = "user"
-    sekAssistant = "assistant"
-    sekToolResult = "tool_result"
-    sekTurnStarted = "turn_started"
-    sekTurnFinished = "turn_finished"
-    sekTurnFailed = "turn_failed"
+  ConversationEventKind* = enum
+    ## Kind of event stored in a conversation transcript.
+    cekUser = "user"
+    cekAssistant = "assistant"
+    cekToolResult = "tool_result"
+    cekTurnStarted = "turn_started"
+    cekTurnFinished = "turn_finished"
+    cekTurnFailed = "turn_failed"
 
-  ## Provider-neutral append-only session event. Lifecycle events make an
+  ## Provider-neutral append-only conversation event. Lifecycle events make an
   ## interrupted turn observable without putting incomplete messages into the
   ## model-facing transcript.
-  SessionEvent* = object
-    ## One durable event in a session transcript.
+  ConversationEvent* = object
+    ## One durable event in a conversation transcript.
     turnId*: string
-    case kind*: SessionEventKind
-    of sekUser, sekAssistant:
+    case kind*: ConversationEventKind
+    of cekUser, cekAssistant:
       message*: Message
       model*: string
       requestId*: string
       usage*: Usage
       finishReason*: FinishReason
-    of sekToolResult:
+    of cekToolResult:
       toolResults*: seq[ContentBlock]
-    of sekTurnStarted:
+    of cekTurnStarted:
       prompt*: string
-    of sekTurnFinished:
+    of cekTurnFinished:
       response*: ProviderResponse
-    of sekTurnFailed:
+    of cekTurnFailed:
       error*: string
       aborted*: bool
 
-  Session* = ref object
+  Conversation* = ref object
     ## Stable identity passed through to providers that support server sessions.
     id*: string
     ## Agent configuration used for each turn.
@@ -53,7 +53,7 @@ type
     ## several. The event log always keeps every turn.
     historyLimit*: int
     ## Canonical append-only transcript.
-    events*: seq[SessionEvent]
+    events*: seq[ConversationEvent]
     turns*: int
     totalUsage*: Usage
     lastResponse*: ProviderResponse
@@ -99,89 +99,89 @@ proc copyResponse(response: ProviderResponse): ProviderResponse =
   for step in response.steps:
     result.steps.add copyStep(step)
 
-proc copyEvent(event: SessionEvent): SessionEvent =
+proc copyEvent(event: ConversationEvent): ConversationEvent =
   result = event
   case event.kind
-  of sekUser, sekAssistant:
+  of cekUser, cekAssistant:
     result.message = copyMessage(event.message)
-  of sekToolResult:
+  of cekToolResult:
     result.toolResults = copyBlocks(event.toolResults)
-  of sekTurnFinished:
+  of cekTurnFinished:
     result.response = copyResponse(event.response)
   else:
     discard
 
-proc messages*(events: openArray[SessionEvent]): seq[Message] =
+proc messages*(events: openArray[ConversationEvent]): seq[Message] =
   ## Convert completed message events into the provider-neutral request shape.
-  ## Pass any slice of `Session.events` to read the part a caller wants to
+  ## Pass any slice of `Conversation.events` to read the part a caller wants to
   ## summarize, drop, or rewrite.
   for event in events:
     case event.kind
-    of sekUser, sekAssistant:
+    of cekUser, cekAssistant:
       result.add copyMessage(event.message)
-    of sekToolResult:
+    of cekToolResult:
       if result.len == 0 or result[^1].role != roleUser:
         result.add Message(role: roleUser, content: @[])
       result[^1].content.add copyBlocks(event.toolResults)
-    of sekTurnStarted, sekTurnFinished, sekTurnFailed:
+    of cekTurnStarted, cekTurnFinished, cekTurnFailed:
       discard
 
-proc rebuildState(session: Session) =
-  session.turns = 0
-  session.totalUsage = Usage()
-  session.lastResponse = ProviderResponse()
-  for event in session.events:
-    if event.kind == sekTurnFinished:
-      inc session.turns
-      session.totalUsage.addUsage(event.response.totalUsage)
-      session.lastResponse = copyResponse(event.response)
+proc rebuildState(conversation: Conversation) =
+  conversation.turns = 0
+  conversation.totalUsage = Usage()
+  conversation.lastResponse = ProviderResponse()
+  for event in conversation.events:
+    if event.kind == cekTurnFinished:
+      inc conversation.turns
+      conversation.totalUsage.addUsage(event.response.totalUsage)
+      conversation.lastResponse = copyResponse(event.response)
 
-proc appendEvent(session: Session, event: SessionEvent) =
-  session.events.add copyEvent(event)
-  session.rebuildState()
+proc appendEvent(conversation: Conversation, event: ConversationEvent) =
+  conversation.events.add copyEvent(event)
+  conversation.rebuildState()
 
-proc newSessionId(): string =
+proc newConversationId(): string =
   $int(epochTime() * 1_000_000)
 
-proc newSession*(agent: Agent, messages: seq[Message] = @[], id = "",
-                 historyLimit = 0): Session =
-  ## Create an empty session, or continue from an existing transcript.
+proc newConversation*(agent: Agent, messages: seq[Message] = @[], id = "",
+                 historyLimit = 0): Conversation =
+  ## Create an empty conversation, or continue from an existing transcript.
   if agent.isNil:
-    raiseProviderError("session agent must not be nil")
+    raiseProviderError("conversation agent must not be nil")
   if historyLimit < 0:
-    raiseProviderError("session historyLimit must be at least 0")
-  result = Session(id: if id.len > 0: id else: newSessionId(), agent: agent,
+    raiseProviderError("conversation historyLimit must be at least 0")
+  result = Conversation(id: if id.len > 0: id else: newConversationId(), agent: agent,
     historyLimit: historyLimit)
   for message in messages:
     if message.role == roleUser:
-      result.events.add SessionEvent(kind: sekUser, message: copyMessage(message))
+      result.events.add ConversationEvent(kind: cekUser, message: copyMessage(message))
     else:
-      result.events.add SessionEvent(kind: sekAssistant, message: copyMessage(message))
+      result.events.add ConversationEvent(kind: cekAssistant, message: copyMessage(message))
   result.rebuildState()
 
-proc commit(session: Session, turnId, prompt: string, response: ProviderResponse) =
-  session.events.add SessionEvent(kind: sekUser, turnId: turnId,
+proc commit(conversation: Conversation, turnId, prompt: string, response: ProviderResponse) =
+  conversation.events.add ConversationEvent(kind: cekUser, turnId: turnId,
     message: userMessage(prompt))
   if response.steps.len == 0:
-    session.events.add SessionEvent(kind: sekAssistant, turnId: turnId,
+    conversation.events.add ConversationEvent(kind: cekAssistant, turnId: turnId,
       message: assistantMessage(response.content), model: response.model,
       requestId: response.requestId, usage: response.usage,
       finishReason: response.finishReason)
   else:
     for step in response.steps:
-      session.events.add SessionEvent(kind: sekAssistant, turnId: turnId,
+      conversation.events.add ConversationEvent(kind: cekAssistant, turnId: turnId,
         message: assistantMessage(step.content), model: step.model,
         usage: step.usage, finishReason: step.finishReason)
       if step.toolResults.len > 0:
-        session.events.add SessionEvent(kind: sekToolResult, turnId: turnId,
+        conversation.events.add ConversationEvent(kind: cekToolResult, turnId: turnId,
           toolResults: copyBlocks(step.toolResults))
-  session.events.add SessionEvent(kind: sekTurnFinished, turnId: turnId,
+  conversation.events.add ConversationEvent(kind: cekTurnFinished, turnId: turnId,
     response: copyResponse(response))
-  session.rebuildState()
+  conversation.rebuildState()
 
-proc messages*(session: Session): seq[Message] =
-  ## Model-facing view of the transcript currently in the session.
-  messages(session.events)
+proc messages*(conversation: Conversation): seq[Message] =
+  ## Model-facing view of the transcript currently in the conversation.
+  messages(conversation.events)
 
 proc isTurnStart(message: Message): bool =
   ## A window may only start at a plain user message. One that carries tool
@@ -203,158 +203,158 @@ proc windowMessages(history: seq[Message], limit: int): seq[Message] =
     dec start
   history[start .. ^1]
 
-proc requestMessages(session: Session, prompt: string): seq[Message] =
-  result = windowMessages(messages(session.events), session.historyLimit)
+proc requestMessages(conversation: Conversation, prompt: string): seq[Message] =
+  result = windowMessages(messages(conversation.events), conversation.historyLimit)
   result.add userMessage(prompt)
 
-proc nextTurnId(session: Session): string =
-  inc session.turnSeq
-  session.id & ":turn:" & $session.turnSeq
+proc nextTurnId(conversation: Conversation): string =
+  inc conversation.turnSeq
+  conversation.id & ":turn:" & $conversation.turnSeq
 
-proc replaceEvents*(session: Session, events: openArray[SessionEvent]) =
+proc replaceEvents*(conversation: Conversation, events: openArray[ConversationEvent]) =
   ## Replace the transcript, for example after compacting older turns, and
   ## rebuild `turns`, `totalUsage`, and `lastResponse` from it.
   ##
   ## The caller owns the new transcript: keep it provider-valid by starting at
   ## a user turn and keeping each tool call with its results. Use
   ## `userEventIndices` to find safe cut points.
-  if session.isNil:
-    raiseProviderError("session must not be nil")
-  session.events = @[]
+  if conversation.isNil:
+    raiseProviderError("conversation must not be nil")
+  conversation.events = @[]
   for event in events:
-    session.events.add copyEvent(event)
-  session.rebuildState()
+    conversation.events.add copyEvent(event)
+  conversation.rebuildState()
 
-proc userEventIndices*(session: Session): seq[int] =
+proc userEventIndices*(conversation: Conversation): seq[int] =
   ## Indices of user events, the boundaries a caller can safely cut at when
   ## compacting a transcript.
-  if session.isNil:
-    raiseProviderError("session must not be nil")
-  for i, event in session.events:
-    if event.kind == sekUser:
+  if conversation.isNil:
+    raiseProviderError("conversation must not be nil")
+  for i, event in conversation.events:
+    if event.kind == cekUser:
       result.add i
 
-proc validateTurn(session: Session, prompt: string) =
-  if session.isNil:
-    raiseProviderError("session must not be nil")
+proc validateTurn(conversation: Conversation, prompt: string) =
+  if conversation.isNil:
+    raiseProviderError("conversation must not be nil")
   if prompt.len == 0:
-    raiseProviderError("session prompt must not be empty")
+    raiseProviderError("conversation prompt must not be empty")
 
-proc beginTurn(session: Session, prompt: string): string =
-  session.validateTurn(prompt)
-  result = session.nextTurnId
-  session.appendEvent SessionEvent(kind: sekTurnStarted, turnId: result,
+proc beginTurn(conversation: Conversation, prompt: string): string =
+  conversation.validateTurn(prompt)
+  result = conversation.nextTurnId
+  conversation.appendEvent ConversationEvent(kind: cekTurnStarted, turnId: result,
     prompt: prompt)
 
-proc recordTurnFailure(session: Session, turnId: string, error: ref CatchableError) =
-  session.appendEvent SessionEvent(kind: sekTurnFailed, turnId: turnId,
+proc recordTurnFailure(conversation: Conversation, turnId: string, error: ref CatchableError) =
+  conversation.appendEvent ConversationEvent(kind: cekTurnFailed, turnId: turnId,
     error: error.msg, aborted: error of ProviderError and
       cast[ref ProviderError](error).aborted)
 
-proc runAsync*(session: Session, prompt: string,
+proc runAsync*(conversation: Conversation, prompt: string,
                abort: AbortCheck = nil,
                callbacks = RunCallbacks()): Future[ProviderResponse] {.async.} =
   ## Run one user turn and append its complete model/tool transcript.
-  let turnId = session.beginTurn(prompt)
+  let turnId = conversation.beginTurn(prompt)
   try:
-    let response = await session.agent.runAsync(
-      messages = session.requestMessages(prompt), abort = abort,
-      callbacks = callbacks, sessionId = session.id, turnId = turnId)
-    session.commit(turnId, prompt, response)
+    let response = await conversation.agent.runAsync(
+      messages = conversation.requestMessages(prompt), abort = abort,
+      callbacks = callbacks, conversationId = conversation.id, turnId = turnId)
+    conversation.commit(turnId, prompt, response)
     return response
   except CatchableError as e:
-    session.recordTurnFailure(turnId, e)
+    conversation.recordTurnFailure(turnId, e)
     raise
 
-proc run*(session: Session, prompt: string,
+proc run*(conversation: Conversation, prompt: string,
           abort: AbortCheck = nil,
           callbacks = RunCallbacks()): ProviderResponse =
   ## Blocking convenience wrapper around `runAsync`.
-  waitFor session.runAsync(prompt, abort, callbacks)
+  waitFor conversation.runAsync(prompt, abort, callbacks)
 
-proc streamAsync*(session: Session, prompt: string, onEvent: StreamCallback,
+proc streamAsync*(conversation: Conversation, prompt: string, onEvent: StreamCallback,
                   abort: AbortCheck = nil,
                   callbacks = RunCallbacks()): Future[ProviderResponse] {.async.} =
   ## Stream one user turn and append its transcript after successful completion.
   if onEvent.isNil:
-    raiseProviderError("session stream callback must not be nil")
-  let turnId = session.beginTurn(prompt)
+    raiseProviderError("conversation stream callback must not be nil")
+  let turnId = conversation.beginTurn(prompt)
   try:
-    let response = await session.agent.streamAsync("", onEvent,
-      messages = session.requestMessages(prompt), abort = abort,
-      callbacks = callbacks, sessionId = session.id)
-    session.commit(turnId, prompt, response)
+    let response = await conversation.agent.streamAsync("", onEvent,
+      messages = conversation.requestMessages(prompt), abort = abort,
+      callbacks = callbacks, conversationId = conversation.id)
+    conversation.commit(turnId, prompt, response)
     return response
   except CatchableError as e:
-    session.recordTurnFailure(turnId, e)
+    conversation.recordTurnFailure(turnId, e)
     raise
 
-proc stream*(session: Session, prompt: string, onEvent: StreamCallback,
+proc stream*(conversation: Conversation, prompt: string, onEvent: StreamCallback,
              abort: AbortCheck = nil,
              callbacks = RunCallbacks()): ProviderResponse =
   ## Blocking convenience wrapper around `streamAsync`.
-  waitFor session.streamAsync(prompt, onEvent, abort, callbacks)
+  waitFor conversation.streamAsync(prompt, onEvent, abort, callbacks)
 
-proc runEventsAsync*(session: Session, prompt: string,
+proc runEventsAsync*(conversation: Conversation, prompt: string,
                      abort: AbortCheck = nil,
                      callbacks = RunCallbacks(),
                      onEvent: AgentEventCallback = nil
                      ): Future[ProviderResponse] {.async.} =
-  ## Run one session turn while receiving lifecycle events.
-  let turnId = session.beginTurn(prompt)
+  ## Run one conversation turn while receiving lifecycle events.
+  let turnId = conversation.beginTurn(prompt)
   try:
-    let response = await session.agent.runEventsAsync("",
-      messages = session.requestMessages(prompt), abort = abort,
-      callbacks = callbacks, sessionId = session.id, turnId = turnId,
+    let response = await conversation.agent.runEventsAsync("",
+      messages = conversation.requestMessages(prompt), abort = abort,
+      callbacks = callbacks, conversationId = conversation.id, turnId = turnId,
       onEvent = onEvent)
-    session.commit(turnId, prompt, response)
+    conversation.commit(turnId, prompt, response)
     return response
   except CatchableError as e:
-    session.recordTurnFailure(turnId, e)
+    conversation.recordTurnFailure(turnId, e)
     raise
 
-proc streamAsync*(session: Session, prompt: string,
+proc streamAsync*(conversation: Conversation, prompt: string,
                   onEvent: AgentEventCallback,
                   abort: AbortCheck = nil,
                   callbacks = RunCallbacks()): Future[ProviderResponse] {.async.} =
-  ## Stream one session turn while receiving lifecycle events.
+  ## Stream one conversation turn while receiving lifecycle events.
   if onEvent.isNil:
-    raiseProviderError("session stream callback must not be nil")
-  let turnId = session.beginTurn(prompt)
+    raiseProviderError("conversation stream callback must not be nil")
+  let turnId = conversation.beginTurn(prompt)
   try:
-    let response = await session.agent.streamAsync("", onEvent,
-      messages = session.requestMessages(prompt), abort = abort,
-      callbacks = callbacks, sessionId = session.id, turnId = turnId)
-    session.commit(turnId, prompt, response)
+    let response = await conversation.agent.streamAsync("", onEvent,
+      messages = conversation.requestMessages(prompt), abort = abort,
+      callbacks = callbacks, conversationId = conversation.id, turnId = turnId)
+    conversation.commit(turnId, prompt, response)
     return response
   except CatchableError as e:
-    session.recordTurnFailure(turnId, e)
+    conversation.recordTurnFailure(turnId, e)
     raise
 
-proc stream*(session: Session, prompt: string,
+proc stream*(conversation: Conversation, prompt: string,
              onEvent: AgentEventCallback,
              abort: AbortCheck = nil,
              callbacks = RunCallbacks()): ProviderResponse =
-  ## Synchronously stream one session turn with lifecycle events.
-  waitFor session.streamAsync(prompt, onEvent, abort, callbacks)
+  ## Synchronously stream one conversation turn with lifecycle events.
+  waitFor conversation.streamAsync(prompt, onEvent, abort, callbacks)
 
-proc events*(session: Session, prompt: string,
+proc events*(conversation: Conversation, prompt: string,
              abort: AbortCheck = nil,
              callbacks = RunCallbacks()): AgentEventStream =
-  let turnId = session.beginTurn(prompt)
+  let turnId = conversation.beginTurn(prompt)
   let stream = eventStream(proc (callback: AgentEventCallback): Future[ProviderResponse]
                            {.closure.} =
-    session.agent.streamAsync("", callback,
-      messages = session.requestMessages(prompt), abort = abort,
-      callbacks = callbacks, sessionId = session.id, turnId = turnId))
+    conversation.agent.streamAsync("", callback,
+      messages = conversation.requestMessages(prompt), abort = abort,
+      callbacks = callbacks, conversationId = conversation.id, turnId = turnId))
   ## Persist the transcript independently of the consumer's event-draining
   ## loop, while keeping the stream's result Future authoritative.
   proc commitWhenDone() {.async.} =
     try:
       let response = await stream.result
-      session.commit(turnId, prompt, response)
+      conversation.commit(turnId, prompt, response)
     except CatchableError as e:
-      session.recordTurnFailure(turnId, e)
+      conversation.recordTurnFailure(turnId, e)
   asyncCheck commitWhenDone()
   stream
 
@@ -429,7 +429,7 @@ proc blockJson(part: ContentBlock): JsonNode =
 
 proc parseBlock(node: JsonNode): ContentBlock =
   if node.isNil or node.kind != JObject:
-    raise newException(ValueError, "session content block must be an object")
+    raise newException(ValueError, "conversation content block must be an object")
   case node.getOrDefault("type").getStr
   of "text":
     result = text(node.getOrDefault("text").getStr)
@@ -471,7 +471,7 @@ proc parseBlock(node: JsonNode): ContentBlock =
       node.getOrDefault("title").getStr, node.getOrDefault("id").getStr,
       node.getOrDefault("cited_text").getStr, raw)
   else:
-    raise newException(ValueError, "unknown session content block type")
+    raise newException(ValueError, "unknown conversation content block type")
   if "google_part" in node: result.googlePart = copy(node["google_part"])
 
 proc messageJson(message: Message): JsonNode =
@@ -482,11 +482,11 @@ proc messageJson(message: Message): JsonNode =
 proc parseMessage(node: JsonNode): Message =
   if node.isNil or node.kind != JObject or "content" notin node or
       node["content"].kind != JArray:
-    raise newException(ValueError, "session message must contain a content array")
+    raise newException(ValueError, "conversation message must contain a content array")
   let role = try:
     parseEnum[Role](node.getOrDefault("role").getStr)
   except ValueError:
-    raise newException(ValueError, "unknown session message role")
+    raise newException(ValueError, "unknown conversation message role")
   result = Message(role: role)
   for part in node["content"]:
     result.content.add parseBlock(part)
@@ -532,102 +532,102 @@ proc parseResponse(node: JsonNode): ProviderResponse =
   for step in node.getOrDefault("steps"):
     result.steps.add parseStep(step)
 
-proc eventJson(event: SessionEvent): JsonNode =
+proc eventJson(event: ConversationEvent): JsonNode =
   result = %*{"type": $event.kind, "turn_id": event.turnId}
   case event.kind
-  of sekUser, sekAssistant:
+  of cekUser, cekAssistant:
     result["message"] = messageJson(event.message)
-    if event.kind == sekAssistant:
+    if event.kind == cekAssistant:
       result["model"] = %event.model
       result["request_id"] = %event.requestId
       result["usage"] = usageJson(event.usage)
       result["finish_reason"] = %($event.finishReason)
-  of sekToolResult:
+  of cekToolResult:
     result["tool_results"] = newJArray()
     for part in event.toolResults:
       result["tool_results"].add blockJson(part)
-  of sekTurnStarted:
+  of cekTurnStarted:
     result["prompt"] = %event.prompt
-  of sekTurnFinished:
+  of cekTurnFinished:
     result["response"] = responseJson(event.response)
-  of sekTurnFailed:
+  of cekTurnFailed:
     result["error"] = %event.error
     result["aborted"] = %event.aborted
 
-proc parseEvent(node: JsonNode): SessionEvent =
+proc parseEvent(node: JsonNode): ConversationEvent =
   if node.isNil or node.kind != JObject:
-    raise newException(ValueError, "session event must be an object")
+    raise newException(ValueError, "conversation event must be an object")
   let turnId = node.getOrDefault("turn_id").getStr
-  let kind = parseEnum[SessionEventKind](node.getOrDefault("type").getStr)
+  let kind = parseEnum[ConversationEventKind](node.getOrDefault("type").getStr)
   case kind
-  of sekUser:
-    result = SessionEvent(kind: sekUser, turnId: turnId,
+  of cekUser:
+    result = ConversationEvent(kind: cekUser, turnId: turnId,
       message: parseMessage(node.getOrDefault("message")))
-  of sekAssistant:
-    result = SessionEvent(kind: sekAssistant, turnId: turnId,
+  of cekAssistant:
+    result = ConversationEvent(kind: cekAssistant, turnId: turnId,
       message: parseMessage(node.getOrDefault("message")),
       model: node.getOrDefault("model").getStr,
       requestId: node.getOrDefault("request_id").getStr,
       usage: parseUsage(node.getOrDefault("usage")),
       finishReason: parseEnum[FinishReason](
         node.getOrDefault("finish_reason").getStr))
-  of sekToolResult:
-    result = SessionEvent(kind: sekToolResult, turnId: turnId)
+  of cekToolResult:
+    result = ConversationEvent(kind: cekToolResult, turnId: turnId)
     for part in node.getOrDefault("tool_results"):
       result.toolResults.add parseBlock(part)
-  of sekTurnStarted:
-    result = SessionEvent(kind: sekTurnStarted, turnId: turnId,
+  of cekTurnStarted:
+    result = ConversationEvent(kind: cekTurnStarted, turnId: turnId,
       prompt: node.getOrDefault("prompt").getStr)
-  of sekTurnFinished:
-    result = SessionEvent(kind: sekTurnFinished, turnId: turnId,
+  of cekTurnFinished:
+    result = ConversationEvent(kind: cekTurnFinished, turnId: turnId,
       response: parseResponse(node.getOrDefault("response")))
-  of sekTurnFailed:
-    result = SessionEvent(kind: sekTurnFailed, turnId: turnId,
+  of cekTurnFailed:
+    result = ConversationEvent(kind: cekTurnFailed, turnId: turnId,
       error: node.getOrDefault("error").getStr,
       aborted: node.getOrDefault("aborted").getBool)
 
-proc sessionJson*(session: Session): JsonNode =
+proc conversationJson*(conversation: Conversation): JsonNode =
   ## Serialize the event log. Agent configuration is intentionally excluded.
-  if session.isNil:
-    raiseProviderError("session must not be nil")
-  result = %*{"version": sessionSchemaVersion, "id": session.id,
+  if conversation.isNil:
+    raiseProviderError("conversation must not be nil")
+  result = %*{"version": conversationSchemaVersion, "id": conversation.id,
     "events": newJArray()}
-  if session.historyLimit > 0:
-    result["history_limit"] = %session.historyLimit
-  for event in session.events:
+  if conversation.historyLimit > 0:
+    result["history_limit"] = %conversation.historyLimit
+  for event in conversation.events:
     result["events"].add eventJson(event)
 
-proc sessionJsonString*(session: Session): string =
-  ## Serialize a session transcript as a JSON string.
-  $session.sessionJson
+proc conversationJsonString*(conversation: Conversation): string =
+  ## Serialize a conversation transcript as a JSON string.
+  $conversation.conversationJson
 
-proc sessionFromJson*(agent: Agent, node: JsonNode): Session =
-  ## Rehydrate a session with a caller-supplied Agent configuration.
+proc conversationFromJson*(agent: Agent, node: JsonNode): Conversation =
+  ## Rehydrate a conversation with a caller-supplied Agent configuration.
   if agent.isNil:
-    raiseProviderError("session agent must not be nil")
+    raiseProviderError("conversation agent must not be nil")
   if node.isNil or node.kind != JObject:
-    raise newException(ValueError, "session JSON must be an object")
+    raise newException(ValueError, "conversation JSON must be an object")
   let version = node.getOrDefault("version").getInt
-  if version != sessionSchemaVersion:
-    raise newException(ValueError, "unsupported session JSON version: " & $version)
+  if version != conversationSchemaVersion:
+    raise newException(ValueError, "unsupported conversation JSON version: " & $version)
   if "events" notin node or node["events"].kind != JArray:
-    raise newException(ValueError, "session JSON must contain an events array")
-  result = Session(id: node.getOrDefault("id").getStr, agent: agent,
+    raise newException(ValueError, "conversation JSON must contain an events array")
+  result = Conversation(id: node.getOrDefault("id").getStr, agent: agent,
     historyLimit: node.getOrDefault("history_limit").getInt)
-  if result.id.len == 0: result.id = newSessionId()
+  if result.id.len == 0: result.id = newConversationId()
   for event in node["events"]:
     result.events.add parseEvent(event)
   result.turnSeq = result.events.len
   result.rebuildState()
 
-proc sessionFromJson*(agent: Agent, raw: string): Session =
-  ## Rehydrate a session from a JSON string and agent configuration.
-  sessionFromJson(agent, parseJson(raw))
+proc conversationFromJson*(agent: Agent, raw: string): Conversation =
+  ## Rehydrate a conversation from a JSON string and agent configuration.
+  conversationFromJson(agent, parseJson(raw))
 
-proc reset*(session: Session) =
+proc reset*(conversation: Conversation) =
   ## Clear the transcript, counters, and last response while retaining the agent
   ## configuration and history window.
-  if session.isNil:
-    raiseProviderError("session must not be nil")
-  session.events = @[]
-  session.rebuildState()
+  if conversation.isNil:
+    raiseProviderError("conversation must not be nil")
+  conversation.events = @[]
+  conversation.rebuildState()

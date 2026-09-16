@@ -159,5 +159,5 @@ for that flow.
 
 - [Tools and agents](/nimgent/guides/tools-and-agents/) to stream tool-using runs.
 - [Structured output](/nimgent/guides/structured-output/) to stream a validated object.
-- [Sessions](/nimgent/guides/sessions/) to keep a conversation across runs.
+- [Conversations](/nimgent/guides/conversations/) to keep a conversation across runs.
 - [Providers](/nimgent/guides/providers/) to choose and configure a provider.

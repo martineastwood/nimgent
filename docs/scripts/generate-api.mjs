@@ -11,7 +11,7 @@ const sourceDir = join(packageDir, 'src');
 const outputDir = join(docsDir, 'src', 'content', 'docs', 'reference', 'api');
 const extraModules = [
 	'src/nimgent/agent.nim',
-	'src/nimgent/session.nim',
+	'src/nimgent/conversation.nim',
 	'src/nimgent/testing.nim',
 	'src/nimgent/providers/google.nim',
 	'src/nimgent/providers/mistral.nim',

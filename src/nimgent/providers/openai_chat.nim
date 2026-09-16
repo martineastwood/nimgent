@@ -139,7 +139,7 @@ proc encodeMessage(result: var JsonNode, message: Message,
   result.add encoded
 
 proc buildChatBody*(request: ProviderRequest, stream: bool,
-                    includeSessionId = false, applyCache = false,
+                    includeConversationId = false, applyCache = false,
                     maxTokensField = "max_completion_tokens",
                     promptCacheKey = "",
                     reasoning = crReasoning): JsonNode =
@@ -156,8 +156,8 @@ proc buildChatBody*(request: ProviderRequest, stream: bool,
   if stream:
     result["stream"] = %true
     result["stream_options"] = %*{"include_usage": true}
-  if includeSessionId and request.sessionId.len > 0:
-    result["session_id"] = %request.sessionId
+  if includeConversationId and request.conversationId.len > 0:
+    result["session_id"] = %request.conversationId
   var messages = newJArray()
   if request.maxTokens > 0:
     result[maxTokensField] = %request.maxTokens

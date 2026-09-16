@@ -1,18 +1,18 @@
 ---
-title: Session
+title: Conversation
 description: Keep a conversation across agent turns and serialize it.
 ---
 
-Keep an agent conversation across multiple turns with a `Session`.
+Keep an agent conversation across multiple turns with a `Conversation`.
 
-The session builds the next request from its transcript and records completed
+The conversation builds the next request from its transcript and records completed
 turns. The example serializes that transcript, restores it with the same agent
 configuration, and continues the conversation with a follow-up question.
 
 ```nim
 import std/[asyncdispatch, os]
 import nimgent
-import nimgent/[agent, session]
+import nimgent/[agent, conversation]
 import nimgent/providers/openai
 
 type WeatherInput = object
@@ -27,19 +27,19 @@ let researcher = newAgent(
   tools = @[weather],
   maxSteps = 5)
 
-let conversation = newSession(researcher, id = "weather-demo")
+let chat = newConversation(researcher, id = "weather-demo")
 
 proc main() {.async.} =
-  let first = await conversation.runAsync("What's the weather like in Paris?")
+  let first = await chat.runAsync("What's the weather like in Paris?")
   echo "assistant: ", first.text
-  echo "session: ", conversation.id
-  echo "events: ", conversation.events.len
+  echo "conversation: ", chat.id
+  echo "events: ", chat.events.len
 
   # A snapshot contains the transcript and lifecycle state, but not the
   # agent's credentials or tool callbacks. Rehydrate it with the agent.
-  let snapshot = conversation.sessionJsonString
-  let resumed = sessionFromJson(researcher, snapshot)
-  echo "restored session: ", resumed.id
+  let snapshot = chat.conversationJsonString
+  let resumed = conversationFromJson(researcher, snapshot)
+  echo "restored conversation: ", resumed.id
 
   let second = await resumed.runAsync(
     "Based on that weather, what should I wear? Keep it brief.")
@@ -53,7 +53,7 @@ waitFor main()
 Run it from the repository root:
 
 ```sh
-OPENAI_API_KEY=... nim c -r examples/session.nim
+OPENAI_API_KEY=... nim c -r examples/conversation.nim
 ```
 
-[View the source example](https://github.com/martineastwood/nimgent/blob/main/examples/session.nim)
+[View the source example](https://github.com/martineastwood/nimgent/blob/main/examples/conversation.nim)

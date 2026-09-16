@@ -48,6 +48,7 @@ suite "tracing":
     var spans: seq[TraceSpan]
     let response = generateText(provider.model("test-model"),
       prompt = "secret prompt", tools = @[echoTool], maxSteps = 2,
+      conversationId = "conversation-1",
       callbacks = RunCallbacks(trace: proc (span: TraceSpan) = spans.add span))
     check response.text == "done"
     check named(spans, "nimgent.run").len == 1
@@ -67,6 +68,8 @@ suite "tracing":
     check ($run.attributes).find("secret prompt") < 0
     check ($run.attributes).find("secret output") < 0
     check run.attributes["input_tokens"].getInt == 6
+    check run.attributes["conversation_id"].getStr == "conversation-1"
+    check "session_id" notin run.attributes
 
   test "traces each retry as a separate model span":
     let provider = TraceProvider(failLeft: 1)

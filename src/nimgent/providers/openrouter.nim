@@ -7,7 +7,7 @@ export openai except openAI, hyper, defaultOpenAiEndpoint
 
 proc buildBody*(request: ProviderRequest, stream: bool): JsonNode =
   ## OpenRouter body: max_tokens, session_id, and cache_control breakpoints.
-  buildChatBody(request, stream, includeSessionId = true, applyCache = true,
+  buildChatBody(request, stream, includeConversationId = true, applyCache = true,
                 maxTokensField = "max_tokens")
 
 

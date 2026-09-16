@@ -108,4 +108,4 @@ let response = generateText(
 
 ## Next steps
 
-Learn how to choose a provider in the [Providers](/nimgent/guides/providers/) guide, or keep a multi-turn conversation with attachments in the [Sessions](/nimgent/guides/sessions/) guide.
+Learn how to choose a provider in the [Providers](/nimgent/guides/providers/) guide, or keep a multi-turn conversation with attachments in the [Conversations](/nimgent/guides/conversations/) guide.

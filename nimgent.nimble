@@ -1,6 +1,6 @@
 version       = "0.1.0"
 author        = "martin"
-description   = "Lightweight LLM client library for Nim"
+description   = "Nim SDK for LLM apps and agents: one typed API across providers"
 license       = "MIT"
 srcDir        = "src"
 

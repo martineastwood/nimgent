@@ -1,9 +1,12 @@
 ---
-title: Embeddings and retrieval
+title: Embeddings & RAG
 description: Search your own notes and use the relevant passages in a model answer.
 ---
 
-Embeddings let you find the parts of your own content that are most relevant to a question. You can embed your documents once, search them for each question, then give the best matches to a model as context.
+Build a small retrieval-augmented generation (RAG) flow with nimgent: embed your
+documents, find the passages closest to a question, and give those passages to
+a model as context. This guide uses an in-memory vector store, so you can follow
+the complete flow without setting up a database.
 
 ## Build a small retrieval flow
 

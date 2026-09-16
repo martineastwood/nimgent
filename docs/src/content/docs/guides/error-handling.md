@@ -1,9 +1,12 @@
 ---
-title: Errors and retries
+title: Error Handling
 description: Handle failed model requests, cancellations, and temporary provider errors.
 ---
 
-nimgent retries temporary provider failures for you. When a request still fails, catch `ProviderError` to show a useful message, reduce an oversized prompt, or record the provider request ID for support.
+Handle model failures with typed errors and automatic retries. nimgent retries
+temporary provider failures, while `CancelledError` and `ProviderError` let you
+distinguish cancellation, context overflow, and other failures so you can
+decide what your application should do next.
 
 ## Handle a failed request
 
@@ -119,4 +122,4 @@ Tool failures are different: a failed local tool call becomes a result the model
 
 ## Next steps
 
-See [Streaming](/nimgent/guides/streaming/) for rendering partial output, or [Sessions](/nimgent/guides/sessions/) for managing conversation history before it becomes too large.
+See [Streaming](/nimgent/guides/streaming/) for rendering partial output, or [Conversations](/nimgent/guides/conversations/) for managing conversation history before it becomes too large.

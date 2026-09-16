@@ -9,6 +9,6 @@ export openai except openAI, openRouter, hyper,
 
 proc buildBody*(request: ProviderRequest, stream: bool): JsonNode =
   ## Build a Mistral Chat Completions request body.
-  let cacheKey = if request.sessionId.len > 0: "nimgent:" & request.sessionId else: ""
+  let cacheKey = if request.conversationId.len > 0: "nimgent:" & request.conversationId else: ""
   buildChatBody(request, stream, maxTokensField = "max_tokens",
     promptCacheKey = cacheKey)

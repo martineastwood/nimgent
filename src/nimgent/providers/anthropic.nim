@@ -43,7 +43,7 @@ type
     ## gateway requires `x-opencode-session` on its Messages endpoint.
     sessionHeader*: string
 
-proc makeHeaders(provider: AnthropicProvider, sessionId = ""): HttpHeaders =
+proc makeHeaders(provider: AnthropicProvider, conversationId = ""): HttpHeaders =
   result = newHttpHeaders({
     "x-api-key": provider.apiKey,
     "anthropic-version": "2023-06-01",
@@ -51,8 +51,8 @@ proc makeHeaders(provider: AnthropicProvider, sessionId = ""): HttpHeaders =
   })
   if provider.userAgent.len > 0:
     result["User-Agent"] = provider.userAgent
-  if provider.sessionHeader.len > 0 and sessionId.len > 0:
-    result[provider.sessionHeader] = sessionId
+  if provider.sessionHeader.len > 0 and conversationId.len > 0:
+    result[provider.sessionHeader] = conversationId
 
 proc anthropicImageBlock*(mimeType, data: string): JsonNode =
   ## Encode base64 image data as an Anthropic content block.
@@ -270,7 +270,7 @@ method generateAsync*(provider: AnthropicProvider,
   defer:
     client.close()
     destroyContext(sslContext)
-  let headers = provider.makeHeaders(request.sessionId)
+  let headers = provider.makeHeaders(request.conversationId)
 
   var response: AsyncResponse
   try:
@@ -367,7 +367,7 @@ method generateStreamAsync*(provider: AnthropicProvider,
   let sslContext = newContext(verifyMode = CVerifyPeer)
   let client = newAsyncHttpClient(
     sslContext = sslContext,
-    headers = provider.makeHeaders(request.sessionId))
+    headers = provider.makeHeaders(request.conversationId))
   client.timeout = provider.timeoutSeconds * 1000
   var watch = WakeWatch()
   defer:

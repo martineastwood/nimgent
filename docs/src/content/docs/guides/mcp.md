@@ -3,16 +3,10 @@ title: MCP client
 description: Use tools, resources, prompts, and tasks from an MCP server.
 ---
 
-[MCP](https://modelcontextprotocol.io) is a protocol for handing tools and other
-capabilities to an application at runtime rather than at compile time. A server
-declares its tools, resources, prompts, and JSON Schemas; the client discovers
-them and uses them. nimgent is the client.
-
-That matters because it inverts the usual flow. Instead of writing a Nim
-function and persuading a model to call it, you point nimgent at a server
-someone else wrote - a file system, a database, an internal service - and its
-tools become available to your agent. Capabilities you did not compile in still
-reach the model.
+Connect nimgent to an [MCP](https://modelcontextprotocol.io) server to discover
+tools, resources, prompts, and tasks at runtime. You can call discovered tools
+directly or make them available to an agent, without adding each capability to
+your Nim application.
 
 ## Connect
 
@@ -196,5 +190,5 @@ pending request with that error. You do not get a hang.
   setup, so treat stdio MCP on Windows as untested.
 
 Related: [Tools and agents](/nimgent/guides/tools-and-agents/) for the loop these tools
-run inside, and [Errors and retries](/nimgent/guides/errors-and-retries/) for how a
+run inside, and [Error Handling](/nimgent/guides/error-handling/) for how a
 failing tool call reaches the model.

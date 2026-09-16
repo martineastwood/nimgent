@@ -137,7 +137,7 @@ type
   ProviderRequest* = object
     ## Provider-neutral request passed to a provider adapter.
     model*: string
-    sessionId*: string
+    conversationId*: string
     ## Optional execution identity and metadata for local tool context.
     turnId*: string
     metadata*: JsonNode
@@ -209,7 +209,7 @@ type
     ## Context passed to a local tool invocation.
     ## Per-invocation state supplied to context-aware tool handlers.
     callId*: string
-    sessionId*: string
+    conversationId*: string
     turnId*: string
     abort*: AbortCheck
     metadata*: JsonNode
@@ -304,7 +304,7 @@ type
   AgentEvent* = object
     ## Normalized lifecycle event emitted during an agent run.
     runId*: string
-    sessionId*: string
+    conversationId*: string
     turnId*: string
     step*: int
     case kind*: AgentEventKind
@@ -638,7 +638,7 @@ proc assistantMessage*(parts: seq[ContentBlock]): Message =
   Message(role: roleAssistant, content: parts)
 
 proc dropImages*(messages: seq[Message]): seq[Message] =
-  ## Replace image blocks with a text note. Session storage is unchanged.
+  ## Replace image blocks with a text note. Conversation storage is unchanged.
   for msg in messages:
     var parts: seq[ContentBlock] = @[]
     for p in msg.content:

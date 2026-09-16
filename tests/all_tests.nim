@@ -1,7 +1,7 @@
 import std/[asyncdispatch, json, options, os, osproc, sets, streams,
   sequtils, strutils, tables, times, unittest]
 import nimgent
-import nimgent/[agent, session]
+import nimgent/[agent, conversation]
 import nimgent/mcp
 import nimgent/providers/[anthropic, google, mistral, openrouter]
 import nimgent/testing
@@ -351,7 +351,7 @@ suite "OpenRouter provider":
         })
       let request = ProviderRequest(
         model: "deepseek/deepseek-v4-flash-0731",
-        sessionId: "fixture-session",
+        conversationId: "fixture-session",
         system: @["You are a test agent."],
         messages: @[userMessage("hello")],
         tools: @[readDefinition],
@@ -654,9 +654,9 @@ suite "generateText retries, abort, and tools":
     let metadata = %*{"trace": "abc"}
     let response = generateText(p.model("m"), prompt = "hi",
       tools = @[contextual], maxSteps = 2, maxRetries = 0,
-      sessionId = "session-1", turnId = "turn-1", metadata = metadata)
+      conversationId = "session-1", turnId = "turn-1", metadata = metadata)
     check seen.callId == "call_1"
-    check seen.sessionId == "session-1"
+    check seen.conversationId == "session-1"
     check seen.turnId == "turn-1"
     check not seen.abort.isNil
     check seen.metadata["trace"].getStr == "abc"
@@ -814,7 +814,7 @@ suite "Hyper provider":
   test "chat body uses max_tokens and skips OpenRouter extras":
     let body = buildChatBody(ProviderRequest(
       model: "deepseek-v4-flash",
-      sessionId: "must-not-send",
+      conversationId: "must-not-send",
       messages: @[userMessage("hi")],
       maxTokens: 32), stream = false, maxTokensField = "max_tokens")
     check body["max_tokens"].getInt == 32
@@ -937,12 +937,12 @@ suite "OpenCode provider":
       let chatProvider = openCode("fixture-key", url, timeoutSeconds = 5,
         userAgent = "nimlet/0.1.0", protocol = ocChat)
       let chat = chatProvider.generate(ProviderRequest(
-        model: "deepseek-v4.1-flash", sessionId: "sess-abc",
+        model: "deepseek-v4.1-flash", conversationId: "sess-abc",
         messages: @[userMessage("hi")], maxTokens: 16))
       check chat.text == "pong"
       check chat.usage.inputTokens == 12
       let toolTurn = chatProvider.generate(ProviderRequest(
-        model: "deepseek-v4.1-flash", sessionId: "sess-abc",
+        model: "deepseek-v4.1-flash", conversationId: "sess-abc",
         messages: @[
           userMessage("hi"),
           Message(role: roleAssistant, content: @[
@@ -954,14 +954,14 @@ suite "OpenCode provider":
       let responsesProvider = openCode("fixture-key", url, timeoutSeconds = 5,
         userAgent = "nimlet/0.1.0", protocol = ocResponses)
       let responses = responsesProvider.generate(ProviderRequest(
-        model: "grok-4.6", sessionId: "sess-abc",
+        model: "grok-4.6", conversationId: "sess-abc",
         messages: @[userMessage("hi")], maxTokens: 16))
       check responses.text == "grok pong"
       check responses.usage.inputTokens == 20
       let messagesProvider = openCode("fixture-key", url, timeoutSeconds = 5,
         userAgent = "nimlet/0.1.0", protocol = ocMessages)
       let messages = messagesProvider.generate(ProviderRequest(
-        model: "qwen3.8-flash", sessionId: "sess-abc",
+        model: "qwen3.8-flash", conversationId: "sess-abc",
         messages: @[userMessage("hi")], maxTokens: 16))
       check messages.text == "qwen pong"
       check messages.usage.inputTokens == 14
@@ -1045,14 +1045,14 @@ suite "Mistral provider":
 
   test "chat body uses Mistral's max_tokens field":
     let body = mistral.buildBody(ProviderRequest(model: "mistral-vibe-cli-with-tools",
-      sessionId: "session-1", messages: @[userMessage("hi")], maxTokens: 32), stream = false)
+      conversationId: "session-1", messages: @[userMessage("hi")], maxTokens: 32), stream = false)
     check body["max_tokens"].getInt == 32
     check "max_completion_tokens" notin body
     check body["prompt_cache_key"].getStr == "nimgent:session-1"
 
   test "explicit prompt cache key wins":
     let body = mistral.buildBody(ProviderRequest(model: "mistral-vibe-cli-with-tools",
-      sessionId: "session-1", messages: @[userMessage("hi")],
+      conversationId: "session-1", messages: @[userMessage("hi")],
       options: %*{"prompt_cache_key": "custom-key"}), stream = false)
     check body["prompt_cache_key"].getStr == "custom-key"
 
@@ -1069,7 +1069,7 @@ suite "OpenAI provider":
   test "native body uses Responses fields and omits Chat Completions extras":
     let body = buildResponsesBody(ProviderRequest(
       model: "gpt-5",
-      sessionId: "should-omit",
+      conversationId: "should-omit",
       system: @["stable prefix"],
       messages: @[userMessage("hi")],
       tools: @[ToolDefinition(name: "read", description: "d",
@@ -1145,7 +1145,7 @@ suite "OpenAI provider":
         "http://127.0.0.1:" & $port, timeoutSeconds = 5)
       let response = provider.generate(ProviderRequest(
         model: "gpt-5",
-        sessionId: "must-not-send",
+        conversationId: "must-not-send",
         system: @["You are a test agent."],
         messages: @[userMessage("hello")],
         tools: @[ToolDefinition(name: "read", description: "Read a file",
@@ -2526,15 +2526,15 @@ suite "first-class Agent API":
     expect ProviderError:
       discard newAgent(p.model("m"), maxSteps = 0)
 
-suite "agent sessions":
-  test "records lifecycle events and forwards the session id":
+suite "agent conversations":
+  test "records lifecycle events and forwards the conversation id":
     let p = ScriptProvider()
-    let conversation = newSession(newAgent(p.model("m"), maxRetries = 0),
+    let conversation = newConversation(newAgent(p.model("m"), maxRetries = 0),
       id = "session-1")
     discard conversation.run("hello")
-    check p.last.sessionId == "session-1"
+    check p.last.conversationId == "session-1"
     check conversation.events.mapIt(it.kind) == @[
-      sekTurnStarted, sekUser, sekAssistant, sekTurnFinished]
+      cekTurnStarted, cekUser, cekAssistant, cekTurnFinished]
     check conversation.events[0].prompt == "hello"
     check conversation.events[^1].response.text == "ok"
 
@@ -2544,14 +2544,14 @@ suite "agent sessions":
       x: int
     let echoTool = tool[EchoInput, string]("echo", "echo",
       proc (_: ToolContext, _: EchoInput): string = "pong")
-    let conversation = newSession(newAgent(p.model("m"), tools = @[echoTool],
+    let conversation = newConversation(newAgent(p.model("m"), tools = @[echoTool],
       maxSteps = 2, maxRetries = 0), id = "round-trip")
     discard conversation.run("hello")
-    let restored = sessionFromJson(newAgent(p.model("m"), tools = @[echoTool],
-      maxSteps = 2, maxRetries = 0), conversation.sessionJson)
+    let restored = conversationFromJson(newAgent(p.model("m"), tools = @[echoTool],
+      maxSteps = 2, maxRetries = 0), conversation.conversationJson)
     check restored.id == "round-trip"
-    check restored.sessionJson == conversation.sessionJson
-    check restored.sessionJsonString == conversation.sessionJsonString
+    check restored.conversationJson == conversation.conversationJson
+    check restored.conversationJsonString == conversation.conversationJsonString
     check restored.turns == 1
     check restored.totalUsage == conversation.totalUsage
     check restored.lastResponse.text == "ok"
@@ -2571,10 +2571,10 @@ suite "agent sessions":
       file("application/pdf", "R0hJ", "spec.pdf", "spec.pdf"),
       source("https://example.com", "Example", "src-1", "quoted",
         %*{"raw": "citation"})]
-    let conversation = newSession(newAgent(ScriptProvider().model("m")),
+    let conversation = newConversation(newAgent(ScriptProvider().model("m")),
       @[userMessage(blocks)], id = "metadata")
-    let restored = sessionFromJson(newAgent(ScriptProvider().model("m")),
-      conversation.sessionJson)
+    let restored = conversationFromJson(newAgent(ScriptProvider().model("m")),
+      conversation.conversationJson)
     check restored.events[0].message.content.len == blocks.len
     check restored.events[0].message.content[1].googlePart["thought"].getBool
     check restored.events[0].message.content[2].thoughtSignature == "tool-signature"
@@ -2585,17 +2585,17 @@ suite "agent sessions":
     check restored.events[0].message.content[6].source.raw["raw"].getStr == "citation"
 
   test "persists failed turns without adding incomplete messages":
-    let conversation = newSession(newAgent(BoomProvider().model("m"),
+    let conversation = newConversation(newAgent(BoomProvider().model("m"),
       maxRetries = 0), id = "failed")
     expect ProviderError:
       discard conversation.run("hello")
     check conversation.events.len == 2
-    check conversation.events[0].kind == sekTurnStarted
-    check conversation.events[1].kind == sekTurnFailed
+    check conversation.events[0].kind == cekTurnStarted
+    check conversation.events[1].kind == cekTurnFailed
     check conversation.events[1].error.startsWith("prompt is too long")
-    let restored = sessionFromJson(newAgent(BoomProvider().model("m"),
-      maxRetries = 0), conversation.sessionJsonString)
-    check restored.sessionJson == conversation.sessionJson
+    let restored = conversationFromJson(newAgent(BoomProvider().model("m"),
+      maxRetries = 0), conversation.conversationJsonString)
+    check restored.conversationJson == conversation.conversationJson
 
   test "retains transcript and accumulates usage across turns":
     let p = ScriptProvider(toolFirst: true)
@@ -2603,7 +2603,7 @@ suite "agent sessions":
       x: int
     let echoTool = tool[EchoInput, string]("echo", "echo",
       proc (_: ToolContext, _: EchoInput): string = "pong")
-    let conversation = newSession(newAgent(p.model("m"),
+    let conversation = newConversation(newAgent(p.model("m"),
       instructions = "Be concise.", tools = @[echoTool], maxSteps = 2,
       maxRetries = 0))
     let first = conversation.run("first")
@@ -2624,7 +2624,7 @@ suite "agent sessions":
     check conversation.lastResponse.text == "ok"
 
   test "streaming commits only after the turn completes":
-    let conversation = newSession(newAgent(ScriptProvider().model("m"),
+    let conversation = newConversation(newAgent(ScriptProvider().model("m"),
       maxRetries = 0))
     var deltas: seq[string]
     let response = conversation.stream("hello", proc (ev: StreamEvent): bool =
@@ -2635,8 +2635,8 @@ suite "agent sessions":
     check conversation.events.len == 4
     check conversation.events[2].message.content[0].text == "ok"
 
-  test "session forwards normalized events and commits after completion":
-    let conversation = newSession(newAgent(ScriptProvider().model("m"),
+  test "conversation forwards normalized events and commits after completion":
+    let conversation = newConversation(newAgent(ScriptProvider().model("m"),
       maxRetries = 0), id = "event-session")
     var kinds: seq[AgentEventKind]
     let response = waitFor conversation.streamAsync("hello",
@@ -2646,10 +2646,10 @@ suite "agent sessions":
     check response.text == "ok"
     check kinds[0] == aeRunStart
     check kinds[^1] == aeRunFinish
-    check conversation.events[^1].kind == sekTurnFinished
+    check conversation.events[^1].kind == cekTurnFinished
 
   test "reset clears state but keeps the agent":
-    let conversation = newSession(newAgent(ScriptProvider().model("m"),
+    let conversation = newConversation(newAgent(ScriptProvider().model("m"),
       maxRetries = 0))
     discard conversation.run("hello")
     conversation.reset()
@@ -2658,7 +2658,7 @@ suite "agent sessions":
 
   test "exposes messages for caller-driven compaction":
     let p = ScriptProvider()
-    let conversation = newSession(newAgent(p.model("m"), maxRetries = 0),
+    let conversation = newConversation(newAgent(p.model("m"), maxRetries = 0),
       id = "compaction")
     discard conversation.run("first question")
     discard conversation.run("second question")
@@ -2670,7 +2670,7 @@ suite "agent sessions":
     check conversation.userEventIndices == @[1, 5]
     # Keep the recent half, replace the older half with a summary.
     let cut = conversation.userEventIndices[^1]
-    conversation.replaceEvents(@[SessionEvent(kind: sekUser,
+    conversation.replaceEvents(@[ConversationEvent(kind: cekUser,
       message: userMessage("Summary: first question."))] &
       conversation.events[cut .. ^1])
     check conversation.turns == 1
@@ -2688,9 +2688,9 @@ suite "agent sessions":
     check conversation.events[^4].turnId == "compaction:turn:3"
 
   test "replaceEvents owns the transcript it is given":
-    var incoming = @[SessionEvent(kind: sekUser, message: userMessage(@[
+    var incoming = @[ConversationEvent(kind: cekUser, message: userMessage(@[
       toolUse("call", "echo", %*{"x": 1})]))]
-    let conversation = newSession(newAgent(ScriptProvider().model("m"),
+    let conversation = newConversation(newAgent(ScriptProvider().model("m"),
       maxRetries = 0))
     conversation.replaceEvents(incoming)
     incoming[0].message.content[0].input["x"] = %2
@@ -2698,7 +2698,7 @@ suite "agent sessions":
 
   test "limits the model-facing history to a recent window":
     let p = ScriptProvider()
-    let conversation = newSession(newAgent(p.model("m"), maxRetries = 0),
+    let conversation = newConversation(newAgent(p.model("m"), maxRetries = 0),
       id = "window", historyLimit = 2)
     discard conversation.run("first")
     discard conversation.run("second")
@@ -2714,7 +2714,7 @@ suite "agent sessions":
     let p = ScriptProvider(toolFirst: true)
     let echoTool = tool[EchoInput, string]("echo", "echo",
       proc (_: ToolContext, _: EchoInput): string = "pong")
-    let conversation = newSession(newAgent(p.model("m"), tools = @[echoTool],
+    let conversation = newConversation(newAgent(p.model("m"), tools = @[echoTool],
       maxSteps = 2, maxRetries = 0), historyLimit = 1)
     discard conversation.run("first")
     discard conversation.run("second")
@@ -2723,14 +2723,14 @@ suite "agent sessions":
     check p.last.messages[0].content[0].text == "first"
 
   test "round trips the history window":
-    let conversation = newSession(newAgent(ScriptProvider().model("m")),
+    let conversation = newConversation(newAgent(ScriptProvider().model("m")),
       id = "window-json", historyLimit = 8)
-    let restored = sessionFromJson(newAgent(ScriptProvider().model("m")),
-      conversation.sessionJsonString)
+    let restored = conversationFromJson(newAgent(ScriptProvider().model("m")),
+      conversation.conversationJsonString)
     check restored.historyLimit == 8
-    check restored.sessionJson == conversation.sessionJson
-    let unlimited = sessionFromJson(newAgent(ScriptProvider().model("m")),
-      %*{"version": sessionSchemaVersion, "id": "plain", "events": []})
+    check restored.conversationJson == conversation.conversationJson
+    let unlimited = conversationFromJson(newAgent(ScriptProvider().model("m")),
+      %*{"version": conversationSchemaVersion, "id": "plain", "events": []})
     check unlimited.historyLimit == 0
     expect ProviderError:
-      discard newSession(newAgent(ScriptProvider().model("m")), historyLimit = -1)
+      discard newConversation(newAgent(ScriptProvider().model("m")), historyLimit = -1)

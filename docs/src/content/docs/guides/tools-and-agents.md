@@ -138,7 +138,7 @@ echo tokyo.text
 ```
 
 Each `researcher.run(...)` call gets its own `maxSteps` limit. You can reuse the
-agent as often as you need. Use a [Session](/nimgent/guides/sessions/) when later runs
+agent as often as you need. Use a [Conversation](/nimgent/guides/conversations/) when later runs
 should remember earlier messages and tool results.
 
 ### Choose how tools are used
@@ -243,7 +243,7 @@ more specific so the model has a better understanding of when to call it. Use
 
 ## Next steps
 
-- [Sessions](/nimgent/guides/sessions/) to keep a conversation across agent runs.
+- [Conversations](/nimgent/guides/conversations/) to keep a conversation across agent runs.
 - [Streaming](/nimgent/guides/streaming/) to render responses while they are generated.
 - [Structured output](/nimgent/guides/structured-output/) to receive validated Nim values.
 - [Providers](/nimgent/guides/providers/) to configure provider-specific features.

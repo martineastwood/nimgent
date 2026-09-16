@@ -3,12 +3,10 @@ title: Testing
 description: Run your application against a scripted model instead of a provider.
 ---
 
-Application tests should not need an API key, a network, or a budget. They
-should also be fast enough to run on every save, and deterministic enough that a
-failure means your code is wrong rather than that a model had an off day.
-
-`nimgent/testing` provides that: a provider that returns responses you wrote, in
-the order you wrote them, and records everything it was asked to do.
+Test your nimgent application without an API key, network connection, or model
+budget by using a scripted provider. You define the responses it returns, so
+tests stay fast and deterministic while still exercising the same generation,
+tool, agent, and structured-output code paths.
 
 ## A scripted model
 
@@ -28,7 +26,7 @@ hands back responses one per call. `textResponse(value, finishReason = frStop,
 usage = Usage())` is the shorthand for a plain text reply.
 
 From there, nothing else in your test changes: `generateText`, `streamText`,
-agents, sessions, and structured output all run against it exactly as they would
+agents, conversations, and structured output all run against it exactly as they would
 against OpenAI. That is the point — the fake is a provider, not a special mode.
 
 ## Assert on what was sent
@@ -126,6 +124,6 @@ Deliberate omissions, so you know when to reach for a fixture server instead:
 - **No usage realism.** Pass `usage = Usage(inputTokens: …)` to `textResponse`
   when a test asserts on token totals; otherwise they are zero.
 
-Related: [Errors and retries](/nimgent/guides/errors-and-retries/) for what to assert
+Related: [Error Handling](/nimgent/guides/error-handling/) for what to assert
 when things go wrong, and [Core API](/nimgent/reference/core-api/) for the response
 types the fake produces.

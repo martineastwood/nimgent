@@ -3,7 +3,9 @@ title: Middleware and routing
 description: Apply a shared request policy or choose a provider from the model name.
 ---
 
-Use middleware when every model request should follow the same rule, such as adding a system instruction or recording usage. Use routing when different model names need different providers while the rest of your application keeps one model API.
+Use middleware to apply a shared policy to every model request, such as adding a
+system instruction or recording usage. Use routing to select a provider from the
+model name while the rest of your application keeps the same model API.
 
 ## Add a shared instruction
 
@@ -33,7 +35,7 @@ echo response.text
 
 `mapRequest` receives each request before it is sent. Return a changed copy, as in the example, so the caller's original request stays unchanged.
 
-The wrapped value is still a provider. You can use it with `generateText`, `streamText`, agents, sessions, and structured output just as you would use the original provider.
+The wrapped value is still a provider. You can use it with `generateText`, `streamText`, agents, conversations, and structured output just as you would use the original provider.
 
 ## Inspect or change completed responses
 
@@ -111,4 +113,4 @@ The request mapping runs before the router chooses a provider.
 
 ## Next steps
 
-See [Providers](/nimgent/guides/providers/) for provider setup and options, or [Errors and retries](/nimgent/guides/errors-and-retries/) for handling failed requests.
+See [Providers](/nimgent/guides/providers/) for provider setup and options, or [Error Handling](/nimgent/guides/error-handling/) for handling failed requests.

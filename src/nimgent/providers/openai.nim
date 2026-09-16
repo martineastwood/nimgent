@@ -3,7 +3,8 @@
 ## Native OpenAI uses the Responses API (`store: false`, reasoning replay).
 ## OpenRouter, Hyper, Mistral, OpenCode's Chat protocol, and any
 ## `*/chat/completions` URL use Chat Completions.
-## Session_id, cache_control, and HTTP-Referer stay optional on this type.
+## Provider wire fields such as `session_id`, `cache_control`, and HTTP-Referer
+## stay optional on this type.
 
 import std/[options, asyncdispatch, httpclient, json, net, strutils]
 import nimgent/providers/[anthropic, google_transport, provider, stream,
@@ -61,7 +62,7 @@ type
     siteUrl*: string
     siteName*: string
     ## OpenRouter continuation hint; omitted for native OpenAI.
-    includeSessionId*: bool
+    includeConversationId*: bool
     ## Anthropic-style cache breakpoints; OpenAI caches stable prefixes itself.
     applyCache*: bool
     ## Mistral prompt caching key derived from the request session ID.
@@ -73,7 +74,7 @@ type
     useResponses*: bool
     embeddingsEndpoint*: string
     ## Header carrying a stable conversation id. Empty: the id stays in the body
-    ## (`includeSessionId`) or is not sent. OpenCode Zen wants `x-opencode-session`.
+    ## (`includeConversationId`) or is not sent. OpenCode Zen wants `x-opencode-session`.
     sessionHeader*: string
     ## Gateway-facing client identity; empty keeps the HTTP library default.
     userAgent*: string
@@ -89,7 +90,7 @@ type
 
 proc initOpenAIProvider(name, displayName, apiKey, endpoint: string,
                       timeoutSeconds: int, siteUrl = "", siteName = "",
-                      includeSessionId = false, applyCache = false,
+                      includeConversationId = false, applyCache = false,
                       maxTokensField = "max_completion_tokens",
                       useResponses = false, embeddingsEndpoint = "",
                       promptCacheKey = false, sessionHeader = "",
@@ -98,7 +99,7 @@ proc initOpenAIProvider(name, displayName, apiKey, endpoint: string,
   result = OpenAIProvider(name: name, displayName: displayName, apiKey: apiKey,
                  endpoint: endpoint, timeoutSeconds: timeoutSeconds,
                  siteUrl: siteUrl, siteName: siteName,
-                 includeSessionId: includeSessionId, applyCache: applyCache,
+                 includeConversationId: includeConversationId, applyCache: applyCache,
                  promptCacheKey: promptCacheKey, sessionHeader: sessionHeader,
                  userAgent: userAgent, route: route,
                  chatReasoning: chatReasoning,
@@ -122,7 +123,7 @@ proc openRouter*(apiKey: string, endpoint = "", timeoutSeconds = 300,
   ## Create an OpenRouter provider.
   let url = if endpoint.len > 0: endpoint else: defaultOpenRouterEndpoint
   initOpenAIProvider("openrouter", "OpenRouter", apiKey, url,
-    timeoutSeconds, siteUrl, siteName, includeSessionId = true,
+    timeoutSeconds, siteUrl, siteName, includeConversationId = true,
     applyCache = true, maxTokensField = "max_tokens", userAgent = userAgent)
 
 proc hyper*(apiKey: string, endpoint = "",
@@ -200,7 +201,7 @@ proc mistral*(apiKey: string, endpoint = "", timeoutSeconds = 300,
 proc label(provider: OpenAIProvider): string =
   if provider.displayName.len > 0: provider.displayName else: provider.name
 
-proc makeHeaders(provider: OpenAIProvider, sessionId = ""): HttpHeaders =
+proc makeHeaders(provider: OpenAIProvider, conversationId = ""): HttpHeaders =
   result = {
     "Authorization": "Bearer " & provider.apiKey,
     "Content-Type": "application/json"
@@ -211,8 +212,8 @@ proc makeHeaders(provider: OpenAIProvider, sessionId = ""): HttpHeaders =
     result["X-Title"] = provider.siteName
   if provider.userAgent.len > 0:
     result["User-Agent"] = provider.userAgent
-  if provider.sessionHeader.len > 0 and sessionId.len > 0:
-    result[provider.sessionHeader] = sessionId
+  if provider.sessionHeader.len > 0 and conversationId.len > 0:
+    result[provider.sessionHeader] = conversationId
 
 proc ensureApiKey(provider: OpenAIProvider) =
   if provider.apiKey.len == 0:
@@ -241,11 +242,11 @@ proc requestBody(provider: OpenAIProvider, request: ProviderRequest,
                  stream: bool): JsonNode =
   if provider.usesResponsesFor(request.model):
     return buildResponsesBody(request, stream)
-  let cacheKey = if provider.promptCacheKey and request.sessionId.len > 0:
-                   "nimgent:" & request.sessionId
+  let cacheKey = if provider.promptCacheKey and request.conversationId.len > 0:
+                   "nimgent:" & request.conversationId
                  else: ""
   buildChatBody(request, stream,
-    includeSessionId = provider.includeSessionId,
+    includeConversationId = provider.includeConversationId,
     applyCache = provider.applyCache,
     maxTokensField = provider.maxTokensField,
     promptCacheKey = cacheKey, reasoning = provider.chatReasoning)
@@ -271,7 +272,7 @@ method generateAsync*(provider: OpenAIProvider,
   let sslContext = newContext(verifyMode = CVerifyPeer)
   let client = newAsyncHttpClient(
     sslContext = sslContext,
-    headers = provider.makeHeaders(request.sessionId))
+    headers = provider.makeHeaders(request.conversationId))
   client.timeout = provider.timeoutSeconds * 1000
   defer:
     client.close()
@@ -365,7 +366,7 @@ method generateStreamAsync*(provider: OpenAIProvider,
   let sslContext = newContext(verifyMode = CVerifyPeer)
   let client = newAsyncHttpClient(
     sslContext = sslContext,
-    headers = provider.makeHeaders(request.sessionId))
+    headers = provider.makeHeaders(request.conversationId))
   client.timeout = provider.timeoutSeconds * 1000
   var watch = WakeWatch()
   defer:

@@ -48,7 +48,7 @@ proc newAgent*(model: LanguageModel, instructions = "",
 
 proc runAsync*(agent: Agent, prompt = "", messages: seq[Message] = @[],
                abort: AbortCheck = nil,
-               callbacks = RunCallbacks(), sessionId = "",
+               callbacks = RunCallbacks(), conversationId = "",
                metadata: JsonNode = nil, turnId = ""): Future[ProviderResponse] {.async.} =
   ## Run until the model finishes, no executable tool calls remain, or
   ## `maxSteps` is reached.
@@ -59,21 +59,21 @@ proc runAsync*(agent: Agent, prompt = "", messages: seq[Message] = @[],
     maxTokens = agent.maxTokens, maxRetries = agent.maxRetries,
     generationOptions = agent.generationOptions,
     maxSteps = agent.maxSteps, abort = abort, callbacks = callbacks,
-    providerOptions = agent.providerOptions, sessionId = sessionId,
+    providerOptions = agent.providerOptions, conversationId = conversationId,
     metadata = metadata, turnId = turnId, toolChoice = agent.toolChoice,
     approvalPolicy = agent.approvalPolicy)
 
 proc run*(agent: Agent, prompt = "", messages: seq[Message] = @[],
           abort: AbortCheck = nil,
-          callbacks = RunCallbacks(), sessionId = "",
+          callbacks = RunCallbacks(), conversationId = "",
           metadata: JsonNode = nil, turnId = ""): ProviderResponse =
   ## Blocking convenience wrapper around `runAsync`.
-  waitFor agent.runAsync(prompt, messages, abort, callbacks, sessionId,
+  waitFor agent.runAsync(prompt, messages, abort, callbacks, conversationId,
     metadata, turnId)
 
 proc streamAsync*(agent: Agent, prompt: string, onEvent: StreamCallback,
                   messages: seq[Message] = @[], abort: AbortCheck = nil,
-                  callbacks = RunCallbacks(), sessionId = "",
+                  callbacks = RunCallbacks(), conversationId = "",
                   metadata: JsonNode = nil, turnId = ""): Future[ProviderResponse] {.async.} =
   ## Stream an agent run. `onEvent` receives normalized model deltas and may
   ## return false to cancel the run.
@@ -86,7 +86,7 @@ proc streamAsync*(agent: Agent, prompt: string, onEvent: StreamCallback,
     maxTokens = agent.maxTokens, maxRetries = agent.maxRetries,
     generationOptions = agent.generationOptions,
     maxSteps = agent.maxSteps, abort = abort, callbacks = callbacks,
-    providerOptions = agent.providerOptions, sessionId = sessionId,
+    providerOptions = agent.providerOptions, conversationId = conversationId,
     metadata = metadata, turnId = turnId, toolChoice = agent.toolChoice,
     onEvent = proc (event: AgentEvent): bool =
       case event.kind
@@ -105,15 +105,15 @@ proc streamAsync*(agent: Agent, prompt: string, onEvent: StreamCallback,
 
 proc stream*(agent: Agent, prompt: string, onEvent: StreamCallback,
              messages: seq[Message] = @[], abort: AbortCheck = nil,
-             callbacks = RunCallbacks(), sessionId = "",
+             callbacks = RunCallbacks(), conversationId = "",
              metadata: JsonNode = nil, turnId = ""): ProviderResponse =
   ## Blocking convenience wrapper around `streamAsync`.
   waitFor agent.streamAsync(prompt, onEvent, messages, abort, callbacks,
-    sessionId, metadata, turnId)
+    conversationId, metadata, turnId)
 
 proc runEventsAsync*(agent: Agent, prompt = "", messages: seq[Message] = @[],
                     abort: AbortCheck = nil,
-                    callbacks = RunCallbacks(), sessionId = "",
+                    callbacks = RunCallbacks(), conversationId = "",
                     metadata: JsonNode = nil, turnId = "",
                     onEvent: AgentEventCallback = nil
                     ): Future[ProviderResponse] {.async.} =
@@ -125,13 +125,13 @@ proc runEventsAsync*(agent: Agent, prompt = "", messages: seq[Message] = @[],
     maxTokens = agent.maxTokens, maxRetries = agent.maxRetries,
     generationOptions = agent.generationOptions,
     maxSteps = agent.maxSteps, abort = abort, callbacks = callbacks,
-    providerOptions = agent.providerOptions, sessionId = sessionId,
+    providerOptions = agent.providerOptions, conversationId = conversationId,
     metadata = metadata, turnId = turnId, toolChoice = agent.toolChoice,
     onEvent = onEvent, approvalPolicy = agent.approvalPolicy)
 
 proc streamAsync*(agent: Agent, prompt: string, onEvent: AgentEventCallback,
                   messages: seq[Message] = @[], abort: AbortCheck = nil,
-                  callbacks = RunCallbacks(), sessionId = "",
+                  callbacks = RunCallbacks(), conversationId = "",
                   metadata: JsonNode = nil, turnId = ""
                   ): Future[ProviderResponse] {.async.} =
   ## Stream an agent run while receiving lifecycle events.
@@ -144,21 +144,21 @@ proc streamAsync*(agent: Agent, prompt: string, onEvent: AgentEventCallback,
     maxTokens = agent.maxTokens, maxRetries = agent.maxRetries,
     generationOptions = agent.generationOptions,
     maxSteps = agent.maxSteps, abort = abort, callbacks = callbacks,
-    providerOptions = agent.providerOptions, sessionId = sessionId,
+    providerOptions = agent.providerOptions, conversationId = conversationId,
     metadata = metadata, turnId = turnId, toolChoice = agent.toolChoice,
     onEvent = onEvent, approvalPolicy = agent.approvalPolicy)
 
 proc stream*(agent: Agent, prompt: string, onEvent: AgentEventCallback,
              messages: seq[Message] = @[], abort: AbortCheck = nil,
-             callbacks = RunCallbacks(), sessionId = "",
+             callbacks = RunCallbacks(), conversationId = "",
              metadata: JsonNode = nil, turnId = ""): ProviderResponse =
   ## Blocking convenience wrapper around the event-aware stream.
   waitFor agent.streamAsync(prompt, onEvent, messages, abort, callbacks,
-    sessionId, metadata, turnId)
+    conversationId, metadata, turnId)
 
 proc events*(agent: Agent, prompt: string, messages: seq[Message] = @[],
              abort: AbortCheck = nil, callbacks = RunCallbacks(),
-             sessionId = "", metadata: JsonNode = nil, turnId = ""
+             conversationId = "", metadata: JsonNode = nil, turnId = ""
              ): AgentEventStream =
   ## Start a pull-based event stream for an agent run.
   if agent.isNil:
@@ -166,4 +166,4 @@ proc events*(agent: Agent, prompt: string, messages: seq[Message] = @[],
   eventStream(proc (callback: AgentEventCallback): Future[ProviderResponse]
               {.closure.} =
     agent.streamAsync(prompt, callback, messages, abort, callbacks,
-      sessionId, metadata, turnId))
+      conversationId, metadata, turnId))

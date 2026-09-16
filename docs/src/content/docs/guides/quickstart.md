@@ -1,189 +1,77 @@
 ---
 title: Quickstart
-description: Send your first model request and build a small tool-using agent.
+description: Build and run your first nimgent agent.
 ---
 
-Use nimgent to send a prompt to a language model, then add typed tools when your
-application needs to do more than return text.
+This guide takes you from an empty Nim file to a running AI agent. By the end,
+you will have a program that sends a question to OpenAI and prints the reply.
 
-## Install
+## 1. Install nimgent
 
-Install nimgent with Nimble and set an API key for the provider you want to use:
+You need Nim 2.0 or later. Install nimgent with Nimble:
 
 ```sh
 nimble install nimgent
+```
+
+## 2. Set your API key
+
+This example uses OpenAI. Set your key in the environment:
+
+```sh
 export OPENAI_API_KEY=...
 ```
 
-This guide uses OpenAI. See [Providers](/nimgent/guides/providers/) for the other
-supported providers and their constructors.
+You can use another provider by changing the provider import, constructor, API
+key, and model ID. See [Providers](/nimgent/guides/providers/) for the setup
+for each supported provider.
 
-## Send your first request
+## 3. Build your first agent
 
-Create `hello.nim`:
+Create `agent.nim`:
 
 ```nim
 import std/os
 import nimgent
+import nimgent/agent
 import nimgent/providers/openai
 
 let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
-let response = generateText(model, prompt = "Say hello in one sentence.")
+let assistant = newAgent(
+  model,
+  instructions = "You are a helpful assistant.")
 
+let response = assistant.run("What is the Nim programming language?")
 echo response.text
 ```
 
-Run it with:
+## 4. Run it
+
+Compile and run the program:
 
 ```sh
-nim c -r hello.nim
+nim c -r agent.nim
 ```
 
-The three pieces are:
+You should see an answer from the model in your terminal. The exact wording
+will vary from one run to the next.
 
-- `openAI(...)` reads your API key and selects OpenAI.
-- `.model("gpt-4o-mini")` selects the model to call.
-- `generateText(...)` sends the prompt and returns the response.
+## What just happened
 
-The generated text is in `response.text`. You can also inspect
-`response.finishReason` and token counts in `response.usage`.
+- `openAI(...)` created an OpenAI provider using `OPENAI_API_KEY`.
+- `.model("gpt-4o-mini")` selected the model to call.
+- `newAgent(...)` combined the model with reusable instructions.
+- `assistant.run(...)` sent a prompt and returned a complete response.
 
-### Add instructions
+The blocking API is a good fit for scripts and command-line programs. Use the
+async APIs when your application already runs Nim's event loop.
 
-Use `system` for instructions that should apply across the request:
+## Next steps
 
-```nim
-let response = generateText(
-  model,
-  system = "You are a concise systems programmer.",
-  prompt = "Explain what a file descriptor is.")
-
-echo response.text
-```
-
-Keep the system instructions focused on the model's role and behavior. Put the
-actual question or task in `prompt`.
-
-## Call a tool with generateText
-
-For a one-off task, pass local tools directly to `generateText`. The model can
-call a tool, read its result, then write its answer in the same request:
-
-```nim
-import std/os
-import nimgent
-import nimgent/providers/openai
-
-type WeatherInput = object
-  city: string
-
-let weather = tool(
-  "get_weather",
-  "Return a sample weather report for a city.",
-  proc (_: ToolContext, input: WeatherInput): string =
-    input.city & ": 16C and cloudy")
-
-let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
-let response = generateText(
-  model,
-  prompt = "Should I bring an umbrella to Paris?",
-  tools = @[weather],
-  maxSteps = 5)
-
-echo response.text
-```
-
-The `WeatherInput` type describes the tool's input. The model can request
-`get_weather` with a city, your handler runs, and the result is sent back so the
-model can finish its answer.
-
-`maxSteps` limits how many model steps one request can take. The
-limit prevents an accidental tool loop from running forever.
-
-## Make a simple agent
-
-Use an `Agent` when you want to reuse the same model, instructions, and tools
-across many requests. It keeps the setup in one value, so each call only needs
-the new task.
-
-Add `nimgent/agent` to the imports above, then replace the `generateText` call
-with this:
-
-```nim
-let researcher = newAgent(
-  model,
-  instructions = "You are a concise research assistant.",
-  tools = @[weather],
-  maxSteps = 5)
-
-let first = researcher.run("What's the weather like in Paris?")
-let second = researcher.run("What's the weather like in Tokyo?")
-
-echo first.text
-echo second.text
-```
-
-## Keep a conversation with a session
-
-Without a session, each agent run starts fresh. Use a session when a follow-up
-question needs the earlier prompt, answer, or tool result:
-
-```nim
-import nimgent/session
-
-let conversation = newSession(researcher)
-discard conversation.run("What's the weather like in Paris?")
-let response = conversation.run("What should I wear?")
-
-echo response.text
-```
-
-The second request includes the earlier weather result, so the model can answer
-the follow-up without asking for the city again. See [Sessions](/nimgent/guides/sessions/)
-to persist or inspect a conversation.
-
-## Use nimgent asynchronously
-
-The `Async` form fits servers and applications that already use Nim's event
-loop:
-
-```nim
-import std/[asyncdispatch, os]
-import nimgent
-import nimgent/providers/openai
-
-let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
-
-proc main() {.async.} =
-  let response = await generateTextAsync(model, prompt = "Say hello.")
-  echo response.text
-
-waitFor main()
-```
-
-Use the blocking helpers for scripts and command-line programs. Do not call
-them from inside an existing async event loop.
-
-## Use another provider
-
-The request and agent code stays the same when you switch providers. Change the
-import, constructor, API key, and model id:
-
-```nim
-import std/os
-import nimgent
-import nimgent/providers/anthropic
-
-let model = anthropic(getEnv("ANTHROPIC_API_KEY")).model("claude-sonnet-4-6")
-let response = generateText(model, prompt = "Say hello.")
-
-echo response.text
-```
-
-## Where to go next
-
-- [Providers](/nimgent/guides/providers/): choose a provider and configure its options.
-- [Streaming](/nimgent/guides/streaming/): display text as it arrives.
-- [Tools and agents](/nimgent/guides/tools-and-agents/): handle richer tools, failures, and approvals.
-- [Structured output](/nimgent/guides/structured-output/): receive validated Nim values.
-- [Sessions](/nimgent/guides/sessions/): keep a transcript across runs.
+- [Tools and agents](/nimgent/guides/tools-and-agents/): let the model call typed Nim functions.
+- [Streaming](/nimgent/guides/streaming/): render text, tool calls, and agent events as they arrive.
+- [Structured output](/nimgent/guides/structured-output/): decode model responses into validated Nim values.
+- [Embeddings & RAG](/nimgent/guides/embeddings-rag/): build RAG applications over your own documents.
+- [Conversations](/nimgent/guides/conversations/): keep conversation history across requests.
+- [Providers](/nimgent/guides/providers/): switch providers and configure provider-specific options.
+- [Examples](/nimgent/examples/): copy complete programs for common tasks.

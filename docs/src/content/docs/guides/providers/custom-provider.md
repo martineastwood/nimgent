@@ -3,7 +3,10 @@ title: Custom provider
 description: Connect nimgent to a model API that does not have a built-in provider.
 ---
 
-You can add support for another model API by defining a subtype of `Provider`. Once it returns normalized nimgent responses, your provider works with `generateText`, agents, sessions, tools, retries, and structured output.
+Add a custom provider when nimgent does not include the model API you need.
+Translate the vendor's requests and responses into nimgent's types, then use the
+model with the same generation, streaming, tool, retry, and structured-output
+APIs as a built-in provider.
 
 ## Build a minimal provider
 

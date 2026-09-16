@@ -2,7 +2,7 @@
 
 nimgent is a Nim SDK for building applications with language models and
 embeddings. It gives you a typed, provider-neutral API for text generation,
-streaming, tools, structured output, agents, sessions, retrieval, and MCP
+streaming, tools, structured output, agents, conversations, retrieval, and MCP
 clients.
 
 You can use the same generation code with OpenAI, Anthropic, Google Gemini,
@@ -143,12 +143,12 @@ for schema annotations, native provider modes, and repairs.
 ## Build agents and conversations
 
 Use an `Agent` to reuse a model, instructions, tools, and step limit. Add a
-`Session` when follow-up turns should include earlier conversation history:
+`Conversation` when follow-up turns should include earlier conversation history:
 
 ```nim
 import std/os
 import nimgent
-import nimgent/[agent, session]
+import nimgent/[agent, conversation]
 import nimgent/providers/openai
 
 let assistant = newAgent(
@@ -156,25 +156,25 @@ let assistant = newAgent(
   instructions = "You are a concise research assistant.",
   maxSteps = 5)
 
-let conversation = newSession(assistant)
-discard conversation.run("My name is Nim.")
-echo conversation.run("What is my name?").text
+let chat = newConversation(assistant)
+discard chat.run("My name is Nim.")
+echo chat.run("What is my name?").text
 ```
 
 A long conversation keeps growing. Use `historyLimit` to send only the most
-recent messages to the model. It counts messages, not turns, and the session
+recent messages to the model. It counts messages, not turns, and the conversation
 still keeps the full transcript:
 
 ```nim
-let conversation = newSession(assistant, historyLimit = 20)
+let chat = newConversation(assistant, historyLimit = 20)
 ```
 
 When the model still needs older context, you summarize it yourself: read the
 transcript with `messages` and install a shorter one with `replaceEvents`.
 
 Agent runs have blocking and async forms, plus normalized events for rendering
-text, thinking, tool calls, and approvals. Sessions can be serialized and
-restored with the same agent configuration. See the [sessions guide](https://martineastwood.github.io/nimgent/guides/sessions/)
+text, thinking, tool calls, and approvals. Conversations can be serialized and
+restored with the same agent configuration. See the [conversations guide](https://martineastwood.github.io/nimgent/guides/conversations/)
 and [agent examples](https://martineastwood.github.io/nimgent/examples/agent/).
 
 ## Embeddings and retrieval
@@ -196,7 +196,7 @@ echo cosineSimilarity(result.embeddings[0], result.embeddings[1])
 ```
 
 The optional `nimgent/vector_store` module provides an in-memory vector store
-with search, metadata, and JSON save/load. Read [Embeddings and retrieval](https://martineastwood.github.io/nimgent/guides/embeddings-and-retrieval/)
+with search, metadata, and JSON save/load. Read [Embeddings & RAG](https://martineastwood.github.io/nimgent/guides/embeddings-rag/)
 for a complete retrieval example.
 
 ## Providers
@@ -224,10 +224,14 @@ explains both.
 - [Files and images](https://martineastwood.github.io/nimgent/guides/files-and-images/): ask questions about PDFs and images.
 - [MCP clients](https://martineastwood.github.io/nimgent/guides/mcp/): discover remote tools, resources, prompts, and tasks.
 - [Middleware and routing](https://martineastwood.github.io/nimgent/guides/middleware-and-routing/): wrap providers or choose one from a model ID.
-- [Errors and retries](https://martineastwood.github.io/nimgent/guides/errors-and-retries/): handle cancellation, rate limits, and context overflow.
-- [Tracing](https://martineastwood.github.io/nimgent/guides/tracing/): observe model runs, tools, retries, and embeddings without recording content.
+- [Error Handling](https://martineastwood.github.io/nimgent/guides/error-handling/): handle cancellation, rate limits, and context overflow.
+- [Observability](https://martineastwood.github.io/nimgent/guides/observability/): observe model runs, tools, retries, and embeddings without recording content.
 - [Testing](https://martineastwood.github.io/nimgent/guides/testing/): use deterministic scripted models without an API key or network access.
 - [Examples](https://martineastwood.github.io/nimgent/examples/): copyable programs for common tasks.
 - [API reference](https://martineastwood.github.io/nimgent/reference/core-api/): core types and the generated procedure reference.
 
 For a guided first project, start with the [Quickstart](https://martineastwood.github.io/nimgent/guides/quickstart/).
+
+## License
+
+MIT. See [LICENSE](LICENSE).

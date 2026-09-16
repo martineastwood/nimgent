@@ -9,11 +9,11 @@ export default defineConfig({
 	integrations: [
 		starlight({
 			title: 'nimgent',
-			description: 'A lightweight Nim client for provider-native LLM applications.',
+			description: 'A Nim SDK for LLM apps and agents: one typed API across providers, with streaming, typed tools, and structured output.',
 			customCss: ['./src/styles/sidebar.css'],
 			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/martineastwood/nimgent' }],
 			sidebar: [
-				{ label: 'Introduction', slug: 'index' },
+				{ label: 'Introduction', slug: 'introduction' },
 				{ label: 'Quickstart', slug: 'guides/quickstart' },
 				{
 					label: 'Providers',
@@ -32,15 +32,15 @@ export default defineConfig({
 					],
 				},
 				{ label: 'Streaming', slug: 'guides/streaming' },
-				{ label: 'Tracing', slug: 'guides/tracing' },
+				{ label: 'Observability', slug: 'guides/observability' },
 				{ label: 'Tools and agents', slug: 'guides/tools-and-agents' },
 				{ label: 'Structured output', slug: 'guides/structured-output' },
-				{ label: 'Sessions', slug: 'guides/sessions' },
+				{ label: 'Conversations', slug: 'guides/conversations' },
 				{ label: 'Files and images', slug: 'guides/files-and-images' },
 				{ label: 'MCP tools', slug: 'guides/mcp' },
-				{ label: 'Embeddings and retrieval', slug: 'guides/embeddings-and-retrieval' },
+				{ label: 'Embeddings & RAG', slug: 'guides/embeddings-rag' },
 				{ label: 'Middleware and routing', slug: 'guides/middleware-and-routing' },
-				{ label: 'Errors and retries', slug: 'guides/errors-and-retries' },
+				{ label: 'Error Handling', slug: 'guides/error-handling' },
 				{ label: 'Testing', slug: 'guides/testing' },
 				{
 					label: 'API reference',
@@ -64,7 +64,7 @@ export default defineConfig({
 						{ label: 'Lifecycle callbacks', slug: 'examples/lifecycle-callbacks' },
 						{ label: 'Structured output', slug: 'examples/structured-output' },
 						{ label: 'Stream object', slug: 'examples/stream-object' },
-						{ label: 'Session', slug: 'examples/session' },
+						{ label: 'Conversation', slug: 'examples/conversation' },
 						{ label: 'Embeddings', slug: 'examples/embeddings' },
 						{ label: 'Provider options', slug: 'examples/provider-options' },
 						{ label: 'Wrap provider', slug: 'examples/wrap-provider' },

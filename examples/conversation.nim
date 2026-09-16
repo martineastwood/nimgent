@@ -1,10 +1,10 @@
-## Agent session example — keep a conversation across multiple agent turns.
+## Agent conversation example - keep a conversation across multiple agent turns.
 ##
-##   OPENAI_API_KEY=... nim c -r examples/session.nim
+##   OPENAI_API_KEY=... nim c -r examples/conversation.nim
 
 import std/[asyncdispatch, os]
 import nimgent
-import nimgent/[agent, session]
+import nimgent/[agent, conversation]
 import nimgent/providers/openai
 
 type WeatherInput = object
@@ -20,21 +20,21 @@ let researcher = newAgent(
   maxSteps = 5)
 
 # `historyLimit` counts messages, not turns, so a turn with tool calls uses
-# several. The transcript keeps every turn, so the session can still be saved
+# several. The transcript keeps every turn, so the conversation can still be saved
 # in full.
-let conversation = newSession(researcher, id = "weather-demo", historyLimit = 20)
+let chat = newConversation(researcher, id = "weather-demo", historyLimit = 20)
 
 proc main() {.async.} =
-  let first = await conversation.runAsync("What's the weather like in Paris?")
+  let first = await chat.runAsync("What's the weather like in Paris?")
   echo "assistant: ", first.text
-  echo "session: ", conversation.id
-  echo "events: ", conversation.events.len
+  echo "conversation: ", chat.id
+  echo "events: ", chat.events.len
 
   # A snapshot contains the transcript and lifecycle state, but not the
   # agent's credentials or tool callbacks. Rehydrate it with the agent.
-  let snapshot = conversation.sessionJsonString
-  let resumed = sessionFromJson(researcher, snapshot)
-  echo "restored session: ", resumed.id
+  let snapshot = chat.conversationJsonString
+  let resumed = conversationFromJson(researcher, snapshot)
+  echo "restored conversation: ", resumed.id
 
   let second = await resumed.runAsync(
     "Based on that weather, what should I wear? Keep it brief.")
@@ -49,7 +49,7 @@ proc main() {.async.} =
   let summary = (await generateTextAsync(summarizer,
     messages = resumed.events[0 ..< cut].messages,
     system = "Summarize the conversation for future turns.")).text
-  resumed.replaceEvents(@[SessionEvent(kind: sekUser,
+  resumed.replaceEvents(@[ConversationEvent(kind: cekUser,
       message: userMessage("Conversation so far, summarized:\n" & summary))] &
     resumed.events[cut .. ^1])
   echo "events after compaction: ", resumed.events.len

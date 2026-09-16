@@ -1,11 +1,13 @@
 ---
-title: Tracing
+title: Observability
 description: Observe model runs, tools, retries, and embeddings with a small callback.
 ---
 
-Tracing lets you see how a request moved through nimgent without recording the
-prompt or model response. You receive completed spans that you can print, save,
-or forward to your telemetry system.
+Use nimgent's observability callbacks to inspect model runs, agent steps, tool
+calls, retries, and embedding operations as they complete. Each callback
+receives a completed span with timing, status, and operation metadata that you
+can print, save, or forward to your telemetry system. Prompts, messages, tool
+arguments, tool output, and model output are excluded by default.
 
 ## Capture spans
 
@@ -64,8 +66,9 @@ on the span, it can include:
 - retry status and delay
 
 Built-in spans do not include prompts, messages, tool arguments, tool output, or
-model output. Session IDs and turn IDs are included when your request supplies
+model output. Conversation IDs and turn IDs are included when your request supplies
 them, so treat those values according to your application's privacy rules.
+Run spans expose them as `conversation_id` and `turn_id` attributes.
 
 ## Trace agents and streams
 
@@ -75,7 +78,7 @@ Use the same callback with an `Agent`, `streamText`, or an agent event stream:
 let response = researcher.run(
   "Find the answer.",
   callbacks = RunCallbacks(trace: trace),
-  sessionId = "research-session")
+  conversationId = "research-session")
 ```
 
 Streaming runs use the same spans. The model span stays open until the provider
@@ -120,11 +123,11 @@ telemetry matters to you.
 
 - **No spans appear:** Pass the sink through `RunCallbacks(trace: trace)` for text, agent, and streaming calls. Pass it through `trace = trace` for embeddings and structured output.
 - **The run is missing from the list:** Spans are delivered when they complete. The run span arrives after its child spans.
-- **Sensitive data appears in your records:** Check the fields your sink forwards and any session or turn IDs you provide.
+- **Sensitive data appears in your records:** Check the fields your sink forwards and any conversation or turn IDs you provide.
 - **Tracing slows down a stream:** Avoid blocking network or disk writes in the callback, or queue the span for later delivery.
 
 ## Next steps
 
-See [Errors and retries](/nimgent/guides/errors-and-retries/) for retry behavior, or
+See [Error Handling](/nimgent/guides/error-handling/) for retry behavior, or
 [Testing](/nimgent/guides/testing/) for deterministic model calls you can use to test
 your tracing code.

@@ -27,7 +27,7 @@ The examples cover:
 - [Lifecycle callbacks](./lifecycle-callbacks): monitor retries, tools, and steps.
 - [Structured output](./structured-output): decode a response into a Nim object.
 - [Stream object](./stream-object): receive partial structured output.
-- [Session](./session): continue and serialize a conversation.
+- [Conversation](./conversation): continue and serialize a conversation.
 - [Embeddings](./embeddings): create vectors and compare similarity.
 - [Provider options](./provider-options): configure provider-specific settings.
 - [Wrap provider](./wrap-provider): add request and response hooks.
