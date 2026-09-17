@@ -34,6 +34,7 @@ proc flushUserContent(result: var JsonNode, parts: var seq[JsonNode]) =
 
 proc addUserMessages(result: var JsonNode, message: Message) =
   var parts: seq[JsonNode] = @[]
+  var toolImages: seq[JsonNode] = @[]
   for part in message.content:
     case part.kind
     of ckText:
@@ -49,18 +50,21 @@ proc addUserMessages(result: var JsonNode, message: Message) =
       flushUserContent(result, parts)
       result.add %*{"role": "tool", "tool_call_id": part.toolUseId,
         "content": part.output}
-      if part.images.len > 0:
-        var imgParts = newJArray()
-        imgParts.add %*{"type": "text", "text": "(image from tool)"}
-        for img in part.images:
-          imgParts.add openAiImagePart(img.mimeType, img.data)
-        result.add %*{"role": "user", "content": imgParts}
+      for img in part.images:
+        toolImages.add openAiImagePart(img.mimeType, img.data)
     else:
       discard
   if parts.len > 0:
     flushUserContent(result, parts)
   elif message.content.len == 0:
     result.add %*{"role": "user", "content": ""}
+  # Tool images trail every tool message: a user message between them leaves
+  # strict hosts (GLM and friends) too few tool messages after `tool_calls`.
+  if toolImages.len > 0:
+    var imgParts = newJArray()
+    imgParts.add %*{"type": "text", "text": "(image from tool)"}
+    for img in toolImages: imgParts.add img
+    result.add %*{"role": "user", "content": imgParts}
 
 proc keepChatReasoningDetail(item: JsonNode): bool =
   ## Unsigned Anthropic text details 400 on replay. Other types/formats are fine.

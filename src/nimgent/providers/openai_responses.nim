@@ -73,6 +73,7 @@ proc flushResponsesUser(input: var JsonNode, parts: var seq[JsonNode]) =
 proc addResponsesItems(input: var JsonNode, message: Message) =
   if message.role == roleUser:
     var parts: seq[JsonNode] = @[]
+    var toolImages: seq[JsonNode] = @[]
     for part in message.content:
       case part.kind
       of ckText:
@@ -86,18 +87,20 @@ proc addResponsesItems(input: var JsonNode, message: Message) =
         flushResponsesUser(input, parts)
         input.add %*{"type": "function_call_output", "call_id": part.toolUseId,
           "output": part.output}
-        if part.images.len > 0:
-          var imgParts = newJArray()
-          imgParts.add %*{"type": "input_text", "text": "(image from tool)"}
-          for img in part.images:
-            imgParts.add responsesImagePart(img.mimeType, img.data)
-          input.add %*{"role": "user", "content": imgParts}
+        for img in part.images:
+          toolImages.add responsesImagePart(img.mimeType, img.data)
       else:
         discard
     if parts.len > 0:
       flushResponsesUser(input, parts)
     elif message.content.len == 0:
       input.add %*{"role": "user", "content": [{"type": "input_text", "text": ""}]}
+    # Tool images trail every function_call_output, same as the Chat encoder.
+    if toolImages.len > 0:
+      var imgParts = newJArray()
+      imgParts.add %*{"type": "input_text", "text": "(image from tool)"}
+      for img in toolImages: imgParts.add img
+      input.add %*{"role": "user", "content": imgParts}
     return
 
   var i = 0

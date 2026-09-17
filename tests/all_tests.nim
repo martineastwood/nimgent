@@ -1353,6 +1353,37 @@ suite "encoding":
     check body["messages"][1]["content"].getStr == ""
     check "tool_calls" notin body["messages"][1]
 
+  test "tool images trail every tool message":
+    let imgs = @[ImageContent(mimeType: "image/png", data: "QUJD")]
+    let req = ProviderRequest(
+      model: "m",
+      messages: @[
+        userMessage("look"),
+        Message(role: roleAssistant, content: @[
+          toolUse("call_1", "read", %*{"path": "a.png"}),
+          toolUse("call_2", "read", %*{"path": "b.png"})]),
+        userMessage(@[
+          toolResult("call_1", "a.png", images = imgs),
+          toolResult("call_2", "b.png", images = imgs)])
+      ],
+      maxTokens: 10)
+    let chat = buildChatBody(req, stream = false)["messages"]
+    check chat[1]["tool_calls"].len == 2
+    check chat[2]["role"].getStr == "tool"
+    check chat[2]["tool_call_id"].getStr == "call_1"
+    check chat[3]["role"].getStr == "tool"
+    check chat[3]["tool_call_id"].getStr == "call_2"
+    check chat[4]["role"].getStr == "user"
+    check chat[4]["content"].len == 3
+    check chat.len == 5
+    let responses = buildResponsesBody(req, stream = false)["input"]
+    check responses[3]["type"].getStr == "function_call_output"
+    check responses[3]["call_id"].getStr == "call_1"
+    check responses[4]["type"].getStr == "function_call_output"
+    check responses[4]["call_id"].getStr == "call_2"
+    check responses[5]["role"].getStr == "user"
+    check responses.len == 6
+
 suite "files, sources, hosted tools":
   test "file parts encode on Anthropic, Responses, and Chat":
     let blocks = @[text("see"), file("application/pdf", "QUJD", filename = "spec.pdf")]
