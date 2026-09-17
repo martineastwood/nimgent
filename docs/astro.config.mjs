@@ -8,8 +8,8 @@ export default defineConfig({
 	integrations: [
 		starlight({
 			title: 'nimgent',
-			description: 'A Nim SDK for LLM apps and agents: one typed API across providers, with streaming, typed tools, and structured output.',
-			customCss: ['./src/styles/sidebar.css'],
+			description: 'A native Nim library for LLM apps and agents. Streaming, typed tools, structured output, and one API across providers.',
+			customCss: ['./src/styles/sidebar.css', './src/styles/landing.css'],
 			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/martineastwood/nimgent' }],
 			sidebar: [
 				{ label: 'Introduction', slug: 'introduction' },
@@ -74,9 +74,7 @@ export default defineConfig({
 					],
 				},
 			],
-			plugins: [
-				starlightThemeNext(),
-			],
+			plugins: [starlightThemeNext()],
 		}),
 	],
 });
