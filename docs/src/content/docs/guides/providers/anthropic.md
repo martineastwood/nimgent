@@ -37,6 +37,17 @@ let response = generateText(
 
 `EnabledThinking` requires `budgetTokens`, and the minimum budget is `1024`. Use `AdaptiveThinking` when you want Anthropic to choose the thinking budget.
 
+You can also set a portable reasoning level through `GenerationOptions` instead
+of Anthropic-specific options. See [Settings](/guides/providers/settings/).
+
+## Prompt caching
+
+Anthropic requests automatically include cache breakpoints on the last tool
+definition, the last system block, and the last message content. You do not need
+to call anything extra to enable this. Caching only helps when repeated requests
+reuse the same prefix, such as a long system prompt or tool list across turns in
+a conversation.
+
 ## Next steps
 
 See [Settings](/guides/providers/settings/) for portable controls, or [Structured output](/guides/structured-output/) for typed results.

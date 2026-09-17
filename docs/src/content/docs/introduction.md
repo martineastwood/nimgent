@@ -103,7 +103,8 @@ Return `false` from a stream callback when you need to cancel the request.
 
 Declare a Nim input type and pass a `tool` to `generateText` or an agent. The
 model receives the generated schema, and your handler receives a decoded Nim
-value when the tool is called.
+value when the tool is called. Handlers can be async, run in parallel when
+marked `parallel = true`, and read session context from `ToolContext`.
 
 ### Receive structured output
 

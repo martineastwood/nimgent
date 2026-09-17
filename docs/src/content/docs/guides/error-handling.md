@@ -105,7 +105,9 @@ discard streamText(model, prompt = "List ten ideas.", onEvent =
 )
 ```
 
-Cancellation is cooperative for local tools. If a tool does long-running work, check `context.abort()` during that work so it can stop promptly.
+Cancellation is cooperative for local tools. If a tool does long-running work,
+check `context.abort()` during that work so it can stop promptly. See
+[Tools and agents](/guides/tools-and-agents/) for `ToolContext`.
 
 ## Other errors you may see
 

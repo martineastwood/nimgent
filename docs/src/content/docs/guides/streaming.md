@@ -140,10 +140,93 @@ let response = researcher.stream(
     true)
 ```
 
-`researcher` can be any `Agent` you created with `newAgent`. Use
-`researcher.events(...)` when your interface also needs approval requests, run
-boundaries, tool results, or errors. See [Tools and agents](/guides/tools-and-agents/)
-for that flow.
+`researcher` can be any `Agent` you created with `newAgent`. The callback above
+receives only model deltas. Use the pull-based event API when your interface
+also needs approval requests, run boundaries, tool results, or errors.
+
+## Observe the full agent lifecycle
+
+`events` starts an agent run in the background and lets you read lifecycle
+events from a queue. This is a good fit for chat UIs, approval dialogs, and
+event loops that already process other input:
+
+```nim
+import std/[asyncdispatch, os]
+import nimgent/agent
+import nimgent/providers/openai
+
+let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
+let researcher = newAgent(model, instructions = "Be concise.")
+
+let events = researcher.events("Plan a picnic in Paris.")
+while true:
+  let item = waitFor events.read()
+  if not item[0]: break
+  let event = item[1]
+  case event.kind
+  of aeTextDelta:
+    stdout.write event.text
+  of aeToolCall:
+    echo "\nCalling ", event.call.name
+  of aeToolResult:
+    echo "\nTool finished in ", event.durationMs, "ms"
+  of aeRunFinish:
+    echo "\nDone: ", event.response.finishReason
+  else:
+    discard
+
+let response = waitFor events.result
+```
+
+`read` returns `(false, _)` when the stream closes. `events.result` completes
+with the final `ProviderResponse` or raises the same error that ended the run.
+
+| Event | When it arrives |
+| --- | --- |
+| `aeRunStart` | The run begins. |
+| `aeStepStart` | A new model step starts. |
+| `aeTextDelta` / `aeThinkingDelta` | Text or reasoning arrives. |
+| `aeToolCall` | The model requested a tool. |
+| `aeToolApprovalRequired` | A tool is waiting for approval. |
+| `aeToolResult` | A tool finished. |
+| `aeStepFinish` | A model step completed. |
+| `aeRunFinish` | The run completed successfully. |
+| `aeError` | The run failed. |
+
+You can also call `model.events(...)` on a `LanguageModel` or `chat.events(...)`
+on a `Conversation` when you are not using an `Agent` wrapper. See
+[Agent events](/examples/agent-events/) for approval handling.
+
+## Cancel while waiting on the provider
+
+Streaming checks cancellation between events, but a provider may block for a
+long time before the next chunk arrives. Pass `wakeFd` with a readable file
+descriptor, such as a pipe or eventfd, and nimgent emits `seWake` events while
+waiting so your callback can return `false` promptly:
+
+```nim
+import std/posix
+
+var stopRequested = false
+var fds: array[2, cint]
+pipe(fds)
+let wakeFd = fds[0]
+
+discard streamText(
+  model,
+  prompt = "Write a long story.",
+  wakeFd = wakeFd,
+  onEvent = proc (event: StreamEvent): bool =
+    if event.kind == seTextDelta:
+      stdout.write event.text
+    elif event.kind == seWake and stopRequested:
+      return false
+    true)
+```
+
+Write one byte to the write end of the pipe when your UI or signal handler
+wants the stream to notice cancellation. This is most useful in interactive
+applications that already multiplex other input alongside model output.
 
 ## Troubleshooting
 

@@ -85,6 +85,109 @@ let forecast = tool(
 nimgent serializes the returned value for the model. Your handler receives only
 inputs that match the declared type.
 
+## Run async tools
+
+When a tool needs to await network or database work, return a `Future` from the
+handler instead of blocking the tool loop:
+
+```nim
+import std/[asyncdispatch, os]
+import nimgent
+import nimgent/providers/openai
+
+type LookupInput = object
+  city: string
+
+let lookup = tool(
+  "get_forecast",
+  "Look up the current forecast for a city.",
+  proc (context: ToolContext, input: LookupInput): Future[string] {.async.} =
+    await sleepAsync(50)
+    input.city & ": 16C and cloudy")
+
+proc main() {.async.} =
+  let model = openAI(getEnv("OPENAI_API_KEY")).model("gpt-4o-mini")
+  let response = await generateTextAsync(
+    model,
+    prompt = "What should I wear in Paris?",
+    tools = @[lookup],
+    maxSteps = 5)
+  echo response.text
+
+waitFor main()
+```
+
+When every tool in a step sets `parallel = true`, nimgent runs those calls
+concurrently. Tools without `parallel` still run one at a time:
+
+```nim
+let fastLookup = tool(
+  "get_forecast",
+  "Look up the current forecast for a city.",
+  proc (_: ToolContext, input: LookupInput): Future[string] {.async.} =
+    await sleepAsync(50)
+    input.city & ": 16C and cloudy",
+  parallel = true)
+```
+
+Use parallel tools for independent I/O. Keep order-sensitive or shared-state
+work on the default sequential path.
+
+## Use runtime schemas
+
+`rawTool` and `rawAsyncTool` are the escape hatch when the schema comes from
+configuration or another service at runtime. Pass a JSON Schema and receive
+`JsonNode` arguments:
+
+```nim
+import std/json
+
+let deleteTool = rawTool(
+  "delete_file",
+  "Delete a file at the given path.",
+  %*{
+    "type": "object",
+    "properties": {"path": {"type": "string"}},
+    "required": ["path"]
+  },
+  proc (_: ToolContext, input: JsonNode): ToolResult =
+    ToolResult(output: "deleted " & input["path"].getStr))
+```
+
+Typed `tool[Input, Output]` is still the better default when you know the
+shape at compile time.
+
+## Pass context into tools
+
+Every tool handler receives a `ToolContext` with the current call identity and
+cancellation hook:
+
+| Field | Use it for |
+| --- | --- |
+| `callId` | Correlate logs, traces, and approvals with one tool call. |
+| `conversationId` | Tie a tool back to a conversation or session. |
+| `turnId` | Distinguish one user turn inside a conversation. |
+| `abort` | Return `true` during long work to stop promptly when the run is cancelled. |
+| `metadata` | Pass application data from the request into the handler. |
+
+Pass `conversationId`, `turnId`, and `metadata` on the generation call or
+agent run:
+
+```nim
+let response = generateText(
+  model,
+  prompt = "Look up the weather in Paris.",
+  tools = @[weather],
+  conversationId = "user-42",
+  turnId = "turn-7",
+  metadata = %*{"tenant": "demo"},
+  maxSteps = 5)
+```
+
+Inside the handler, read `context.conversationId`, `context.turnId`, and
+`context.metadata`. For long-running work, poll `context.abort()` and stop when
+it returns `true`.
+
 ## Handle tool failures
 
 Tool errors become results the model can read. This lets it retry with different
@@ -187,13 +290,25 @@ or cancellation.
 
 Use `approvalPolicy` for actions that need a person to approve them. Return
 `tamAsk` for calls that should pause, `tamAllow` for safe calls, or `tamDeny`
-to reject a call immediately. For an existing `deleteFile` tool in your
-application:
+to reject a call immediately:
 
 ```nim
+import std/json
+
+let deleteTool = rawTool(
+  "delete_file",
+  "Delete a file at the given path.",
+  %*{
+    "type": "object",
+    "properties": {"path": {"type": "string"}},
+    "required": ["path"]
+  },
+  proc (_: ToolContext, input: JsonNode): ToolResult =
+    ToolResult(output: "deleted " & input["path"].getStr))
+
 let cleaner = newAgent(
   model,
-  tools = @[deleteFile],
+  tools = @[deleteTool],
   approvalPolicy = proc (_: int, call: ContentBlock, _: Tool): ToolApproval =
     if call.name == "delete_file":
       ToolApproval(mode: tamAsk, reason: "This deletes a file.")
@@ -204,7 +319,8 @@ let cleaner = newAgent(
 When a call needs approval, `cleaner.events(...)` emits
 `aeToolApprovalRequired`. Call `event.approval.approve()` or
 `event.approval.deny()` from your event handler. No tool from that batch runs
-until you decide.
+until you decide. See [Agent events](/examples/agent-events/) for a complete
+pull-based approval flow.
 
 ## Use provider-hosted tools
 

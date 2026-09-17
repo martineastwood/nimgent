@@ -36,6 +36,24 @@ Pass `settings` to `embed` or `embedMany` as `providerOptions`. Use a task type 
 
 For a Google-native setting without a typed option, use `ProviderOptions.extra` with the `google` namespace.
 
+## Use hosted tools
+
+Gemini can run some tools on Google's side, such as web search and URL context.
+Declare them with `hostedTool` and let the model decide when to use them:
+
+```nim
+let response = generateText(
+  model,
+  prompt = "Find the Nim language homepage.",
+  tools = @[hostedTool("web_search"), hostedTool("url_context")],
+  maxSteps = 3)
+```
+
+Responses can include `ckSource` blocks with citation titles and URLs. See
+[Files and images](/guides/files-and-images/) for printing sources, or the
+[Google smoke test](/examples/google-smoke/) example.
+
 ## Next steps
 
-See [Settings](/guides/providers/settings/) for portable controls, or [Tools and agents](/guides/tools-and-agents/) for provider-hosted tools such as web search.
+See [Settings](/guides/providers/settings/) for portable controls, or
+[Tools and agents](/guides/tools-and-agents/) for local and hosted tools.

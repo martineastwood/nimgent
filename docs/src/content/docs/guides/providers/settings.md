@@ -31,6 +31,30 @@ echo response.text
 
 Providers translate these controls to their own API format. A provider can still reject a setting that its selected model does not support.
 
+## Set reasoning depth
+
+Use `GenerationOptions.reasoning` for a portable thinking level such as `low`,
+`medium`, or `high`. nimgent maps it to the wire format each provider expects:
+
+```nim
+import std/[options, os]
+import nimgent
+import nimgent/providers/openai
+
+let response = generateText(
+  openAI(getEnv("OPENAI_API_KEY")).model("gpt-4.1-mini"),
+  prompt = "Solve this carefully.",
+  generationOptions = GenerationOptions(reasoning: some("high")))
+```
+
+For provider-specific thinking controls, combine portable reasoning with typed
+options. On Anthropic, for example, `AdaptiveThinking` lets Claude choose its
+own budget while `EnabledThinking` requires an explicit `budgetTokens` value.
+See [Anthropic](/guides/providers/anthropic/) for those settings.
+
+When you build provider bodies directly, `thinkingOptions(provider, level)`
+returns the JSON fragment for a named provider and level.
+
 ## Set a provider-specific option
 
 Put settings that only apply to one provider in its `ProviderOptions` namespace.

@@ -30,12 +30,54 @@ generateText(model, prompt = "Hello")
 generateTextAsync(model, prompt = "Hello")
 streamText(model, prompt = "Hello", onEvent = callback)
 streamTextAsync(model, prompt = "Hello", onEvent = callback)
+generateAgentTextAsync(model, prompt = "Hello", tools = tools, maxSteps = 5)
+streamAgentTextAsync(model, prompt = "Hello", onEvent = agentCallback, maxSteps = 5)
 ```
 
 The response exposes `text`, `content`, `usage`, `finishReason`, `requestId`,
 and `steps`. A multi-turn tool run aggregates usage in `totalUsage`.
 Pass portable generation controls through `generationOptions` and provider
 extensions through `providerOptions`; see [Providers](/guides/providers/).
+
+`generateAgentTextAsync` and `streamAgentTextAsync` run the model-tool loop
+without an `Agent` wrapper. Prefer `newAgent` when you want reusable
+configuration.
+
+## Session identity
+
+Pass `conversationId`, `turnId`, and `metadata` on generation, streaming, and
+agent calls to correlate runs, traces, and tool handlers:
+
+```nim
+generateText(
+  model,
+  prompt = "Hello",
+  conversationId = "chat-1",
+  turnId = "turn-3",
+  metadata = %*{"user": "ada"})
+```
+
+Tool handlers receive the same values on `ToolContext`. See
+[Tools and agents](/guides/tools-and-agents/).
+
+## Agent events
+
+Start a pull-based lifecycle stream with `events`:
+
+```nim
+import nimgent/agent
+
+let stream = researcher.events("Plan a picnic.")
+let item = waitFor stream.read()
+if item[0]:
+  case item[1].kind
+  of aeTextDelta: stdout.write item[1].text
+  else: discard
+let response = waitFor stream.result
+```
+
+`events` is also available on `LanguageModel` and `Conversation`. See
+[Streaming](/guides/streaming/) for the event kinds and approval flow.
 
 ## Observability
 

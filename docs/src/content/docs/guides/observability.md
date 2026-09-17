@@ -70,6 +70,36 @@ model output. Conversation IDs and turn IDs are included when your request suppl
 them, so treat those values according to your application's privacy rules.
 Run spans expose them as `conversation_id` and `turn_id` attributes.
 
+## Use lifecycle callbacks
+
+`RunCallbacks` also exposes hooks for retries, tool timing, step completion,
+and the final response. These are separate from tracing spans and are useful for
+progress UI and application logging:
+
+```nim
+let response = generateText(
+  model,
+  prompt = "Summarize this report.",
+  tools = @[weather],
+  maxSteps = 5,
+  callbacks = RunCallbacks(
+    onRetry = proc (attempt, delayMs: int, error: ref ProviderError) =
+      echo "retry ", attempt, " in ", delayMs, "ms",
+    onToolStart = proc (step: int, call: ContentBlock) =
+      echo "calling ", call.name,
+    onToolFinish = proc (step: int, call, output: ContentBlock, durationMs: int) =
+      echo call.name, " finished in ", durationMs, "ms",
+    onStepFinish = proc (step: int, result: StepResult) =
+      echo "step ", step, " used ", result.usage.outputTokens, " output tokens",
+    onFinish = proc (response: ProviderResponse) =
+      echo "run finished with ", response.steps.len, " steps"))
+```
+
+`onRetry` is also covered in [Error Handling](/guides/error-handling/). Combine
+lifecycle callbacks with `trace` when you want both human-readable progress and
+structured spans. See [Lifecycle callbacks](/examples/lifecycle-callbacks/) for
+a runnable example.
+
 ## Trace agents and streams
 
 Use the same callback with an `Agent`, `streamText`, or an agent event stream:

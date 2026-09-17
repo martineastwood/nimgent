@@ -72,6 +72,10 @@ echo response.finishReason
 Return `false` from the callback to cancel. A cancelled or failed run is not
 used as incomplete conversation context in the next request.
 
+For approval dialogs, tool results, and other lifecycle events, use
+`chat.events(...)` instead of `chat.stream(...)`. It works the same way as
+`agent.events(...)` described in [Streaming](/guides/streaming/).
+
 ## Save and restore a conversation
 
 Use `conversationJsonString` to save a conversation, then restore it with the agent

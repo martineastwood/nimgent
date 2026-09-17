@@ -41,6 +41,16 @@ OPENAI_API_KEY=... nim c -r recipe.nim
 `result.value` is a `Recipe`, not a JSON string. nimgent validates the model's
 JSON against the type before returning it.
 
+`ObjectResult` also exposes recovery metadata when you need it:
+
+| Field | Meaning |
+| --- | --- |
+| `repairs` | How many repair turns nimgent requested after validation failures. |
+| `attempts` | Total provider attempts, including retries and repairs. |
+| `locallyRepaired` | Whether the value was recovered from truncated JSON. |
+| `source` | Whether the value came from native output, extracted text, or the submit tool. |
+| `response` | The underlying `ProviderResponse`, including usage and finish reason. |
+
 ## Shape the result
 
 Use ordinary Nim objects, sequences, enums, and nested types to describe the
@@ -162,6 +172,37 @@ let result = generateObject[Recipe](
 Each repair is another model call. The default is `0`, so use repairs when a
 strict schema is more important than the additional latency and cost.
 
+## Handle truncated output
+
+When a response hits `maxTokens` before the JSON is complete, nimgent can try
+to repair the partial value locally. By default it rejects that result:
+
+```nim
+let result = generateObject[Recipe](
+  model,
+  prompt = "Create a detailed lasagna recipe.",
+  maxTokens = 256,
+  truncation = otReject)  # default
+```
+
+Set `truncation = otRepair` when a best-effort value is better than failing
+the whole request:
+
+```nim
+let result = generateObject[Recipe](
+  model,
+  prompt = "Create a detailed lasagna recipe.",
+  maxTokens = 256,
+  truncation = otRepair)
+
+if result.locallyRepaired:
+  echo "Used a repaired partial result."
+```
+
+Check `result.locallyRepaired` when you need to warn the user that the value
+may be incomplete. Increasing `maxTokens` is still the better fix when you
+expect large objects.
+
 If no attempt succeeds, `generateObject` raises `ObjectError`:
 
 ```nim
@@ -206,7 +247,8 @@ validated value. Return `false` from `onPartial` to cancel the stream.
   then consider `maxRepairs` for important responses.
 - **The response is cut off:** increase `maxTokens`. By default, a response
   truncated at the token limit is rejected rather than treated as a complete
-  object.
+  object. Use `truncation = otRepair` when a best-effort partial value is
+  acceptable.
 - **You need an omitted field instead of `null`:** use `jsonOptional`, keeping
   in mind that it may not work with `omNative`.
 
