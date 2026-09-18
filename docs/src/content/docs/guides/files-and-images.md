@@ -31,7 +31,7 @@ echo response.text
 Run it with a path to your PDF:
 
 ```sh
-OPENAI_API_KEY=... nim c -r pdf_question.nim report.pdf
+OPENAI_API_KEY=... nim c -r -d:ssl pdf_question.nim report.pdf
 ```
 
 `fileFromPath` reads the file and attaches it to the message. Pass the file's MIME type so the provider knows how to handle it. Its filename is inferred from the path unless you provide one.

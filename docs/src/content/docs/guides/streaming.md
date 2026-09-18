@@ -34,7 +34,7 @@ echo "Finished: ", response.finishReason
 Save the example as `stream.nim`, then run it with:
 
 ```sh
-OPENAI_API_KEY=... nim c -r stream.nim
+OPENAI_API_KEY=... nim c -r -d:ssl stream.nim
 ```
 
 Return `true` from the callback to continue streaming. `response.text` contains

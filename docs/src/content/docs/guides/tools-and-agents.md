@@ -46,7 +46,7 @@ echo response.text
 Save the example as `weather.nim`, then run it with:
 
 ```sh
-OPENAI_API_KEY=... nim c -r weather.nim
+OPENAI_API_KEY=... nim c -r -d:ssl weather.nim
 ```
 
 The model decides whether to call `get_weather`. When it does, your handler

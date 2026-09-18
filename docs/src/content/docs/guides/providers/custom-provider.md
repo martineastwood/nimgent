@@ -35,7 +35,7 @@ echo generateText(model, prompt = "Say hello.").text
 Run it with:
 
 ```sh
-nim c -r custom_provider.nim
+nim c -r -d:ssl custom_provider.nim
 ```
 
 For a real provider, replace the fixed response with a request to the vendor API. `generateAsync` receives the requested model, messages, system instruction, tools, generation settings, and provider options in `ProviderRequest`.

@@ -32,7 +32,7 @@ echo response.text
 Save the example as `conversation.nim`, then run it with:
 
 ```sh
-OPENAI_API_KEY=... nim c -r conversation.nim
+OPENAI_API_KEY=... nim c -r -d:ssl conversation.nim
 ```
 
 The second call includes the earlier message, so the model can answer "Ada"

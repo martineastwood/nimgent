@@ -24,7 +24,7 @@ Set your API key and run it:
 
 ```sh
 export OPENAI_API_KEY=...
-nim c -r hello.nim
+nim c -r -d:ssl hello.nim
 ```
 
 `openAI(...)` creates a provider, and `.model(...)` selects a provider-specific model ID. The provider checks whether that model is available when you make the request.

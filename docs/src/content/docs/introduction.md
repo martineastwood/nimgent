@@ -18,6 +18,10 @@ nimble install nimgent
 export OPENAI_API_KEY=...
 ```
 
+Compile your programs with `-d:ssl`, which is how Nim includes TLS support for
+HTTPS provider calls. On Linux, install the OpenSSL development headers first
+(`sudo apt install libssl-dev`).
+
 Create `agent.nim`:
 
 ```nim
@@ -39,7 +43,7 @@ echo response.text
 Run it with:
 
 ```sh
-nim c -r agent.nim
+nim c -r -d:ssl agent.nim
 ```
 
 An agent combines a model with instructions, optional tools, and a step limit.

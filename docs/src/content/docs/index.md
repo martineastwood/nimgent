@@ -159,11 +159,11 @@ hero:
     <div>
       <p class="landing-kicker">Start in a few lines</p>
       <h2 id="landing-start-title">Bring your provider. Keep your types.</h2>
-      <p>Install nimgent with Nimble, set a provider key, and compile a small program in the project you want to call from.</p>
+      <p>Install nimgent with Nimble, set a provider key, and compile a small program with -d:ssl in the project you want to call from.</p>
     </div>
     <pre><code><span class="landing-prompt">$</span> nimble install nimgent
 <span class="landing-prompt">$</span> export OPENAI_API_KEY=your-key
-<span class="landing-prompt">$</span> nim c -r agent.nim</code></pre>
+<span class="landing-prompt">$</span> nim c -r -d:ssl agent.nim</code></pre>
   </section>
 
   <p class="landing-footer-link"><a href="/introduction/">Get Started</a> or <a href="https://github.com/martineastwood/nimgent">view nimgent on GitHub</a>.</p>

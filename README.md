@@ -16,6 +16,10 @@ You need Nim 2.0 or later. Install nimgent with Nimble:
 nimble install nimgent
 ```
 
+Compile your programs with `-d:ssl`, which is how Nim includes TLS support for
+HTTPS provider calls. On Linux, install the OpenSSL development headers first
+(`sudo apt install libssl-dev`).
+
 The examples below use OpenAI. Set your API key before running them:
 
 ```sh
@@ -43,7 +47,7 @@ echo response.text
 Compile and run it with:
 
 ```sh
-nim c -r hello.nim
+nim c -r -d:ssl hello.nim
 ```
 
 `response.text` contains the generated text. The response also includes the

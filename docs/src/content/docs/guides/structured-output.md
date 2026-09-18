@@ -35,7 +35,7 @@ for ingredient in result.value.ingredients:
 Save the example as `recipe.nim`, then run it with:
 
 ```sh
-OPENAI_API_KEY=... nim c -r recipe.nim
+OPENAI_API_KEY=... nim c -r -d:ssl recipe.nim
 ```
 
 `result.value` is a `Recipe`, not a JSON string. nimgent validates the model's

@@ -53,7 +53,7 @@ echo answer.text
 Run it with an API key:
 
 ```sh
-OPENAI_API_KEY=... nim c -r answer_from_notes.nim
+OPENAI_API_KEY=... nim c -r -d:ssl answer_from_notes.nim
 ```
 
 The answer is based on the retrieved notes, not on the model's general knowledge.
